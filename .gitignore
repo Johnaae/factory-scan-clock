@@ -4,3 +4,7 @@ scan.db-shm
 scan.db-wal
 .DS_Store
 npm-debug.log*
+.vercel
+.env
+.env*.local
+backups/

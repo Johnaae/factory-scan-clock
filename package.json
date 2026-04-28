@@ -7,7 +7,9 @@
     "dev": "node -r dotenv/config server.js",
     "start": "node server.js",
     "migrate": "node -r dotenv/config scripts/migrate.js",
-    "seed": "node -r dotenv/config scripts/seed.js"
+    "seed": "node -r dotenv/config scripts/seed.js",
+    "backup": "node -r dotenv/config scripts/backup.js",
+    "backup:daily": "node -r dotenv/config scripts/backup.js --daily"
   },
   "keywords": [
     "barcode",
@@ -21,10 +23,11 @@
   },
   "dependencies": {
     "better-sqlite3": "^12.9.0",
+    "connect-pg-simple": "^10.0.0",
+    "dotenv": "^16.5.0",
     "express": "^4.21.2",
     "express-session": "^1.19.0",
-    "dotenv": "^16.5.0",
     "pdfkit": "^0.15.2",
-    "pg": "^8.16.0"
+    "pg": "^8.20.0"
   }
 }

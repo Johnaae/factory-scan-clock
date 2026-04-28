@@ -6,6 +6,8 @@ const path = require('path');
 const crypto = require('crypto');
 const express = require('express');
 const session = require('express-session');
+const pg = require('pg');
+const PgSession = require('connect-pg-simple')(session);
 const Database = require('better-sqlite3');
 const PDFDocument = require('pdfkit');
 
@@ -18,18 +20,45 @@ const app = express();
 if (IS_PROD) {
   app.set('trust proxy', 1);
 }
+
+if (!process.env.DATABASE_URL) {
+  console.error('❌ DATABASE_URL missing');
+  process.exit(1);
+}
+if (!process.env.SESSION_SECRET) {
+  console.error('❌ SESSION_SECRET missing');
+  process.exit(1);
+}
+console.log(`[startup] NODE_ENV=${process.env.NODE_ENV || 'undefined'}`);
+
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
+pool.on('error', (err) => {
+  console.error('[session-store] pool error:', err && err.message ? err.message : err);
+});
+
+const sessionStore = new PgSession({
+  pool: pool,
+  tableName: 'session',
+  createTableIfMissing: true,
+});
+console.log('Session store: Postgres OK');
+
 app.use(express.json({ limit: '32kb' }));
 app.use(
   session({
+    store: sessionStore,
     name: 'factory_scan_sid',
-    secret: process.env.SESSION_SECRET || 'factory-scan-clock-dev-secret-change-me',
+    secret: process.env.SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
       sameSite: 'lax',
       secure: IS_PROD,
-      maxAge: 1000 * 60 * 60 * 12,
+      maxAge: 1000 * 60 * 60 * 24 * 30,
     },
   })
 );
@@ -2885,15 +2914,31 @@ app.use((err, _req, res, _next) => {
   return res.status(500).json({ ok: false, error: 'server', message: 'Unexpected server error.' });
 });
 
-const server = app.listen(PORT, "0.0.0.0", () => {
-  console.log(`factory-scan-clock listening on http://localhost:${PORT}`);
-});
-
-server.on('error', (err) => {
-  if (err && err.code === 'EADDRINUSE') {
-    console.error(`Port ${PORT} is already in use. Set PORT to a free port and try again.`);
+async function startServer() {
+  try {
+    await pool.query('SELECT 1');
+    console.log('Connected to DB: OK');
+  } catch (err) {
+    console.error('Connected to DB: FAILED', err && err.message ? err.message : err);
     process.exit(1);
   }
-  console.error(err);
-  process.exit(1);
-});
+
+  const server = app.listen(PORT, "0.0.0.0", () => {
+    console.log(`factory-scan-clock listening on http://localhost:${PORT}`);
+  });
+
+  server.on('error', (err) => {
+    if (err && err.code === 'EADDRINUSE') {
+      console.error(`Port ${PORT} is already in use. Set PORT to a free port and try again.`);
+      process.exit(1);
+    }
+    console.error(err);
+    process.exit(1);
+  });
+}
+
+if (require.main === module) {
+  void startServer();
+}
+
+module.exports = app;
