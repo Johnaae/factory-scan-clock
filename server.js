@@ -2342,13 +2342,16 @@ app.put('/api/employees/:id', async (req, res) => {
     return res.status(400).json({ ok: false, error: 'validation', message: 'code and name are required.' });
   }
   const hourly_rate = parseHourlyRate(req.body && req.body.hourly_rate);
+  const statusRaw = String((req.body && req.body.status) || '').trim().toUpperCase();
+  const is_active = statusRaw === 'INACTIVE' ? 0 : 1;
 
   const ts = nowIso();
   try {
-    await pool.query(`UPDATE employees SET code = $1, name = $2, hourly_rate = $3, updated_at = $4::timestamptz WHERE id = $5`, [
+    await pool.query(`UPDATE employees SET code = $1, name = $2, hourly_rate = $3, is_active = $4, updated_at = $5::timestamptz WHERE id = $6`, [
       code,
       name,
       hourly_rate,
+      is_active,
       ts,
       id,
     ]);
@@ -2365,6 +2368,7 @@ app.put('/api/employees/:id', async (req, res) => {
   );
   const updated = updatedRes.rows[0];
   res.json({
+    success: true,
     ok: true,
     employee: { ...updated, is_active: !!updated.is_active, hourly_rate: Number(updated.hourly_rate) },
   });

@@ -8,6 +8,7 @@ const modalHint = document.getElementById('modalHint');
 const fCode = document.getElementById('fCode');
 const fName = document.getElementById('fName');
 const fRate = document.getElementById('fRate');
+const fStatus = document.getElementById('fStatus');
 
 const btnAdd = document.getElementById('btnAdd');
 const btnCloseModal = document.getElementById('btnCloseModal');
@@ -106,6 +107,7 @@ function startCreate() {
   fCode.value = '';
   fName.value = '';
   fRate.value = '20';
+  fStatus.value = 'ACTIVE';
   fCode.disabled = false;
   modalHint.textContent = '';
   openModal();
@@ -113,6 +115,7 @@ function startCreate() {
 }
 
 function startEdit(id) {
+  console.log('[admin] Edit clicked for employee id:', id);
   const e = employees.find((x) => x.id === id);
   if (!e) return;
   editingId = id;
@@ -120,6 +123,7 @@ function startEdit(id) {
   fCode.value = e.code;
   fName.value = e.name;
   fRate.value = String(Number.isFinite(Number(e.hourly_rate)) ? Number(e.hourly_rate) : 20);
+  fStatus.value = e.is_active ? 'ACTIVE' : 'INACTIVE';
   fCode.disabled = false;
   modalHint.textContent = '';
   openModal();
@@ -130,6 +134,7 @@ async function save() {
   const code = String(fCode.value || '').trim().replace(/\s+/g, '').toUpperCase();
   const name = String(fName.value || '').trim();
   const hourly_rate = parseRateInput();
+  const status = String(fStatus.value || 'ACTIVE').toUpperCase() === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE';
   if (!code || !name) {
     modalHint.textContent = 'Code and name are required.';
     return;
@@ -142,7 +147,7 @@ async function save() {
       const { res, data } = await apiJson('/api/employees', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code, name, hourly_rate }),
+        body: JSON.stringify({ code, name, hourly_rate, status }),
       });
       if (!res.ok) {
         modalHint.textContent = (data && data.message) || 'Could not create employee.';
@@ -152,15 +157,15 @@ async function save() {
       const { res, data } = await apiJson(`/api/employees/${editingId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code, name, hourly_rate }),
+        body: JSON.stringify({ code, name, hourly_rate, status }),
       });
       if (!res.ok) {
-        modalHint.textContent = (data && data.message) || 'Could not update employee.';
+        modalHint.textContent = (data && data.message) || (data && data.error) || 'Could not update employee.';
         return;
       }
     }
-    closeModal();
     await load();
+    closeModal();
   } finally {
     btnSave.disabled = false;
   }

@@ -109,6 +109,13 @@
             <label for="fRate">Hourly rate (USD)</label>
             <input id="fRate" type="number" inputmode="decimal" min="0" step="0.01" placeholder="20" autocomplete="off" />
           </div>
+          <div class="field retain-focus">
+            <label for="fStatus">Status</label>
+            <select id="fStatus">
+              <option value="ACTIVE">Active</option>
+              <option value="INACTIVE">Inactive</option>
+            </select>
+          </div>
           <div class="toastline" id="modalHint"></div>
         </div>
         <div class="modal-foot">
