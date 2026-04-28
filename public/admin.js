@@ -29,6 +29,16 @@ function escapeHtml(s) {
     .replaceAll("'", '&#039;');
 }
 
+function normalizeEmployee(e) {
+  if (!e) return e;
+  return {
+    ...e,
+    id: Number(e.id),
+    is_active: !!e.is_active,
+    hourly_rate: Number.isFinite(Number(e.hourly_rate)) ? Number(e.hourly_rate) : 20,
+  };
+}
+
 async function apiJson(url, opts) {
   const res = await fetch(url, opts);
   const data = await res.json().catch(() => ({}));
@@ -70,6 +80,7 @@ function render() {
     .map((e) => {
       const st = e.is_active ? '<span class="badge badge-in">Active</span>' : '<span class="badge badge-muted">Inactive</span>';
       const rate = formatMoney(e.hourly_rate != null ? e.hourly_rate : 20);
+      const eid = escapeHtml(String(e.id));
       return `<tr>
         <td><strong>${escapeHtml(e.code)}</strong></td>
         <td>${escapeHtml(e.name)}</td>
@@ -77,9 +88,9 @@ function render() {
         <td>${st}</td>
         <td>
           <div class="toolbar" style="justify-content:flex-start">
-            <button class="btn btn-sm" type="button" data-act="edit" data-id="${e.id}">Edit</button>
-            <button class="btn btn-sm" type="button" data-act="toggle" data-id="${e.id}">${e.is_active ? 'Deactivate' : 'Activate'}</button>
-            <button class="btn btn-danger btn-sm" type="button" data-act="del" data-id="${e.id}">Delete</button>
+            <button class="btn btn-sm edit-employee-btn" type="button" data-id="${eid}" data-employee-id="${eid}">Edit</button>
+            <button class="btn btn-sm" type="button" data-act="toggle" data-id="${eid}">${e.is_active ? 'Deactivate' : 'Activate'}</button>
+            <button class="btn btn-danger btn-sm" type="button" data-act="del" data-id="${eid}">Delete</button>
           </div>
         </td>
       </tr>`;
@@ -96,7 +107,7 @@ async function load() {
     adminHint.textContent = 'Could not load employees.';
     return;
   }
-  employees = data.employees || [];
+  employees = (data.employees || []).map(normalizeEmployee);
   adminHint.textContent = `${employees.length} employee${employees.length === 1 ? '' : 's'} loaded.`;
   render();
 }
@@ -114,11 +125,22 @@ function startCreate() {
   window.setTimeout(() => fCode.focus(), 0);
 }
 
-function startEdit(id) {
-  console.log('[admin] Edit clicked for employee id:', id);
-  const e = employees.find((x) => x.id === id);
-  if (!e) return;
-  editingId = id;
+async function openEmployeeEditModal(rawId) {
+  console.log('Opening edit modal');
+  const idNum = Number(rawId);
+  if (!Number.isFinite(idNum) || idNum <= 0) {
+    return;
+  }
+  let e = employees.find((x) => x.id === idNum);
+  if (!e) {
+    const { res, data } = await apiJson(`/api/employees/${idNum}`);
+    if (!res.ok || !data.employee) {
+      adminHint.textContent = (data && data.message) || 'Could not load employee.';
+      return;
+    }
+    e = normalizeEmployee(data.employee);
+  }
+  editingId = idNum;
   modalTitle.textContent = 'Edit employee';
   fCode.value = e.code;
   fName.value = e.name;
@@ -154,6 +176,7 @@ async function save() {
         return;
       }
     } else {
+      console.log('Saving employee');
       const { res, data } = await apiJson(`/api/employees/${editingId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -163,6 +186,7 @@ async function save() {
         modalHint.textContent = (data && data.message) || (data && data.error) || 'Could not update employee.';
         return;
       }
+      console.log('Employee saved');
     }
     await load();
     closeModal();
@@ -191,13 +215,21 @@ async function delEmp(id) {
   await load();
 }
 
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.edit-employee-btn');
+  if (!btn) return;
+  e.preventDefault();
+  const raw = btn.getAttribute('data-id') || btn.getAttribute('data-employee-id');
+  console.log('Edit clicked', raw);
+  await openEmployeeEditModal(raw);
+});
+
 empBody.addEventListener('click', (e) => {
   const btn = e.target.closest('button[data-act]');
   if (!btn) return;
   const id = Number(btn.getAttribute('data-id'));
   const act = btn.getAttribute('data-act');
   if (!Number.isFinite(id)) return;
-  if (act === 'edit') startEdit(id);
   if (act === 'toggle') void toggleActive(id);
   if (act === 'del') void delEmp(id);
 });

@@ -2296,6 +2296,29 @@ app.get('/api/employees', async (req, res) => {
   });
 });
 
+app.get('/api/employees/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({ ok: false, error: 'invalid_id', message: 'Invalid employee id.' });
+  }
+  const r = await pool.query(
+    'SELECT id, code, name, is_active, hourly_rate, created_at, updated_at FROM employees WHERE id = $1',
+    [id]
+  );
+  if (!r.rows.length) {
+    return res.status(404).json({ ok: false, error: 'not_found', message: 'Employee not found.' });
+  }
+  const e = r.rows[0];
+  return res.json({
+    ok: true,
+    employee: {
+      ...e,
+      is_active: !!e.is_active,
+      hourly_rate: Number.isFinite(Number(e.hourly_rate)) ? Number(e.hourly_rate) : 20,
+    },
+  });
+});
+
 app.post('/api/employees', async (req, res) => {
   const code = normalizeCode(req.body && req.body.code);
   const name = req.body && req.body.name !== undefined ? String(req.body.name).trim() : '';
