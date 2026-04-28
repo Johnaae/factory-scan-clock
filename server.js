@@ -29,7 +29,8 @@ if (!process.env.SESSION_SECRET) {
   console.error('❌ SESSION_SECRET missing');
   process.exit(1);
 }
-console.log(`[startup] NODE_ENV=${process.env.NODE_ENV || 'undefined'}`);
+console.log('ENV:', process.env.NODE_ENV);
+console.log('DB:', !!process.env.DATABASE_URL);
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
@@ -2937,7 +2938,7 @@ async function startServer() {
   });
 }
 
-if (require.main === module) {
+if (process.env.NODE_ENV !== 'production') {
   void startServer();
 }
 
