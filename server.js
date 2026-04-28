@@ -8,10 +8,8 @@ const express = require('express');
 const session = require('express-session');
 const pg = require('pg');
 const PgSession = require('connect-pg-simple')(session);
-const Database = require('better-sqlite3');
 const PDFDocument = require('pdfkit');
 
-const DB_PATH = path.join(__dirname, 'scan.db');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const app = express();
 
@@ -26,15 +24,22 @@ if (!process.env.SESSION_SECRET) {
   process.exit(1);
 }
 
-const pgPool = new pg.Pool({
+const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
 });
-pgPool.on('error', (err) => {
+pool.on('error', (err) => {
   console.error('[session-store] pool error:', err && err.message ? err.message : err);
 });
 
+const pgSessionStore = new PgSession({
+  pool,
+  tableName: 'session',
+  createTableIfMissing: true,
+});
+
 console.log('Session store: Postgres');
+console.log('[boot] session-store:', pgSessionStore && pgSessionStore.constructor ? pgSessionStore.constructor.name : 'missing');
 console.log('NODE_ENV:', process.env.NODE_ENV);
 console.log('Has DB:', Boolean(process.env.DATABASE_URL));
 
@@ -42,28 +47,91 @@ app.use(express.json({ limit: '32kb' }));
 app.use(
   session({
     name: 'factory_scan_sid',
-    store: new PgSession({
-      pool: pgPool,
-      tableName: 'session',
-      createTableIfMissing: true,
-    }),
+    store: pgSessionStore,
     secret: process.env.SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
+      secure: process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL),
       sameSite: 'lax',
       maxAge: 1000 * 60 * 60 * 24 * 30,
     },
   })
 );
 
-const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+/** Same DDL as scripts/migrate.js — Neon Postgres only. */
+const MIGRATION_SQL = `
+CREATE TABLE IF NOT EXISTS employees (
+  id BIGSERIAL PRIMARY KEY,
+  code TEXT UNIQUE NOT NULL,
+  name TEXT NOT NULL,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  hourly_rate NUMERIC(10,2) NOT NULL DEFAULT 20,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
-const MIGRATION_TABLE_NAMES = new Set(['employees', 'scan_logs', 'tanks', 'users']);
+CREATE TABLE IF NOT EXISTS users (
+  id BIGSERIAL PRIMARY KEY,
+  username TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  pin_hash TEXT,
+  role TEXT NOT NULL CHECK (role IN ('MANAGER','KIOSK')),
+  station_name TEXT,
+  area_name TEXT,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS tanks (
+  id BIGSERIAL PRIMARY KEY,
+  tank_number TEXT UNIQUE NOT NULL,
+  description TEXT,
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS scan_logs (
+  id BIGSERIAL PRIMARY KEY,
+  employee_id BIGINT REFERENCES employees(id) ON DELETE SET NULL,
+  employee_code TEXT NOT NULL,
+  employee_name TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('IN','OUT')),
+  note TEXT,
+  note_category TEXT,
+  note_value TEXT,
+  tank_number TEXT,
+  station_name TEXT,
+  area_name TEXT,
+  kiosk_user TEXT,
+  scanned_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_employees_code ON employees(code);
+CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+CREATE INDEX IF NOT EXISTS idx_tanks_tank_number ON tanks(tank_number);
+CREATE INDEX IF NOT EXISTS idx_scan_logs_employee_code ON scan_logs(employee_code);
+CREATE INDEX IF NOT EXISTS idx_scan_logs_scanned_at ON scan_logs(scanned_at);
+CREATE INDEX IF NOT EXISTS idx_scan_logs_tank_number ON scan_logs(tank_number);
+`;
+
+async function runPostgresSchema() {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(MIGRATION_SQL);
+    await client.query('COMMIT');
+    console.log('[migration] Postgres schema ready');
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+}
 
 const ROLE = {
   MANAGER: 'MANAGER',
@@ -120,225 +188,6 @@ function recordPinFailure(ip) {
 function pinRateLimitReset(ip) {
   pinFailTimestampsByIp.delete(ip);
 }
-
-function assertSafeIdent(name) {
-  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(String(name || ''))) {
-    throw new Error(`Unsafe SQL identifier: ${name}`);
-  }
-}
-
-/** @param {string} tableName @param {string} columnName */
-function columnExists(tableName, columnName) {
-  assertSafeIdent(tableName);
-  assertSafeIdent(columnName);
-  if (!MIGRATION_TABLE_NAMES.has(tableName)) {
-    throw new Error(`columnExists: unknown table ${tableName}`);
-  }
-  try {
-    const rows = db.prepare(`PRAGMA table_info(${tableName})`).all();
-    const want = String(columnName).toLowerCase();
-    return rows.some((c) => String(c.name || '').toLowerCase() === want);
-  } catch (e) {
-    console.error(`[migration] columnExists failed for ${tableName}.${columnName}:`, e && e.message);
-    return false;
-  }
-}
-
-/**
- * @param {string} tableName
- * @param {string} columnDefinition e.g. "tank_number TEXT" or "hourly_rate REAL NOT NULL DEFAULT 20"
- */
-function addColumnIfMissing(tableName, columnDefinition) {
-  assertSafeIdent(tableName);
-  if (!MIGRATION_TABLE_NAMES.has(tableName)) {
-    throw new Error(`addColumnIfMissing: unknown table ${tableName}`);
-  }
-  const def = String(columnDefinition).trim();
-  const m = /^([a-zA-Z_][a-zA-Z0-9_]*)\s+(.+)$/s.exec(def);
-  if (!m) {
-    throw new Error(`addColumnIfMissing: bad column definition: ${columnDefinition}`);
-  }
-  const columnName = m[1];
-  const typeAndConstraints = m[2].trim();
-  if (columnExists(tableName, columnName)) {
-    console.log(`[migration] ${tableName}.${columnName} already exists`);
-    return;
-  }
-  const sql = `ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${typeAndConstraints}`;
-  try {
-    db.exec(sql);
-    console.log(`[migration] Added ${tableName}.${columnName}`);
-  } catch (e) {
-    const msg = String((e && e.message) || e || '').toLowerCase();
-    if (msg.includes('duplicate column name')) {
-      console.log(`[migration] ${tableName}.${columnName} already exists (caught duplicate)`);
-      return;
-    }
-    console.error(`[migration] FAILED SQL:\n${sql}`);
-    console.error(`[migration] Error:`, e && e.message);
-    throw e;
-  }
-}
-
-function execMigrationSql(sql, label = 'migration') {
-  try {
-    db.exec(sql);
-  } catch (e) {
-    console.error(`[migration] (${label}) FAILED SQL:\n${sql}`);
-    console.error(`[migration] (${label}) Error:`, e && e.message);
-    throw e;
-  }
-}
-
-/** Base tables only — indexes on optional columns run after addColumnIfMissing (see ensureIndexes). */
-function initSchema() {
-  execMigrationSql(
-    `CREATE TABLE IF NOT EXISTS employees (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      code TEXT UNIQUE NOT NULL,
-      name TEXT NOT NULL,
-      is_active INTEGER NOT NULL DEFAULT 1,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    )`,
-    'initSchema.employees'
-  );
-
-  execMigrationSql(
-    `CREATE TABLE IF NOT EXISTS scan_logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      employee_code TEXT NOT NULL,
-      employee_name TEXT NOT NULL,
-      status TEXT NOT NULL CHECK(status IN ('IN','OUT')),
-      scanned_at TEXT NOT NULL
-    )`,
-    'initSchema.scan_logs_base'
-  );
-
-  execMigrationSql(
-    `CREATE TABLE IF NOT EXISTS tanks (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      tank_number TEXT UNIQUE NOT NULL,
-      description TEXT,
-      status TEXT NOT NULL DEFAULT 'ACTIVE',
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    )`,
-    'initSchema.tanks'
-  );
-
-  execMigrationSql(
-    `CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL,
-      role TEXT NOT NULL CHECK(role IN ('MANAGER','KIOSK')),
-      station_name TEXT,
-      area_name TEXT,
-      is_active INTEGER NOT NULL DEFAULT 1,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    )`,
-    'initSchema.users'
-  );
-}
-
-function migrateEmployeesHourlyRate() {
-  addColumnIfMissing('employees', 'hourly_rate REAL NOT NULL DEFAULT 20');
-  try {
-    db.prepare(`UPDATE employees SET hourly_rate = 20 WHERE hourly_rate IS NULL OR hourly_rate < 0`).run();
-  } catch (e) {
-    console.error('[migration] migrateEmployeesHourlyRate UPDATE failed:', e && e.message);
-    throw e;
-  }
-}
-
-function migrateScanLogsColumns() {
-  addColumnIfMissing('scan_logs', 'employee_id INTEGER');
-  addColumnIfMissing('scan_logs', 'note TEXT');
-  addColumnIfMissing('scan_logs', 'note_category TEXT');
-  addColumnIfMissing('scan_logs', 'note_value TEXT');
-  addColumnIfMissing('scan_logs', 'tank_number TEXT');
-  addColumnIfMissing('scan_logs', 'station_name TEXT');
-  addColumnIfMissing('scan_logs', 'area_name TEXT');
-  addColumnIfMissing('scan_logs', 'kiosk_user TEXT');
-}
-
-function migrateScanLogsNoteCategoryValue() {
-  if (!columnExists('scan_logs', 'note')) return;
-  try {
-    db.prepare(
-      `UPDATE scan_logs SET note_value = note WHERE note_value IS NULL AND note IS NOT NULL AND TRIM(note) != ''`
-    ).run();
-    db.prepare(
-      `UPDATE scan_logs SET note_category = CASE WHEN status = 'OUT' THEN 'REASON' WHEN status = 'IN' THEN 'WORK' ELSE NULL END
-       WHERE note_value IS NOT NULL AND (note_category IS NULL OR TRIM(note_category) = '')`
-    ).run();
-    db.prepare(`UPDATE scan_logs SET note = note_value WHERE note_value IS NOT NULL`).run();
-  } catch (e) {
-    console.error('[migration] migrateScanLogsNoteCategoryValue UPDATE failed:', e && e.message);
-    throw e;
-  }
-}
-
-function migrateScanLogsEmployeeIdBackfill() {
-  if (!columnExists('scan_logs', 'employee_id')) return;
-  try {
-    db.prepare(
-      `UPDATE scan_logs SET employee_id = (SELECT id FROM employees WHERE employees.code = scan_logs.employee_code)
-       WHERE employee_id IS NULL`
-    ).run();
-  } catch (e) {
-    console.error('[migration] migrateScanLogsEmployeeIdBackfill failed:', e && e.message);
-    throw e;
-  }
-}
-
-function migrateUsersPinHash() {
-  addColumnIfMissing('users', 'pin_hash TEXT');
-}
-
-function ensureIndexes() {
-  const statements = [
-    ['idx_employees_code', `CREATE INDEX IF NOT EXISTS idx_employees_code ON employees(code)`],
-    ['idx_users_username', `CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)`],
-    ['idx_scan_logs_employee_code', `CREATE INDEX IF NOT EXISTS idx_scan_logs_employee_code ON scan_logs(employee_code)`],
-    ['idx_scan_logs_scanned_at', `CREATE INDEX IF NOT EXISTS idx_scan_logs_scanned_at ON scan_logs(scanned_at)`],
-  ];
-  for (const [label, sql] of statements) {
-    try {
-      db.exec(sql);
-      console.log(`[migration] Index ready: ${label}`);
-    } catch (e) {
-      console.error(`[migration] Index (${label}) FAILED SQL:\n${sql}`);
-      console.error(`[migration] Error:`, e && e.message);
-      throw e;
-    }
-  }
-  if (columnExists('scan_logs', 'tank_number')) {
-    const sql = `CREATE INDEX IF NOT EXISTS idx_scan_logs_tank_number ON scan_logs(tank_number)`;
-    try {
-      db.exec(sql);
-      console.log('[migration] Index ready: idx_scan_logs_tank_number');
-    } catch (e) {
-      console.error(`[migration] Index (idx_scan_logs_tank_number) FAILED SQL:\n${sql}`);
-      console.error(`[migration] Error:`, e && e.message);
-      throw e;
-    }
-  } else {
-    console.log('[migration] skip idx_scan_logs_tank_number (scan_logs.tank_number not present)');
-  }
-  const tanksIdx = `CREATE INDEX IF NOT EXISTS idx_tanks_tank_number ON tanks(tank_number)`;
-  try {
-    db.exec(tanksIdx);
-    console.log('[migration] Index ready: idx_tanks_tank_number');
-  } catch (e) {
-    console.error(`[migration] Index (idx_tanks_tank_number) FAILED SQL:\n${tanksIdx}`);
-    console.error(`[migration] Error:`, e && e.message);
-    throw e;
-  }
-}
-
 
 function nowIso() {
   return new Date().toISOString();
@@ -655,14 +504,10 @@ function parseHourlyRate(raw) {
   return Math.round(n * 100) / 100;
 }
 
-function seedIfEmpty() {
-  const row = db.prepare('SELECT COUNT(*) AS c FROM employees').get();
-  if (row.c > 0) return;
+async function seedIfEmpty() {
+  const { rows } = await pool.query('SELECT COUNT(*)::int AS c FROM employees');
+  if (rows[0].c > 0) return;
 
-  const insert = db.prepare(`
-    INSERT INTO employees (code, name, is_active, hourly_rate, created_at, updated_at)
-    VALUES (@code, @name, 1, 20, @created_at, @updated_at)
-  `);
   const ts = nowIso();
   const seeds = [
     ['EMP001', 'John Carter'],
@@ -672,21 +517,17 @@ function seedIfEmpty() {
     ['EMP005', 'Chris Miller'],
     ['EMP006', 'Ethan Scott'],
   ];
-  const tx = db.transaction(() => {
-    for (const [code, name] of seeds) {
-      insert.run({ code, name, created_at: ts, updated_at: ts });
-    }
-  });
-  tx();
+  for (const [code, name] of seeds) {
+    await pool.query(
+      `INSERT INTO employees (code, name, is_active, hourly_rate, created_at, updated_at)
+       VALUES ($1, $2, 1, 20, $3::timestamptz, $4::timestamptz)`,
+      [code, name, ts, ts]
+    );
+  }
 }
 
-function seedDefaultUsers() {
+async function seedDefaultUsers() {
   const ts = nowIso();
-  const upsert = db.prepare(`
-    INSERT INTO users (username, password_hash, pin_hash, role, station_name, area_name, is_active, created_at, updated_at)
-    VALUES (@username, @password_hash, @pin_hash, @role, @station_name, @area_name, 1, @created_at, @updated_at)
-    ON CONFLICT(username) DO NOTHING
-  `);
   const seeds = [
     {
       username: 'manager',
@@ -729,97 +570,92 @@ function seedDefaultUsers() {
       updated_at: ts,
     },
   ];
-  const tx = db.transaction(() => {
-    for (const u of seeds) upsert.run(u);
-  });
-  tx();
+  for (const u of seeds) {
+    await pool.query(
+      `INSERT INTO users (username, password_hash, pin_hash, role, station_name, area_name, is_active, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, 1, $7::timestamptz, $8::timestamptz)
+       ON CONFLICT (username) DO NOTHING`,
+      [
+        u.username,
+        u.password_hash,
+        u.pin_hash,
+        u.role,
+        u.station_name,
+        u.area_name,
+        u.created_at,
+        u.updated_at,
+      ]
+    );
+  }
 }
 
 /** Existing databases: fill pin_hash only when missing (does not overwrite manager-set PINs). */
-function ensureKioskDefaultPins() {
+async function ensureKioskDefaultPins() {
   const ts = nowIso();
-  const stmt = db.prepare(
-    `UPDATE users SET pin_hash = ?, updated_at = ? WHERE username = ? AND (pin_hash IS NULL OR TRIM(IFNULL(pin_hash, '')) = '')`
-  );
-  const tx = db.transaction(() => {
-    for (const [uname, pin] of Object.entries(DEFAULT_KIOSK_PINS)) {
-      stmt.run(hashPassword(pin), ts, uname);
-    }
-  });
-  tx();
-}
-
-function runSchemaMigrationsSafely() {
-  const steps = [
-    ['initSchema', initSchema],
-    ['migrateEmployeesHourlyRate', migrateEmployeesHourlyRate],
-    ['migrateScanLogsColumns', migrateScanLogsColumns],
-    ['migrateScanLogsNoteCategoryValue', migrateScanLogsNoteCategoryValue],
-    ['migrateScanLogsEmployeeIdBackfill', migrateScanLogsEmployeeIdBackfill],
-    ['migrateUsersPinHash', migrateUsersPinHash],
-    ['ensureIndexes', ensureIndexes],
-  ];
-  for (const [name, fn] of steps) {
-    try {
-      console.log(`[migration] --- ${name} ---`);
-      fn();
-    } catch (e) {
-      console.error(`[migration] Step "${name}" failed:`, e && e.message);
-      throw e;
-    }
+  for (const [uname, pin] of Object.entries(DEFAULT_KIOSK_PINS)) {
+    await pool.query(
+      `UPDATE users SET pin_hash = $1, updated_at = $2::timestamptz
+       WHERE username = $3 AND (pin_hash IS NULL OR TRIM(COALESCE(pin_hash, '')) = '')`,
+      [hashPassword(pin), ts, uname]
+    );
   }
-  console.log('[migration] All schema steps completed.');
 }
 
-runSchemaMigrationsSafely();
-seedIfEmpty();
-seedDefaultUsers();
-ensureKioskDefaultPins();
+async function initializeDatabase() {
+  await runPostgresSchema();
+  await seedIfEmpty();
+  await seedDefaultUsers();
+  await ensureKioskDefaultPins();
+  console.log('[boot] database seed complete');
+}
 
-function getEmployeeByCode(code) {
+const dbReady = initializeDatabase();
+
+async function getEmployeeByCode(code) {
   const n = normalizeCode(code);
   if (!n) return null;
-  /** Case/space tolerant without COLLATE NOCASE (avoids SQLite build quirks). */
-  return db
-    .prepare(
-      `SELECT id, code, name, is_active, hourly_rate, created_at, updated_at
-       FROM employees
-       WHERE REPLACE(UPPER(TRIM(IFNULL(code, ''))), ' ', '') = ?`
-    )
-    .get(n);
+  const { rows } = await pool.query(
+    `SELECT id, code, name, is_active, hourly_rate, created_at, updated_at
+     FROM employees
+     WHERE REPLACE(UPPER(TRIM(COALESCE(code, ''))), ' ', '') = $1`,
+    [n]
+  );
+  return rows[0] || null;
 }
 
-function getUserByUsername(username) {
+async function getUserByUsername(username) {
   const u = String(username || '').trim().toLowerCase();
   if (!u) return null;
-  return db
-    .prepare(
-      `SELECT id, username, password_hash, pin_hash, role, station_name, area_name, is_active
-       FROM users WHERE LOWER(TRIM(username)) = ? LIMIT 1`
-    )
-    .get(u);
+  const { rows } = await pool.query(
+    `SELECT id, username, password_hash, pin_hash, role, station_name, area_name, is_active
+     FROM users WHERE LOWER(TRIM(username)) = $1 LIMIT 1`,
+    [u]
+  );
+  return rows[0] || null;
 }
 
-function getTankByNumber(tankNumber) {
-  return db
-    .prepare(`SELECT id, tank_number, description, status, created_at, updated_at FROM tanks WHERE tank_number = ?`)
-    .get(tankNumber);
+async function getTankByNumber(tankNumber) {
+  const { rows } = await pool.query(
+    `SELECT id, tank_number, description, status, created_at, updated_at FROM tanks WHERE tank_number = $1`,
+    [tankNumber]
+  );
+  return rows[0] || null;
 }
 
-function ensureTankExists(rawTankNumber) {
+async function ensureTankExists(rawTankNumber) {
   const tankNumber = normalizeTankNumber(rawTankNumber);
   if (!tankNumber) return null;
-  const existing = getTankByNumber(tankNumber);
+  let existing = await getTankByNumber(tankNumber);
   if (existing) return existing;
   const ts = nowIso();
   try {
-    db.prepare(`INSERT INTO tanks (tank_number, description, status, created_at, updated_at) VALUES (?, '', 'ACTIVE', ?, ?)`).run(
-      tankNumber,
-      ts,
-      ts
+    await pool.query(
+      `INSERT INTO tanks (tank_number, description, status, created_at, updated_at)
+       VALUES ($1, '', 'ACTIVE', $2::timestamptz, $3::timestamptz)`,
+      [tankNumber, ts, ts]
     );
   } catch {
-    // race-safe: ignore and fetch
+    /* race-safe */
   }
   return getTankByNumber(tankNumber);
 }
@@ -862,32 +698,37 @@ function isAllEmployeesParam(raw) {
 }
 
 /** @param {{ scope: string, start?: string, end?: string, employee?: string }} q */
-function queryScanLogsForExport(q) {
+async function queryScanLogsForExport(q) {
   const scope = String(q.scope || '').toLowerCase();
   let sql = `SELECT id, employee_id, employee_code, employee_name, status, scanned_at, note, note_category, note_value, tank_number, station_name, area_name, kiosk_user FROM scan_logs WHERE 1=1`;
   const params = [];
+  let p = 1;
 
   if (scope === 'today') {
     const day = localDateString();
     const b = startEndOfLocalDay(day);
     if (!b) return [];
-    sql += ` AND scanned_at >= ? AND scanned_at <= ?`;
+    sql += ` AND scanned_at >= $${p} AND scanned_at <= $${p + 1}`;
     params.push(b.startIso, b.endIso);
+    p += 2;
   } else if (scope === 'range') {
     const sb = startEndOfLocalDay(q.start || '');
     const eb = startEndOfLocalDay(q.end || '');
     if (!sb || !eb) return [];
-    sql += ` AND scanned_at >= ? AND scanned_at <= ?`;
+    sql += ` AND scanned_at >= $${p} AND scanned_at <= $${p + 1}`;
     params.push(sb.startIso, eb.endIso);
+    p += 2;
   }
 
   if (!isAllEmployeesParam(q.employee)) {
-    sql += ` AND employee_code = ?`;
+    sql += ` AND employee_code = $${p}`;
     params.push(normalizeCode(q.employee));
+    p += 1;
   }
 
   sql += ` ORDER BY scanned_at ASC, id ASC`;
-  return db.prepare(sql).all(...params);
+  const { rows } = await pool.query(sql, params);
+  return rows;
 }
 
 /**
@@ -961,23 +802,25 @@ function scopeDescription(scope, start, end) {
 /**
  * Unified payroll object for export + dashboard daily API compatibility.
  */
-function computePayrollForExport(scope, startStr, endStr, employeeRaw) {
+async function computePayrollForExport(scope, startStr, endStr, employeeRaw) {
   const allEmp = isAllEmployeesParam(employeeRaw);
   let employeesList;
   if (allEmp) {
-    employeesList = db
-      .prepare(`SELECT id, code, name, is_active, hourly_rate FROM employees ORDER BY name COLLATE NOCASE ASC`)
-      .all();
+    const { rows } = await pool.query(
+      `SELECT id, code, name, is_active, hourly_rate FROM employees ORDER BY LOWER(name) ASC`
+    );
+    employeesList = rows;
   } else {
     const code = normalizeCode(employeeRaw);
-    const row = db
-      .prepare(`SELECT id, code, name, is_active, hourly_rate FROM employees WHERE code = ?`)
-      .get(code);
-    if (!row) return null;
-    employeesList = [row];
+    const { rows } = await pool.query(
+      `SELECT id, code, name, is_active, hourly_rate FROM employees WHERE code = $1`,
+      [code]
+    );
+    if (!rows.length) return null;
+    employeesList = rows;
   }
 
-  const logsAll = queryScanLogsForExport({
+  const logsAll = await queryScanLogsForExport({
     scope,
     start: startStr,
     end: endStr,
@@ -1019,22 +862,23 @@ function computePayrollForExport(scope, startStr, endStr, employeeRaw) {
   };
 }
 
-function computePayrollForDate(yyyyMmDd) {
+async function computePayrollForDate(yyyyMmDd) {
   const bounds = startEndOfLocalDay(yyyyMmDd);
   if (!bounds) return null;
 
-  const employees = db
-    .prepare(`SELECT id, code, name, is_active, hourly_rate FROM employees ORDER BY name COLLATE NOCASE ASC`)
-    .all();
+  const emRes = await pool.query(
+    `SELECT id, code, name, is_active, hourly_rate FROM employees ORDER BY LOWER(name) ASC`
+  );
+  const employees = emRes.rows;
 
-  const logs = db
-    .prepare(
-      `SELECT employee_code, employee_name, status, scanned_at, note, note_category, note_value
-       FROM scan_logs
-       WHERE scanned_at >= ? AND scanned_at <= ?
-       ORDER BY scanned_at ASC, id ASC`
-    )
-    .all(bounds.startIso, bounds.endIso);
+  const logRes = await pool.query(
+    `SELECT employee_code, employee_name, status, scanned_at, note, note_category, note_value
+     FROM scan_logs
+     WHERE scanned_at >= $1 AND scanned_at <= $2
+     ORDER BY scanned_at ASC, id ASC`,
+    [bounds.startIso, bounds.endIso]
+  );
+  const logs = logRes.rows;
 
   const agg = computePayrollRowsFromLogs(employees, logs);
   return {
@@ -1579,31 +1423,30 @@ function buildUnifiedExportPdfBuffer(payroll) {
   });
 }
 
-function getLatestLogForCode(code) {
+async function getLatestLogForCode(code) {
   const n = normalizeCode(code);
   if (!n) return null;
-  return db
-    .prepare(
-      `SELECT id, employee_code, employee_name, status, scanned_at, tank_number
-       FROM scan_logs
-       WHERE REPLACE(UPPER(TRIM(IFNULL(employee_code, ''))), ' ', '') = ?
-       ORDER BY scanned_at DESC, id DESC
-       LIMIT 1`
-    )
-    .get(n);
+  const { rows } = await pool.query(
+    `SELECT id, employee_code, employee_name, status, scanned_at, tank_number
+     FROM scan_logs
+     WHERE REPLACE(UPPER(TRIM(COALESCE(employee_code, ''))), ' ', '') = $1
+     ORDER BY scanned_at DESC, id DESC
+     LIMIT 1`,
+    [n]
+  );
+  return rows[0] || null;
 }
 
-function getCurrentActiveInSessionByCode(code) {
+async function getCurrentActiveInSessionByCode(code) {
   const n = normalizeCode(code);
   if (!n) return null;
-  const rows = db
-    .prepare(
-      `SELECT id, status, scanned_at, note_value, note, tank_number
-       FROM scan_logs
-       WHERE REPLACE(UPPER(TRIM(IFNULL(employee_code, ''))), ' ', '') = ?
-       ORDER BY scanned_at DESC, id DESC`
-    )
-    .all(n);
+  const { rows } = await pool.query(
+    `SELECT id, status, scanned_at, note_value, note, tank_number
+     FROM scan_logs
+     WHERE REPLACE(UPPER(TRIM(COALESCE(employee_code, ''))), ' ', '') = $1
+     ORDER BY scanned_at DESC, id DESC`,
+    [n]
+  );
   let seenOut = false;
   for (const r of rows) {
     if (r.status === 'OUT') {
@@ -1665,19 +1508,29 @@ function requireRoles(allowedRoles) {
 const requireManager = requireRoles([ROLE.MANAGER]);
 const requireScanRole = requireRoles([ROLE.MANAGER, ROLE.KIOSK]);
 
+app.use(async (req, res, next) => {
+  try {
+    await dbReady;
+    next();
+  } catch (err) {
+    console.error('[boot] database unavailable:', err);
+    res.status(503).json({ ok: false, error: 'database_unavailable', message: 'Database initialization failed.' });
+  }
+});
+
 app.get('/api/auth/me', (req, res) => {
   const auth = currentAuthFromSession(req);
   if (!auth) return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Login required.' });
   return res.json({ ok: true, user: auth });
 });
 
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
   const username = String(req.body && req.body.username ? req.body.username : '').trim().toLowerCase();
   const password = String(req.body && req.body.password ? req.body.password : '');
   if (!username || !password) {
     return res.status(400).json({ ok: false, error: 'validation', message: 'username and password are required.' });
   }
-  const user = getUserByUsername(username);
+  const user = await getUserByUsername(username);
   if (!user || !user.is_active) {
     return res.status(401).json({ ok: false, error: 'invalid_credentials', message: 'Invalid username or password.' });
   }
@@ -1702,7 +1555,7 @@ app.post('/api/auth/login', (req, res) => {
 /**
  * Kiosk quick login: area + 4–6 digit PIN (stored hashed). Rate-limited on failures per IP.
  */
-app.post('/api/auth/login-kiosk-pin', (req, res) => {
+app.post('/api/auth/login-kiosk-pin', async (req, res) => {
   const ip = clientIp(req);
   if (!pinRateLimitAllow(ip)) {
     return res
@@ -1716,7 +1569,7 @@ app.post('/api/auth/login-kiosk-pin', (req, res) => {
     recordPinFailure(ip);
     return res.status(400).json({ ok: false, error: 'validation', message: 'Select an area and enter a 4–6 digit PIN.' });
   }
-  const user = getUserByUsername(username);
+  const user = await getUserByUsername(username);
   if (!user || !user.is_active || String(user.role).toUpperCase() !== ROLE.KIOSK) {
     recordPinFailure(ip);
     return res.status(401).json({ ok: false, error: 'invalid_credentials', message: 'Incorrect PIN.' });
@@ -1779,7 +1632,7 @@ app.use((req, res, next) => {
 });
 
 /** Kiosk GET employee — JSON only; registered with other /api routes (not only before static). */
-function handleKioskEmployeeLookup(req, res) {
+async function handleKioskEmployeeLookup(req, res) {
   try {
     const rawParam = req.params && req.params.code != null ? String(req.params.code) : '';
     const code = normalizeCode(rawParam);
@@ -1792,7 +1645,7 @@ function handleKioskEmployeeLookup(req, res) {
       });
     }
 
-    const employee = getEmployeeByCode(code);
+    const employee = await getEmployeeByCode(code);
     if (!employee) {
       console.log('[kiosk lookup] employee not found for:', code);
       return res.status(404).json({
@@ -1811,7 +1664,7 @@ function handleKioskEmployeeLookup(req, res) {
       });
     }
 
-    const latest = getLatestLogForCode(code);
+    const latest = await getLatestLogForCode(code);
     const next_status = nextStatusFromLatest(latest);
     let current_status = 'OUT';
     if (latest && latest.status) {
@@ -1823,7 +1676,7 @@ function handleKioskEmployeeLookup(req, res) {
     if (current_status === 'IN' && latest && latest.tank_number != null && String(latest.tank_number).trim() !== '') {
       active_tank_number = String(latest.tank_number).trim();
     } else {
-      const activeIn = getCurrentActiveInSessionByCode(code);
+      const activeIn = await getCurrentActiveInSessionByCode(code);
       if (
         activeIn &&
         activeIn.status &&
@@ -1862,13 +1715,13 @@ function handleKioskEmployeeLookup(req, res) {
 app.get('/api/kiosk/employee/:code', handleKioskEmployeeLookup);
 console.log('[kiosk] registered GET /api/kiosk/employee/:code');
 
-app.post('/api/scan', (req, res) => {
+app.post('/api/scan', async (req, res) => {
   const code = normalizeCode(req.body && req.body.code);
   if (!code) {
     return res.status(400).json({ ok: false, error: 'invalid_code', message: 'Missing or empty barcode.' });
   }
 
-  const employee = getEmployeeByCode(code);
+  const employee = await getEmployeeByCode(code);
   if (!employee) {
     return res.status(404).json({ ok: false, error: 'unknown_employee', message: 'Unknown barcode.' });
   }
@@ -1876,36 +1729,36 @@ app.post('/api/scan', (req, res) => {
     return res.status(403).json({ ok: false, error: 'inactive_employee', message: 'Employee is inactive.' });
   }
 
-  const latest = getLatestLogForCode(code);
+  const latest = await getLatestLogForCode(code);
   const status = nextStatusFromLatest(latest);
   const scannedAt = nowIso();
 
   /** Notes are set via PATCH after the modal (WORK on IN, REASON on OUT). */
-  const info = db
-    .prepare(
-      `INSERT INTO scan_logs (employee_code, employee_name, employee_id, status, scanned_at, note, note_category, note_value, tank_number)
-       VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)`
-    )
-    .run(code, employee.name, employee.id, status, scannedAt);
+  const ins = await pool.query(
+    `INSERT INTO scan_logs (employee_code, employee_name, employee_id, status, scanned_at, note, note_category, note_value, tank_number)
+     VALUES ($1, $2, $3, $4, $5::timestamptz, NULL, NULL, NULL, NULL)
+     RETURNING id`,
+    [code, employee.name, employee.id, status, scannedAt]
+  );
 
   return res.json({
     ok: true,
     employee: { id: employee.id, code: employee.code, name: employee.name },
     status,
     scanned_at: scannedAt,
-    log_id: info.lastInsertRowid,
+    log_id: ins.rows[0].id,
   });
 });
 
-app.post('/api/scan/resolve', (req, res) => {
+app.post('/api/scan/resolve', async (req, res) => {
   const code = normalizeCode(req.body && req.body.code);
   if (!code) return res.status(400).json({ ok: false, error: 'invalid_code', message: 'Missing or empty barcode.' });
-  const employee = getEmployeeByCode(code);
+  const employee = await getEmployeeByCode(code);
   if (!employee) return res.status(404).json({ ok: false, error: 'unknown_employee', message: 'Unknown barcode.' });
   if (!employee.is_active) return res.status(403).json({ ok: false, error: 'inactive_employee', message: 'Employee is inactive.' });
-  const latest = getLatestLogForCode(code);
+  const latest = await getLatestLogForCode(code);
   const status = nextStatusFromLatest(latest);
-  const activeIn = getCurrentActiveInSessionByCode(code);
+  const activeIn = await getCurrentActiveInSessionByCode(code);
   res.json({
     ok: true,
     employee: { id: employee.id, code: employee.code, name: employee.name },
@@ -1914,7 +1767,7 @@ app.post('/api/scan/resolve', (req, res) => {
   });
 });
 
-function postScanRecord(req, res) {
+async function postScanRecord(req, res) {
   const auth = req.auth || currentAuthFromSession(req) || null;
   const code = normalizeCode(req.body && req.body.employee_code);
   const status = String((req.body && req.body.status) || '').toUpperCase();
@@ -1925,11 +1778,11 @@ function postScanRecord(req, res) {
   if (status !== 'IN' && status !== 'OUT') {
     return res.status(400).json({ ok: false, error: 'validation', message: 'status must be IN or OUT.' });
   }
-  const employee = getEmployeeByCode(code);
+  const employee = await getEmployeeByCode(code);
   if (!employee) return res.status(404).json({ ok: false, error: 'unknown_employee', message: 'Unknown employee.' });
   if (!employee.is_active) return res.status(403).json({ ok: false, error: 'inactive_employee', message: 'Employee is inactive.' });
 
-  const latest = getLatestLogForCode(code);
+  const latest = await getLatestLogForCode(code);
   const expected = nextStatusFromLatest(latest);
   if (expected !== status) {
     return res.status(409).json({ ok: false, error: 'status_mismatch', message: `Expected ${expected} for this employee.` });
@@ -1949,22 +1802,35 @@ function postScanRecord(req, res) {
     }
   }
 
-  const activeIn = getCurrentActiveInSessionByCode(code);
+  const activeIn = await getCurrentActiveInSessionByCode(code);
   const resolvedTank = status === 'IN' ? tankRaw : tankRaw || (activeIn && activeIn.tank_number ? normalizeTankNumber(activeIn.tank_number) : null);
   const stationName = auth && auth.role === ROLE.KIOSK ? auth.station_name || null : null;
   const areaName = auth && auth.role === ROLE.KIOSK ? auth.area_name || null : null;
   const kioskUser = auth && auth.role === ROLE.KIOSK ? auth.username || null : null;
-  if (resolvedTank) ensureTankExists(resolvedTank);
+  if (resolvedTank) await ensureTankExists(resolvedTank);
   const scannedAt = nowIso();
-  const info = db
-    .prepare(
-      `INSERT INTO scan_logs (employee_code, employee_name, employee_id, status, scanned_at, note, note_category, note_value, tank_number, station_name, area_name, kiosk_user)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    )
-    .run(code, employee.name, employee.id, status, scannedAt, noteValue, noteCategory, noteValue, resolvedTank, stationName, areaName, kioskUser);
+  const ins = await pool.query(
+    `INSERT INTO scan_logs (employee_code, employee_name, employee_id, status, scanned_at, note, note_category, note_value, tank_number, station_name, area_name, kiosk_user)
+     VALUES ($1, $2, $3, $4, $5::timestamptz, $6, $7, $8, $9, $10, $11, $12)
+     RETURNING id`,
+    [
+      code,
+      employee.name,
+      employee.id,
+      status,
+      scannedAt,
+      noteValue,
+      noteCategory,
+      noteValue,
+      resolvedTank,
+      stationName,
+      areaName,
+      kioskUser,
+    ]
+  );
   res.json({
     ok: true,
-    log_id: info.lastInsertRowid,
+    log_id: ins.rows[0].id,
     employee: { id: employee.id, code: employee.code, name: employee.name },
     status,
     note_category: noteCategory,
@@ -1981,60 +1847,58 @@ app.post('/api/scan/record', postScanRecord);
 /** Kiosk multi-step flow: same body as /api/scan/record (single INSERT when all fields collected). */
 app.post('/api/kiosk/complete-scan', postScanRecord);
 
-app.get('/api/kiosk/status', (_req, res) => {
+app.get('/api/kiosk/status', async (_req, res) => {
   try {
-    const rows = db
-      .prepare(
-        `SELECT
-           e.code AS employee_code,
-           e.name AS employee_name,
-           e.is_active AS is_active,
-           COALESCE((
-             SELECT l.status
-             FROM scan_logs l
-             WHERE REPLACE(UPPER(TRIM(IFNULL(l.employee_code, ''))), ' ', '') = REPLACE(UPPER(TRIM(IFNULL(e.code, ''))), ' ', '')
-             ORDER BY l.scanned_at DESC, l.id DESC
-             LIMIT 1
-           ), 'OUT') AS status,
-           (
-             SELECT COALESCE(NULLIF(TRIM(l.note_value), ''), NULLIF(TRIM(l.note), ''))
-             FROM scan_logs l
-             WHERE REPLACE(UPPER(TRIM(IFNULL(l.employee_code, ''))), ' ', '') = REPLACE(UPPER(TRIM(IFNULL(e.code, ''))), ' ', '')
-             ORDER BY l.scanned_at DESC, l.id DESC
-             LIMIT 1
-           ) AS note_value,
-           (
-             SELECT l.tank_number
-             FROM scan_logs l
-             WHERE REPLACE(UPPER(TRIM(IFNULL(l.employee_code, ''))), ' ', '') = REPLACE(UPPER(TRIM(IFNULL(e.code, ''))), ' ', '')
-             ORDER BY l.scanned_at DESC, l.id DESC
-             LIMIT 1
-           ) AS tank_number,
-           (
-             SELECT l.area_name
-             FROM scan_logs l
-             WHERE REPLACE(UPPER(TRIM(IFNULL(l.employee_code, ''))), ' ', '') = REPLACE(UPPER(TRIM(IFNULL(e.code, ''))), ' ', '')
-             ORDER BY l.scanned_at DESC, l.id DESC
-             LIMIT 1
-           ) AS area_name,
-           (
-             SELECT l.station_name
-             FROM scan_logs l
-             WHERE REPLACE(UPPER(TRIM(IFNULL(l.employee_code, ''))), ' ', '') = REPLACE(UPPER(TRIM(IFNULL(e.code, ''))), ' ', '')
-             ORDER BY l.scanned_at DESC, l.id DESC
-             LIMIT 1
-           ) AS station_name,
-           (
-             SELECT l.scanned_at
-             FROM scan_logs l
-             WHERE REPLACE(UPPER(TRIM(IFNULL(l.employee_code, ''))), ' ', '') = REPLACE(UPPER(TRIM(IFNULL(e.code, ''))), ' ', '')
-             ORDER BY l.scanned_at DESC, l.id DESC
-             LIMIT 1
-           ) AS scanned_at
-         FROM employees e
-         ORDER BY e.name COLLATE NOCASE ASC`
-      )
-      .all();
+    const { rows } = await pool.query(
+      `SELECT
+         e.code AS employee_code,
+         e.name AS employee_name,
+         e.is_active AS is_active,
+         COALESCE((
+           SELECT l.status
+           FROM scan_logs l
+           WHERE REPLACE(UPPER(TRIM(COALESCE(l.employee_code, ''))), ' ', '') = REPLACE(UPPER(TRIM(COALESCE(e.code, ''))), ' ', '')
+           ORDER BY l.scanned_at DESC, l.id DESC
+           LIMIT 1
+         ), 'OUT') AS status,
+         (
+           SELECT COALESCE(NULLIF(TRIM(l.note_value), ''), NULLIF(TRIM(l.note), ''))
+           FROM scan_logs l
+           WHERE REPLACE(UPPER(TRIM(COALESCE(l.employee_code, ''))), ' ', '') = REPLACE(UPPER(TRIM(COALESCE(e.code, ''))), ' ', '')
+           ORDER BY l.scanned_at DESC, l.id DESC
+           LIMIT 1
+         ) AS note_value,
+         (
+           SELECT l.tank_number
+           FROM scan_logs l
+           WHERE REPLACE(UPPER(TRIM(COALESCE(l.employee_code, ''))), ' ', '') = REPLACE(UPPER(TRIM(COALESCE(e.code, ''))), ' ', '')
+           ORDER BY l.scanned_at DESC, l.id DESC
+           LIMIT 1
+         ) AS tank_number,
+         (
+           SELECT l.area_name
+           FROM scan_logs l
+           WHERE REPLACE(UPPER(TRIM(COALESCE(l.employee_code, ''))), ' ', '') = REPLACE(UPPER(TRIM(COALESCE(e.code, ''))), ' ', '')
+           ORDER BY l.scanned_at DESC, l.id DESC
+           LIMIT 1
+         ) AS area_name,
+         (
+           SELECT l.station_name
+           FROM scan_logs l
+           WHERE REPLACE(UPPER(TRIM(COALESCE(l.employee_code, ''))), ' ', '') = REPLACE(UPPER(TRIM(COALESCE(e.code, ''))), ' ', '')
+           ORDER BY l.scanned_at DESC, l.id DESC
+           LIMIT 1
+         ) AS station_name,
+         (
+           SELECT l.scanned_at
+           FROM scan_logs l
+           WHERE REPLACE(UPPER(TRIM(COALESCE(l.employee_code, ''))), ' ', '') = REPLACE(UPPER(TRIM(COALESCE(e.code, ''))), ' ', '')
+           ORDER BY l.scanned_at DESC, l.id DESC
+           LIMIT 1
+         ) AS scanned_at
+       FROM employees e
+       ORDER BY LOWER(e.name) ASC`
+    );
 
     return res.json({
       ok: true,
@@ -2056,12 +1920,13 @@ app.get('/api/kiosk/status', (_req, res) => {
   }
 });
 
-app.patch('/api/scan_logs/:id', (req, res) => {
+app.patch('/api/scan_logs/:id', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) {
     return res.status(400).json({ ok: false, error: 'invalid_id', message: 'Invalid log id.' });
   }
-  const row = db.prepare(`SELECT id, status FROM scan_logs WHERE id = ?`).get(id);
+  const sel = await pool.query(`SELECT id, status FROM scan_logs WHERE id = $1`, [id]);
+  const row = sel.rows[0];
   if (!row) {
     return res.status(404).json({ ok: false, error: 'not_found', message: 'Log row not found.' });
   }
@@ -2083,7 +1948,7 @@ app.patch('/api/scan_logs/:id', (req, res) => {
 
   if (hasNotePayload) {
     if (cat == null && val == null) {
-      db.prepare(`UPDATE scan_logs SET note = NULL, note_category = NULL, note_value = NULL WHERE id = ?`).run(id);
+      await pool.query(`UPDATE scan_logs SET note = NULL, note_category = NULL, note_value = NULL WHERE id = $1`, [id]);
     } else {
       if (!val) {
         return res.status(400).json({ ok: false, error: 'validation', message: 'note_value required when saving a note.' });
@@ -2097,20 +1962,19 @@ app.patch('/api/scan_logs/:id', (req, res) => {
       if (row.status === 'OUT' && cat !== 'REASON') {
         return res.status(400).json({ ok: false, error: 'validation', message: 'Clock-out notes must use category REASON.' });
       }
-      db.prepare(`UPDATE scan_logs SET note_category = ?, note_value = ?, note = ? WHERE id = ?`).run(cat, val, val, id);
+      await pool.query(`UPDATE scan_logs SET note_category = $1, note_value = $2, note = $3 WHERE id = $4`, [cat, val, val, id]);
     }
   }
 
   let tankNumber = null;
   if (hasTankPayload) {
-    if (tank) ensureTankExists(tank);
+    if (tank) await ensureTankExists(tank);
     tankNumber = tank;
-    db.prepare(`UPDATE scan_logs SET tank_number = ? WHERE id = ?`).run(tankNumber, id);
+    await pool.query(`UPDATE scan_logs SET tank_number = $1 WHERE id = $2`, [tankNumber, id]);
   }
 
-  const latest = db
-    .prepare(`SELECT id, note_category, note_value, tank_number FROM scan_logs WHERE id = ?`)
-    .get(id);
+  const latestRes = await pool.query(`SELECT id, note_category, note_value, tank_number FROM scan_logs WHERE id = $1`, [id]);
+  const latest = latestRes.rows[0];
   return res.json({
     ok: true,
     id,
@@ -2120,34 +1984,37 @@ app.patch('/api/scan_logs/:id', (req, res) => {
   });
 });
 
-app.get('/api/status', (_req, res) => {
+app.get('/api/status', async (_req, res) => {
   const day = localDateString();
   const bounds = startEndOfLocalDay(day);
-  const scansTodayRow = bounds
-    ? db
-        .prepare(`SELECT COUNT(*) AS c FROM scan_logs WHERE scanned_at >= ? AND scanned_at <= ?`)
-        .get(bounds.startIso, bounds.endIso)
-    : { c: 0 };
+  let scansToday = 0;
+  if (bounds) {
+    const cRes = await pool.query(
+      `SELECT COUNT(*)::int AS c FROM scan_logs WHERE scanned_at >= $1 AND scanned_at <= $2`,
+      [bounds.startIso, bounds.endIso]
+    );
+    scansToday = cRes.rows[0].c;
+  }
 
-  const employees = db
-    .prepare(
-      `SELECT id, code, name, is_active, hourly_rate, created_at, updated_at FROM employees ORDER BY name COLLATE NOCASE ASC`
-    )
-    .all();
-
-  const latestStmt = db.prepare(
-    `SELECT status, scanned_at FROM scan_logs WHERE employee_code = ? ORDER BY scanned_at DESC, id DESC LIMIT 1`
+  const emRes = await pool.query(
+    `SELECT id, code, name, is_active, hourly_rate, created_at, updated_at FROM employees ORDER BY LOWER(name) ASC`
   );
+  const employees = emRes.rows;
 
-  const payload = employees.map((e) => {
-    const latest = latestStmt.get(e.code);
+  const payload = [];
+  for (const e of employees) {
+    const latestRes = await pool.query(
+      `SELECT status, scanned_at FROM scan_logs WHERE employee_code = $1 ORDER BY scanned_at DESC, id DESC LIMIT 1`,
+      [e.code]
+    );
+    const latest = latestRes.rows[0];
     let current_status = 'OUT';
     let last_scan_at = null;
     if (latest) {
       current_status = latest.status;
       last_scan_at = latest.scanned_at;
     }
-    return {
+    payload.push({
       id: e.id,
       code: e.code,
       name: e.name,
@@ -2155,23 +2022,22 @@ app.get('/api/status', (_req, res) => {
       hourly_rate: Number.isFinite(Number(e.hourly_rate)) ? Number(e.hourly_rate) : 20,
       current_status,
       last_scan_at,
-    };
-  });
+    });
+  }
 
-  res.json({ ok: true, scans_today: Number(scansTodayRow.c || 0), employees: payload });
+  res.json({ ok: true, scans_today: scansToday, employees: payload });
 });
 
-app.get('/api/logs', (req, res) => {
+app.get('/api/logs', async (req, res) => {
   let limit = Number(req.query.limit);
   if (!Number.isFinite(limit) || limit <= 0) limit = 50;
   limit = Math.min(Math.floor(limit), 500);
 
-  const rows = db
-    .prepare(
-      `SELECT id, employee_id, employee_code, employee_name, status, scanned_at, note, note_category, note_value, tank_number, station_name, area_name, kiosk_user
-       FROM scan_logs ORDER BY scanned_at DESC, id DESC LIMIT ?`
-    )
-    .all(limit);
+  const { rows } = await pool.query(
+    `SELECT id, employee_id, employee_code, employee_name, status, scanned_at, note, note_category, note_value, tank_number, station_name, area_name, kiosk_user
+     FROM scan_logs ORDER BY scanned_at DESC, id DESC LIMIT $1`,
+    [limit]
+  );
 
   res.json({ ok: true, logs: rows });
 });
@@ -2266,7 +2132,7 @@ app.get('/api/export', async (req, res) => {
 
   let employeeKey = employeeRaw;
   if (!isAllEmployeesParam(employeeRaw)) {
-    const emp = getEmployeeByCode(normalizeCode(employeeRaw));
+    const emp = await getEmployeeByCode(normalizeCode(employeeRaw));
     if (!emp) {
       return res.status(404).json({ ok: false, error: 'employee_not_found', message: 'No employee with that code.' });
     }
@@ -2275,7 +2141,7 @@ app.get('/api/export', async (req, res) => {
     employeeKey = 'all';
   }
 
-  const logs = queryScanLogsForExport({
+  const logs = await queryScanLogsForExport({
     scope,
     start,
     end,
@@ -2290,7 +2156,7 @@ app.get('/api/export', async (req, res) => {
   }
 
   try {
-    const payroll = computePayrollForExport(scope, start, end, employeeKey);
+    const payroll = await computePayrollForExport(scope, start, end, employeeKey);
     if (!payroll) {
       return res.status(404).json({ ok: false, error: 'employee_not_found', message: 'No employee with that code.' });
     }
@@ -2305,22 +2171,21 @@ app.get('/api/export', async (req, res) => {
   }
 });
 
-function summaryForLocalDate(yyyyMmDd) {
+async function summaryForLocalDate(yyyyMmDd) {
   const bounds = startEndOfLocalDay(yyyyMmDd);
   if (!bounds) return null;
 
-  const employees = db
-    .prepare(`SELECT code, name, is_active FROM employees ORDER BY name COLLATE NOCASE ASC`)
-    .all();
+  const emRes = await pool.query(`SELECT code, name, is_active FROM employees ORDER BY LOWER(name) ASC`);
+  const employees = emRes.rows;
 
-  const logs = db
-    .prepare(
-      `SELECT employee_code, employee_name, status, scanned_at, note, note_category, note_value
-       FROM scan_logs
-       WHERE scanned_at >= ? AND scanned_at <= ?
-       ORDER BY scanned_at ASC, id ASC`
-    )
-    .all(bounds.startIso, bounds.endIso);
+  const logRes = await pool.query(
+    `SELECT employee_code, employee_name, status, scanned_at, note, note_category, note_value
+     FROM scan_logs
+     WHERE scanned_at >= $1 AND scanned_at <= $2
+     ORDER BY scanned_at ASC, id ASC`,
+    [bounds.startIso, bounds.endIso]
+  );
+  const logs = logRes.rows;
 
   const byCode = new Map();
   for (const e of employees) {
@@ -2369,58 +2234,57 @@ function summaryForLocalDate(yyyyMmDd) {
   return { date: yyyyMmDd, rows };
 }
 
-app.get('/api/summary/today', (_req, res) => {
+app.get('/api/summary/today', async (_req, res) => {
   const day = localDateString();
-  const s = summaryForLocalDate(day);
+  const s = await summaryForLocalDate(day);
   if (!s) return res.status(400).json({ ok: false, error: 'invalid_date' });
   res.json({ ok: true, ...s });
 });
 
-app.get('/api/summary', (req, res) => {
+app.get('/api/summary', async (req, res) => {
   const q = req.query.date ? String(req.query.date) : localDateString();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(q) || !parseLocalDate(q)) {
     return res.status(400).json({ ok: false, error: 'invalid_date', message: 'date must be YYYY-MM-DD' });
   }
-  const s = summaryForLocalDate(q);
+  const s = await summaryForLocalDate(q);
   res.json({ ok: true, ...s });
 });
 
-app.get('/api/payroll/today', (_req, res) => {
+app.get('/api/payroll/today', async (_req, res) => {
   const day = localDateString();
-  const p = computePayrollForDate(day);
+  const p = await computePayrollForDate(day);
   if (!p) return res.status(400).json({ ok: false, error: 'invalid_date' });
   res.json({ ok: true, ...p });
 });
 
-app.get('/api/payroll', (req, res) => {
+app.get('/api/payroll', async (req, res) => {
   const q = req.query.date ? String(req.query.date) : localDateString();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(q) || !parseLocalDate(q)) {
     return res.status(400).json({ ok: false, error: 'invalid_date', message: 'date must be YYYY-MM-DD' });
   }
-  const p = computePayrollForDate(q);
+  const p = await computePayrollForDate(q);
   if (!p) return res.status(400).json({ ok: false, error: 'invalid_date' });
   res.json({ ok: true, ...p });
 });
 
-app.get('/api/employees', (req, res) => {
+app.get('/api/employees', async (req, res) => {
   const search = req.query.search ? String(req.query.search).trim() : '';
   let rows;
   if (search) {
     const safe = search.replace(/%/g, '').replace(/_/g, '');
     const pattern = `%${safe}%`;
-    rows = db
-      .prepare(
-        `SELECT id, code, name, is_active, hourly_rate, created_at, updated_at FROM employees
-         WHERE lower(code) LIKE lower(?) OR lower(name) LIKE lower(?)
-         ORDER BY name COLLATE NOCASE ASC`
-      )
-      .all(pattern, pattern);
+    const r = await pool.query(
+      `SELECT id, code, name, is_active, hourly_rate, created_at, updated_at FROM employees
+       WHERE lower(code) LIKE lower($1) OR lower(name) LIKE lower($2)
+       ORDER BY LOWER(name) ASC`,
+      [pattern, pattern]
+    );
+    rows = r.rows;
   } else {
-    rows = db
-      .prepare(
-        `SELECT id, code, name, is_active, hourly_rate, created_at, updated_at FROM employees ORDER BY name COLLATE NOCASE ASC`
-      )
-      .all();
+    const r = await pool.query(
+      `SELECT id, code, name, is_active, hourly_rate, created_at, updated_at FROM employees ORDER BY LOWER(name) ASC`
+    );
+    rows = r.rows;
   }
   res.json({
     ok: true,
@@ -2432,7 +2296,7 @@ app.get('/api/employees', (req, res) => {
   });
 });
 
-app.post('/api/employees', (req, res) => {
+app.post('/api/employees', async (req, res) => {
   const code = normalizeCode(req.body && req.body.code);
   const name = req.body && req.body.name !== undefined ? String(req.body.name).trim() : '';
   if (!code || !name) {
@@ -2442,15 +2306,13 @@ app.post('/api/employees', (req, res) => {
 
   const ts = nowIso();
   try {
-    const info = db
-      .prepare(
-        `INSERT INTO employees (code, name, is_active, hourly_rate, created_at, updated_at)
-         VALUES (?, ?, 1, ?, ?, ?)`
-      )
-      .run(code, name, hourly_rate, ts, ts);
-    const created = db
-      .prepare('SELECT id, code, name, is_active, hourly_rate, created_at, updated_at FROM employees WHERE id = ?')
-      .get(info.lastInsertRowid);
+    const ins = await pool.query(
+      `INSERT INTO employees (code, name, is_active, hourly_rate, created_at, updated_at)
+       VALUES ($1, $2, 1, $3, $4::timestamptz, $5::timestamptz)
+       RETURNING id, code, name, is_active, hourly_rate, created_at, updated_at`,
+      [code, name, hourly_rate, ts, ts]
+    );
+    const created = ins.rows[0];
     return res.status(201).json({
       ok: true,
       employee: {
@@ -2460,19 +2322,19 @@ app.post('/api/employees', (req, res) => {
       },
     });
   } catch (e) {
-    if (String(e.message || e).includes('UNIQUE')) {
+    if (e && e.code === '23505') {
       return res.status(409).json({ ok: false, error: 'duplicate_code', message: 'Employee code already exists.' });
     }
     return res.status(500).json({ ok: false, error: 'server', message: 'Could not create employee.' });
   }
 });
 
-app.put('/api/employees/:id', (req, res) => {
+app.put('/api/employees/:id', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ ok: false, error: 'invalid_id' });
 
-  const existing = db.prepare('SELECT id FROM employees WHERE id = ?').get(id);
-  if (!existing) return res.status(404).json({ ok: false, error: 'not_found' });
+  const ex = await pool.query('SELECT id FROM employees WHERE id = $1', [id]);
+  if (!ex.rows.length) return res.status(404).json({ ok: false, error: 'not_found' });
 
   const code = normalizeCode(req.body && req.body.code);
   const name = req.body && req.body.name !== undefined ? String(req.body.name).trim() : '';
@@ -2483,69 +2345,80 @@ app.put('/api/employees/:id', (req, res) => {
 
   const ts = nowIso();
   try {
-    db.prepare(`UPDATE employees SET code = ?, name = ?, hourly_rate = ?, updated_at = ? WHERE id = ?`).run(
+    await pool.query(`UPDATE employees SET code = $1, name = $2, hourly_rate = $3, updated_at = $4::timestamptz WHERE id = $5`, [
       code,
       name,
       hourly_rate,
       ts,
-      id
-    );
+      id,
+    ]);
   } catch (e) {
-    if (String(e.message || e).includes('UNIQUE')) {
+    if (e && e.code === '23505') {
       return res.status(409).json({ ok: false, error: 'duplicate_code', message: 'Employee code already exists.' });
     }
     return res.status(500).json({ ok: false, error: 'server', message: 'Could not update employee.' });
   }
 
-  const updated = db.prepare('SELECT id, code, name, is_active, hourly_rate, created_at, updated_at FROM employees WHERE id = ?').get(id);
+  const updatedRes = await pool.query(
+    'SELECT id, code, name, is_active, hourly_rate, created_at, updated_at FROM employees WHERE id = $1',
+    [id]
+  );
+  const updated = updatedRes.rows[0];
   res.json({
     ok: true,
     employee: { ...updated, is_active: !!updated.is_active, hourly_rate: Number(updated.hourly_rate) },
   });
 });
 
-app.delete('/api/employees/:id', (req, res) => {
+app.delete('/api/employees/:id', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ ok: false, error: 'invalid_id' });
 
-  const info = db.prepare('DELETE FROM employees WHERE id = ?').run(id);
-  if (info.changes === 0) return res.status(404).json({ ok: false, error: 'not_found' });
+  const del = await pool.query('DELETE FROM employees WHERE id = $1', [id]);
+  if (del.rowCount === 0) return res.status(404).json({ ok: false, error: 'not_found' });
   res.json({ ok: true });
 });
 
-app.patch('/api/employees/:id/toggle-active', (req, res) => {
+app.patch('/api/employees/:id/toggle-active', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ ok: false, error: 'invalid_id' });
 
-  const row = db.prepare('SELECT id, is_active FROM employees WHERE id = ?').get(id);
+  const rowRes = await pool.query('SELECT id, is_active FROM employees WHERE id = $1', [id]);
+  const row = rowRes.rows[0];
   if (!row) return res.status(404).json({ ok: false, error: 'not_found' });
 
   const next = row.is_active ? 0 : 1;
   const ts = nowIso();
-  db.prepare('UPDATE employees SET is_active = ?, updated_at = ? WHERE id = ?').run(next, ts, id);
-  const updated = db.prepare('SELECT id, code, name, is_active, hourly_rate, created_at, updated_at FROM employees WHERE id = ?').get(id);
+  await pool.query('UPDATE employees SET is_active = $1, updated_at = $2::timestamptz WHERE id = $3', [next, ts, id]);
+  const updatedRes = await pool.query(
+    'SELECT id, code, name, is_active, hourly_rate, created_at, updated_at FROM employees WHERE id = $1',
+    [id]
+  );
+  const updated = updatedRes.rows[0];
   res.json({
     ok: true,
     employee: { ...updated, is_active: !!updated.is_active, hourly_rate: Number(updated.hourly_rate) },
   });
 });
 
-app.get('/api/tanks', (req, res) => {
+app.get('/api/tanks', async (req, res) => {
   const search = String(req.query.search || '').trim().toUpperCase();
   const activeOnly = String(req.query.active_only || '').toLowerCase() === '1';
   let sql = `SELECT id, tank_number, description, status, created_at, updated_at FROM tanks WHERE 1=1`;
   const params = [];
+  let n = 1;
   if (activeOnly) sql += ` AND status = 'ACTIVE'`;
   if (search) {
-    sql += ` AND (tank_number LIKE ? OR description LIKE ?)`;
+    sql += ` AND (tank_number LIKE $${n} OR description LIKE $${n + 1})`;
     params.push(`%${search}%`, `%${search}%`);
+    n += 2;
   }
   sql += ` ORDER BY CASE WHEN status='ACTIVE' THEN 0 ELSE 1 END, updated_at DESC, tank_number ASC`;
-  const tanks = db.prepare(sql).all(...params);
+  const { rows: tanks } = await pool.query(sql, params);
   res.json({ ok: true, tanks });
 });
 
-app.post('/api/tanks', (req, res) => {
+app.post('/api/tanks', async (req, res) => {
   const tank_number = normalizeTankNumber(req.body && req.body.tank_number);
   const description = req.body && req.body.description != null ? String(req.body.description).trim().slice(0, 120) : '';
   if (!tank_number) {
@@ -2553,84 +2426,101 @@ app.post('/api/tanks', (req, res) => {
   }
   const ts = nowIso();
   try {
-    const info = db
-      .prepare(`INSERT INTO tanks (tank_number, description, status, created_at, updated_at) VALUES (?, ?, 'ACTIVE', ?, ?)`)
-      .run(tank_number, description, ts, ts);
-    const tank = db.prepare(`SELECT id, tank_number, description, status, created_at, updated_at FROM tanks WHERE id = ?`).get(info.lastInsertRowid);
-    return res.status(201).json({ ok: true, tank });
+    const ins = await pool.query(
+      `INSERT INTO tanks (tank_number, description, status, created_at, updated_at) VALUES ($1, $2, 'ACTIVE', $3::timestamptz, $4::timestamptz)
+       RETURNING id`,
+      [tank_number, description, ts, ts]
+    );
+    const tid = ins.rows[0].id;
+    const tankRes = await pool.query(
+      `SELECT id, tank_number, description, status, created_at, updated_at FROM tanks WHERE id = $1`,
+      [tid]
+    );
+    return res.status(201).json({ ok: true, tank: tankRes.rows[0] });
   } catch (e) {
-    if (String(e.message || e).includes('UNIQUE')) {
+    if (e && e.code === '23505') {
       return res.status(409).json({ ok: false, error: 'duplicate_tank', message: 'Tank number already exists.' });
     }
     return res.status(500).json({ ok: false, error: 'server', message: 'Could not create tank.' });
   }
 });
 
-app.put('/api/tanks/:id', (req, res) => {
+app.put('/api/tanks/:id', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ ok: false, error: 'invalid_id' });
-  const current = db.prepare(`SELECT id FROM tanks WHERE id = ?`).get(id);
-  if (!current) return res.status(404).json({ ok: false, error: 'not_found' });
+  const current = await pool.query(`SELECT id FROM tanks WHERE id = $1`, [id]);
+  if (!current.rows.length) return res.status(404).json({ ok: false, error: 'not_found' });
   const tank_number = normalizeTankNumber(req.body && req.body.tank_number);
   const description = req.body && req.body.description != null ? String(req.body.description).trim().slice(0, 120) : '';
   const status = normalizeTankStatus(req.body && req.body.status);
   if (!tank_number) return res.status(400).json({ ok: false, error: 'validation', message: 'tank_number is required.' });
   const ts = nowIso();
   try {
-    db.prepare(`UPDATE tanks SET tank_number = ?, description = ?, status = ?, updated_at = ? WHERE id = ?`).run(
+    await pool.query(`UPDATE tanks SET tank_number = $1, description = $2, status = $3, updated_at = $4::timestamptz WHERE id = $5`, [
       tank_number,
       description,
       status,
       ts,
-      id
-    );
+      id,
+    ]);
   } catch (e) {
-    if (String(e.message || e).includes('UNIQUE')) {
+    if (e && e.code === '23505') {
       return res.status(409).json({ ok: false, error: 'duplicate_tank', message: 'Tank number already exists.' });
     }
     return res.status(500).json({ ok: false, error: 'server', message: 'Could not update tank.' });
   }
-  const tank = db.prepare(`SELECT id, tank_number, description, status, created_at, updated_at FROM tanks WHERE id = ?`).get(id);
-  res.json({ ok: true, tank });
+  const tankRes = await pool.query(`SELECT id, tank_number, description, status, created_at, updated_at FROM tanks WHERE id = $1`, [id]);
+  res.json({ ok: true, tank: tankRes.rows[0] });
 });
 
-app.patch('/api/tanks/:id/archive', (req, res) => {
+app.patch('/api/tanks/:id/archive', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ ok: false, error: 'invalid_id' });
-  const row = db.prepare(`SELECT id FROM tanks WHERE id = ?`).get(id);
-  if (!row) return res.status(404).json({ ok: false, error: 'not_found' });
+  const rowRes = await pool.query(`SELECT id FROM tanks WHERE id = $1`, [id]);
+  if (!rowRes.rows.length) return res.status(404).json({ ok: false, error: 'not_found' });
   const status = normalizeTankStatus(req.body && req.body.status ? req.body.status : 'ARCHIVED');
   const ts = nowIso();
-  db.prepare(`UPDATE tanks SET status = ?, updated_at = ? WHERE id = ?`).run(status, ts, id);
-  const tank = db.prepare(`SELECT id, tank_number, description, status, created_at, updated_at FROM tanks WHERE id = ?`).get(id);
-  res.json({ ok: true, tank });
+  await pool.query(`UPDATE tanks SET status = $1, updated_at = $2::timestamptz WHERE id = $3`, [status, ts, id]);
+  const tankRes = await pool.query(`SELECT id, tank_number, description, status, created_at, updated_at FROM tanks WHERE id = $1`, [id]);
+  res.json({ ok: true, tank: tankRes.rows[0] });
 });
 
-function managerCurrentWorkRows() {
-  const employees = db.prepare(`SELECT id, code, name, hourly_rate FROM employees WHERE is_active = 1`).all();
-  const latestStmt = db.prepare(
-    `SELECT status, scanned_at FROM scan_logs WHERE employee_code = ? ORDER BY scanned_at DESC, id DESC LIMIT 1`
-  );
-  const latestInStmt = db.prepare(
-    `SELECT scanned_at, note_value, note, tank_number, area_name, station_name, kiosk_user FROM scan_logs
-     WHERE employee_code = ? AND status = 'IN' ORDER BY scanned_at DESC, id DESC LIMIT 1`
-  );
+async function managerCurrentWorkRows() {
+  const emRes = await pool.query(`SELECT id, code, name, hourly_rate FROM employees WHERE is_active = 1`);
+  const employees = emRes.rows;
   const day = startEndOfLocalDay(localDateString());
   const week = weekBoundsLocal();
-  const logsRangeStmt = db.prepare(
-    `SELECT status, scanned_at FROM scan_logs WHERE employee_code = ? AND scanned_at >= ? AND scanned_at <= ? ORDER BY scanned_at ASC, id ASC`
-  );
   const rows = [];
   for (const e of employees) {
-    const latest = latestStmt.get(e.code);
+    const latestRes = await pool.query(
+      `SELECT status, scanned_at FROM scan_logs WHERE employee_code = $1 ORDER BY scanned_at DESC, id DESC LIMIT 1`,
+      [e.code]
+    );
+    const latest = latestRes.rows[0];
     if (!latest || latest.status !== 'IN') continue;
-    const inRow = latestInStmt.get(e.code) || {};
+    const inRes = await pool.query(
+      `SELECT scanned_at, note_value, note, tank_number, area_name, station_name, kiosk_user FROM scan_logs
+       WHERE employee_code = $1 AND status = 'IN' ORDER BY scanned_at DESC, id DESC LIMIT 1`,
+      [e.code]
+    );
+    const inRow = inRes.rows[0] || {};
     const startMs = new Date(inRow.scanned_at || latest.scanned_at).getTime();
     const elapsedMs = Number.isFinite(startMs) ? Math.max(0, Date.now() - startMs) : 0;
     const activity = inRow.note_value || inRow.note || '-';
     const tank_number = inRow.tank_number || '-';
-    const dailyHours = day ? workedMsFromLogsAsc(logsRangeStmt.all(e.code, day.startIso, day.endIso)) / 3600000 : 0;
-    const weeklyHours = workedMsFromLogsAsc(logsRangeStmt.all(e.code, week.startIso, week.endIso)) / 3600000;
+    let dailyHours = 0;
+    if (day) {
+      const dr = await pool.query(
+        `SELECT status, scanned_at FROM scan_logs WHERE employee_code = $1 AND scanned_at >= $2 AND scanned_at <= $3 ORDER BY scanned_at ASC, id ASC`,
+        [e.code, day.startIso, day.endIso]
+      );
+      dailyHours = workedMsFromLogsAsc(dr.rows) / 3600000;
+    }
+    const wr = await pool.query(
+      `SELECT status, scanned_at FROM scan_logs WHERE employee_code = $1 AND scanned_at >= $2 AND scanned_at <= $3 ORDER BY scanned_at ASC, id ASC`,
+      [e.code, week.startIso, week.endIso]
+    );
+    const weeklyHours = workedMsFromLogsAsc(wr.rows) / 3600000;
     rows.push({
       employee_code: e.code,
       employee_name: e.name,
@@ -2653,18 +2543,18 @@ function managerCurrentWorkRows() {
   return rows;
 }
 
-function managerTankSummaryRows() {
+async function managerTankSummaryRows() {
   const day = localDateString();
   const bounds = startEndOfLocalDay(day);
   if (!bounds) return [];
-  const rows = db
-    .prepare(
-      `SELECT employee_code, employee_name, status, scanned_at, note_value, note, tank_number
-       FROM scan_logs
-       WHERE scanned_at >= ? AND scanned_at <= ?
-       ORDER BY scanned_at ASC, id ASC`
-    )
-    .all(bounds.startIso, bounds.endIso);
+  const logRes = await pool.query(
+    `SELECT employee_code, employee_name, status, scanned_at, note_value, note, tank_number
+     FROM scan_logs
+     WHERE scanned_at >= $1 AND scanned_at <= $2
+     ORDER BY scanned_at ASC, id ASC`,
+    [bounds.startIso, bounds.endIso]
+  );
+  const rows = logRes.rows;
   const byTank = new Map();
   const workerTank = new Map();
   for (const r of rows) {
@@ -2709,20 +2599,24 @@ function weekBoundsLocal(now = new Date()) {
   return { startIso: start.toISOString(), endIso: end.toISOString() };
 }
 
-function managerOvertimeWatch() {
+async function managerOvertimeWatch() {
   const today = startEndOfLocalDay(localDateString());
+  if (!today) return [];
   const week = weekBoundsLocal();
-  const employees = db.prepare(`SELECT code, name, hourly_rate FROM employees WHERE is_active = 1`).all();
-  const dailyLogsStmt = db.prepare(
-    `SELECT status, scanned_at FROM scan_logs WHERE employee_code = ? AND scanned_at >= ? AND scanned_at <= ? ORDER BY scanned_at ASC, id ASC`
-  );
-  const weeklyLogsStmt = db.prepare(
-    `SELECT status, scanned_at FROM scan_logs WHERE employee_code = ? AND scanned_at >= ? AND scanned_at <= ? ORDER BY scanned_at ASC, id ASC`
-  );
+  const emRes = await pool.query(`SELECT code, name, hourly_rate FROM employees WHERE is_active = 1`);
+  const employees = emRes.rows;
   const rows = [];
   for (const e of employees) {
-    const dailyLogs = dailyLogsStmt.all(e.code, today.startIso, today.endIso);
-    const weeklyLogs = weeklyLogsStmt.all(e.code, week.startIso, week.endIso);
+    const dailyRes = await pool.query(
+      `SELECT status, scanned_at FROM scan_logs WHERE employee_code = $1 AND scanned_at >= $2 AND scanned_at <= $3 ORDER BY scanned_at ASC, id ASC`,
+      [e.code, today.startIso, today.endIso]
+    );
+    const weeklyRes = await pool.query(
+      `SELECT status, scanned_at FROM scan_logs WHERE employee_code = $1 AND scanned_at >= $2 AND scanned_at <= $3 ORDER BY scanned_at ASC, id ASC`,
+      [e.code, week.startIso, week.endIso]
+    );
+    const dailyLogs = dailyRes.rows;
+    const weeklyLogs = weeklyRes.rows;
     const dailyHours = workedMsFromLogsAsc(dailyLogs) / 3600000;
     const weeklyHours = workedMsFromLogsAsc(weeklyLogs) / 3600000;
     const dailyOt = Math.max(0, dailyHours - 8);
@@ -2747,22 +2641,25 @@ function managerOvertimeWatch() {
   return rows;
 }
 
-app.get('/api/manager/current-work', (_req, res) => {
-  res.json({ ok: true, rows: managerCurrentWorkRows() });
+app.get('/api/manager/current-work', async (_req, res) => {
+  const rows = await managerCurrentWorkRows();
+  res.json({ ok: true, rows });
 });
 
-app.get('/api/manager/tank-summary', (_req, res) => {
-  res.json({ ok: true, rows: managerTankSummaryRows() });
+app.get('/api/manager/tank-summary', async (_req, res) => {
+  const rows = await managerTankSummaryRows();
+  res.json({ ok: true, rows });
 });
 
-app.get('/api/manager/overtime-watch', (_req, res) => {
-  res.json({ ok: true, rows: managerOvertimeWatch() });
+app.get('/api/manager/overtime-watch', async (_req, res) => {
+  const rows = await managerOvertimeWatch();
+  res.json({ ok: true, rows });
 });
 
 /**
  * Update kiosk PINs for Area A / B / C (manager only). Body: optional area_a_pin, area_b_pin, area_c_pin (4–6 digits each).
  */
-app.patch('/api/manager/kiosk-pins', (req, res) => {
+app.patch('/api/manager/kiosk-pins', async (req, res) => {
   const auth = currentAuthFromSession(req);
   if (!auth || auth.role !== ROLE.MANAGER) {
     return authJson(res, 403, 'Forbidden.', 'forbidden');
@@ -2787,7 +2684,7 @@ app.patch('/api/manager/kiosk-pins', (req, res) => {
         message: `${key} must be exactly 4–6 digits.`,
       });
     }
-    const row = getUserByUsername(uname);
+    const row = await getUserByUsername(uname);
     if (!row || String(row.role).toUpperCase() !== ROLE.KIOSK) {
       return res.status(400).json({ ok: false, error: 'validation', message: 'Invalid kiosk account.' });
     }
@@ -2801,14 +2698,15 @@ app.patch('/api/manager/kiosk-pins', (req, res) => {
     });
   }
   const ts = nowIso();
-  const updateStmt = db.prepare(`UPDATE users SET pin_hash = ?, updated_at = ? WHERE username = ? AND role = ?`);
-  const tx = db.transaction(() => {
-    for (const [uname, digits] of toApply) {
-      updateStmt.run(hashPassword(digits), ts, uname, ROLE.KIOSK);
-    }
-  });
   try {
-    tx();
+    for (const [uname, digits] of toApply) {
+      await pool.query(`UPDATE users SET pin_hash = $1, updated_at = $2::timestamptz WHERE username = $3 AND role = $4`, [
+        hashPassword(digits),
+        ts,
+        uname,
+        ROLE.KIOSK,
+      ]);
+    }
   } catch (e) {
     console.error('[kiosk-pins]', e);
     return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not update PINs.' });

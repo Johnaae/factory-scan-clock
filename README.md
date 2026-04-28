@@ -6,7 +6,7 @@ Lightweight barcode **IN / OUT** time clock for small factory offices. Employees
 
 ## Overview
 
-- **SQLite** persistence (`scan.db`), **Express** HTTP API, static **HTML/CSS/JS** UI.
+- **Neon Postgres** (via `DATABASE_URL`), **Express** HTTP API, static **HTML/CSS/JS** UI.
 - **No authentication** — designed for a trusted LAN kiosk (demo / internal use).
 - Scanner hardware behaves like a **keyboard**: it types the barcode and sends **Enter**. The dashboard keeps focus on a hidden input so scans are captured reliably.
 

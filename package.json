@@ -14,7 +14,7 @@
   "keywords": [
     "barcode",
     "clock",
-    "sqlite",
+    "postgres",
     "express"
   ],
   "license": "MIT",
@@ -22,7 +22,6 @@
     "node": "^18.18.0 || ^20.9.0 || ^22.0.0 || ^24.0.0"
   },
   "dependencies": {
-    "better-sqlite3": "^12.9.0",
     "connect-pg-simple": "^10.0.0",
     "dotenv": "^16.5.0",
     "express": "^4.21.2",
