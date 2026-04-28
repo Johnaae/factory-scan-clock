@@ -11,15 +11,11 @@ const PgSession = require('connect-pg-simple')(session);
 const Database = require('better-sqlite3');
 const PDFDocument = require('pdfkit');
 
-const PORT = Number(process.env.PORT) || 3000;
 const DB_PATH = path.join(__dirname, 'scan.db');
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const IS_PROD = String(process.env.NODE_ENV || '').toLowerCase() === 'production';
-
 const app = express();
-if (IS_PROD) {
-  app.set('trust proxy', 1);
-}
+
+app.set('trust proxy', 1);
 
 if (!process.env.DATABASE_URL) {
   console.error('❌ DATABASE_URL missing');
@@ -29,36 +25,35 @@ if (!process.env.SESSION_SECRET) {
   console.error('❌ SESSION_SECRET missing');
   process.exit(1);
 }
-console.log('ENV:', process.env.NODE_ENV);
-console.log('DB:', !!process.env.DATABASE_URL);
 
-const pool = new pg.Pool({
+const pgPool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
 });
-pool.on('error', (err) => {
+pgPool.on('error', (err) => {
   console.error('[session-store] pool error:', err && err.message ? err.message : err);
 });
 
-const sessionStore = new PgSession({
-  pool: pool,
-  tableName: 'session',
-  createTableIfMissing: true,
-});
-console.log('Session store: Postgres OK');
+console.log('Session store: Postgres');
+console.log('NODE_ENV:', process.env.NODE_ENV);
+console.log('Has DB:', Boolean(process.env.DATABASE_URL));
 
 app.use(express.json({ limit: '32kb' }));
 app.use(
   session({
-    store: sessionStore,
     name: 'factory_scan_sid',
+    store: new PgSession({
+      pool: pgPool,
+      tableName: 'session',
+      createTableIfMissing: true,
+    }),
     secret: process.env.SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
-      secure: IS_PROD,
       maxAge: 1000 * 60 * 60 * 24 * 30,
     },
   })
@@ -2915,31 +2910,11 @@ app.use((err, _req, res, _next) => {
   return res.status(500).json({ ok: false, error: 'server', message: 'Unexpected server error.' });
 });
 
-async function startServer() {
-  try {
-    await pool.query('SELECT 1');
-    console.log('Connected to DB: OK');
-  } catch (err) {
-    console.error('Connected to DB: FAILED', err && err.message ? err.message : err);
-    process.exit(1);
-  }
-
-  const server = app.listen(PORT, "0.0.0.0", () => {
-    console.log(`factory-scan-clock listening on http://localhost:${PORT}`);
-  });
-
-  server.on('error', (err) => {
-    if (err && err.code === 'EADDRINUSE') {
-      console.error(`Port ${PORT} is already in use. Set PORT to a free port and try again.`);
-      process.exit(1);
-    }
-    console.error(err);
-    process.exit(1);
-  });
-}
-
 if (!process.env.VERCEL) {
-  void startServer();
+  const port = process.env.PORT || 3000;
+  app.listen(port, () => {
+    console.log(`Listening on port ${port}`);
+  });
 }
 
 module.exports = app;
