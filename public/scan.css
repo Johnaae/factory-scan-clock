@@ -1,0 +1,392 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body.scan-kiosk {
+  margin: 0;
+  min-height: 100vh;
+  background: linear-gradient(180deg, #f6f8ff 0%, #eef2ff 100%);
+  color: #0f172a;
+  font-family: "Inter", "Segoe UI", Arial, sans-serif;
+}
+
+.kiosk-page {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 28px 16px 34px;
+  display: grid;
+  gap: 14px;
+}
+
+.kiosk-header {
+  border-radius: 18px;
+  background: #ffffff;
+  border: 1px solid #dbe4ff;
+  box-shadow: 0 8px 26px rgba(15, 23, 42, 0.08);
+  padding: 18px 20px;
+}
+
+.kiosk-header h1 {
+  margin: 0;
+  font-size: clamp(24px, 4vw, 34px);
+  font-weight: 800;
+}
+
+.kiosk-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.kiosk-header p {
+  margin: 4px 0 0;
+  color: #475569;
+  font-weight: 600;
+}
+
+.kiosk-manager-links {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #475569;
+}
+
+.kiosk-manager-links a {
+  color: #4f46e5;
+  text-decoration: none;
+  font-weight: 700;
+}
+
+.kiosk-card {
+  background: #ffffff;
+  border: 1px solid #dbe4ff;
+  border-radius: 18px;
+  box-shadow: 0 8px 24px rgba(99, 102, 241, 0.08);
+  padding: 16px;
+}
+
+.kiosk-card.scan-panel {
+  position: relative;
+}
+
+/* Hidden but focusable: scanner only; inputmode=none avoids Android keyboard */
+.scanner-trap-input {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: 0;
+  overflow: hidden;
+  opacity: 0;
+  border: 0;
+  z-index: -1;
+}
+
+.scan-panel-head h2 {
+  margin: 0;
+  font-size: 24px;
+}
+
+.scan-panel-head p {
+  margin: 5px 0 0;
+  color: #475569;
+}
+
+.scan-input-row {
+  margin-top: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.scan-input-row label {
+  font-size: 13px;
+  color: #334155;
+  font-weight: 600;
+}
+
+.scan-input-wrap {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.scan-input-wrap--scanner:focus-within {
+  animation: scan-ready-pulse 1.25s ease-in-out infinite;
+}
+
+@keyframes scan-ready-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.35);
+    border-radius: 12px;
+  }
+  50% {
+    box-shadow: 0 0 0 5px rgba(99, 102, 241, 0.22);
+    border-radius: 12px;
+  }
+}
+
+/* Manual entry only — keyboard when user taps */
+#manualBarcodeInput {
+  caret-color: #4338ca;
+}
+
+#manualBarcodeInput,
+#tankInput {
+  width: 100%;
+  border: 1px solid #c7d2fe;
+  border-radius: 11px;
+  padding: 10px 12px;
+  font-size: 14px;
+  outline: none;
+}
+
+#manualBarcodeInput:focus,
+#tankInput:focus {
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.16);
+}
+
+.scan-input-wrap--scanner:focus-within #manualBarcodeInput:focus {
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.28);
+}
+
+.scan-submit-btn {
+  background: linear-gradient(135deg, #4f46e5, #7c3aed);
+  color: #ffffff;
+  padding: 10px 18px;
+  white-space: nowrap;
+  min-height: 42px;
+}
+
+button {
+  border: 0;
+  border-radius: 11px;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+#tankConfirmBtn,
+#refreshStatusBtn {
+  background: linear-gradient(135deg, #4f46e5, #7c3aed);
+  color: #ffffff;
+  padding: 10px 14px;
+}
+
+.btn-secondary {
+  background: #fff;
+  color: #4338ca;
+  border: 1px solid #c7d2fe;
+  padding: 9px 13px;
+}
+
+.current-worker {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid #c7d2fe;
+  border-radius: 11px;
+  background: #eef2ff;
+  display: grid;
+  gap: 3px;
+}
+
+.current-worker span {
+  color: #334155;
+}
+
+.selection-panel h3,
+.tank-panel h3,
+.status-panel h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.selection-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.choice-btn {
+  background: #eef2ff;
+  color: #1e1b4b;
+  border: 1px solid #c7d2fe;
+  padding: 10px 8px;
+  min-height: 42px;
+}
+
+.choice-btn:hover {
+  background: #e0e7ff;
+}
+
+.tank-panel p {
+  margin: 6px 0 12px;
+  color: #475569;
+}
+
+.tank-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+}
+
+.status-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.status-table-wrap {
+  overflow: auto;
+}
+
+.status-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 760px;
+}
+
+.status-table th,
+.status-table td {
+  text-align: left;
+  border-bottom: 1px solid #e2e8f0;
+  padding: 9px 8px;
+  font-size: 14px;
+}
+
+.status-table th {
+  color: #334155;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.status-empty {
+  color: #64748b;
+  text-align: center;
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.status-badge.in {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.status-badge.out {
+  background: #f1f5f9;
+  color: #334155;
+}
+
+.scan-toast {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 100;
+  max-width: 360px;
+  border-radius: 10px;
+  background: #111827;
+  color: #ffffff;
+  padding: 11px 13px;
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.24);
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.scan-toast.scan-toast--visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.scan-toast.scan-toast--error {
+  background: #7f1d1d;
+  border: 1px solid #fca5a5;
+}
+
+.rescan-badge-banner {
+  margin: 12px 0 0;
+  padding: 16px 14px;
+  border-radius: 14px;
+  background: #dc2626;
+  color: #ffffff;
+  font-weight: 900;
+  font-size: clamp(22px, 4vw, 32px);
+  letter-spacing: 0.06em;
+  text-align: center;
+  border: 3px solid #991b1b;
+  box-shadow: 0 8px 24px rgba(220, 38, 38, 0.35);
+}
+
+.scan-warning {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #fef2f2;
+  color: #b91c1c;
+  font-weight: 700;
+  font-size: 14px;
+  border: 1px solid #fecaca;
+}
+
+.scan-debug {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: #334155;
+  display: grid;
+  gap: 4px;
+}
+
+.scan-debug code {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  color: #0f172a;
+  word-break: break-all;
+}
+
+.scan-debug-label {
+  display: inline-block;
+  min-width: 7.25rem;
+  color: #64748b;
+  font-weight: 600;
+}
+
+.scan-debug--minimal {
+  font-size: 11px;
+  padding: 8px 10px;
+}
+
+.debug-line {
+  margin: 0;
+  font-size: 12px;
+  color: #64748b;
+}
+
+@media (max-width: 760px) {
+  .scan-input-wrap {
+    grid-template-columns: 1fr;
+  }
+  .tank-row {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,0 +1,6 @@
+node_modules/
+scan.db
+scan.db-shm
+scan.db-wal
+.DS_Store
+npm-debug.log*

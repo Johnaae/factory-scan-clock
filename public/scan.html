@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex,nofollow" />
+    <title>Factory Scan Clock — Kiosk</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/scan.css" />
+  </head>
+  <body class="scan-kiosk">
+    <main class="kiosk-page">
+      <header class="kiosk-header">
+        <div class="kiosk-header-row">
+          <div>
+            <h1>Factory Scan Clock</h1>
+            <p id="kioskStationLabel">Kiosk Scan Station</p>
+            <p id="managerQuickNav" class="kiosk-manager-links" hidden>
+              <a href="/manager-dashboard">Manager</a>
+              <span aria-hidden="true">·</span>
+              <a href="/">Main Dashboard</a>
+            </p>
+          </div>
+          <button id="logoutBtn" type="button" class="btn-secondary">Logout</button>
+        </div>
+      </header>
+
+      <section class="kiosk-card scan-panel">
+        <div class="scan-panel-head">
+          <h2 id="workflowTitle">Scan employee badge</h2>
+          <p id="workflowSub">
+            Scanner: use the hidden field (always ready). Manual: type below, then Enter or Scan.
+          </p>
+        </div>
+
+        <input
+          id="scannerTrap"
+          type="text"
+          class="scanner-trap-input"
+          tabindex="0"
+          inputmode="none"
+          autocomplete="off"
+          autocorrect="off"
+          autocapitalize="off"
+          spellcheck="false"
+          readonly
+          aria-label="Scanner barcode input"
+        />
+
+        <form id="scanForm" class="scan-input-row" autocomplete="off">
+          <label for="manualBarcodeInput">Manual entry</label>
+          <div class="scan-input-wrap scan-input-wrap--scanner">
+            <input
+              id="manualBarcodeInput"
+              name="barcode"
+              type="text"
+              placeholder="EMP001 · RUN_MACHINE · TANK_1111"
+              autocomplete="off"
+              autocapitalize="characters"
+              spellcheck="false"
+              enterkeyhint="done"
+              inputmode="text"
+            />
+            <button id="scanButton" type="button" class="scan-submit-btn">Scan</button>
+          </div>
+        </form>
+
+        <div id="rescanBadgeBanner" class="rescan-badge-banner" role="alert" aria-live="assertive" hidden>
+          RESCAN BADGE
+        </div>
+        <p id="scanWarning" class="scan-warning" role="alert" aria-live="assertive" hidden></p>
+
+        <div id="scanDebugPanel" class="scan-debug scan-debug--minimal" aria-label="Scan debug">
+          <div><span class="scan-debug-label">Last raw</span> <code id="debugRaw">—</code></div>
+          <div><span class="scan-debug-label">Normalized</span> <code id="debugNormalized">—</code></div>
+          <div><span class="scan-debug-label">Source</span> <code id="debugSource">—</code></div>
+          <div><span class="scan-debug-label">Last action</span> <code id="debugLastAction">—</code></div>
+          <div><span class="scan-debug-label">Last error code</span> <code id="debugLastErrorCode">—</code></div>
+          <div><span class="scan-debug-label">Last success code</span> <code id="debugLastSuccessCode">—</code></div>
+          <div><span class="scan-debug-label">Scan id</span> <code id="debugScanId">0</code></div>
+          <div><span class="scan-debug-label">Processing</span> <code id="debugProcessing">false</code></div>
+          <div><span class="scan-debug-label">Active element</span> <code id="debugActiveEl">—</code></div>
+        </div>
+
+        <div class="current-worker" id="currentWorkerCard" hidden>
+          <strong id="currentWorkerName">—</strong>
+          <span id="currentWorkerMode">—</span>
+        </div>
+      </section>
+
+      <section class="kiosk-card selection-panel" id="selectionPanel" hidden>
+        <h3 id="selectionTitle">Select activity</h3>
+        <div id="selectionButtons" class="selection-grid"></div>
+      </section>
+
+      <section class="kiosk-card tank-panel" id="tankPanel" hidden>
+        <h3>Tank Number</h3>
+        <p>Enter or scan tank number</p>
+        <div class="tank-row">
+          <input id="tankInput" type="text" placeholder="1023 or TANK_1023" />
+          <button id="tankConfirmBtn" type="button">Confirm</button>
+        </div>
+      </section>
+
+      <section class="kiosk-card status-panel">
+        <div class="status-head">
+          <h3>Employee Status</h3>
+          <button id="refreshStatusBtn" type="button">Refresh</button>
+        </div>
+        <div class="status-table-wrap">
+          <table class="status-table">
+            <thead>
+              <tr>
+                <th>Employee</th>
+                <th>Status</th>
+                <th>Activity / Reason</th>
+                <th>Tank #</th>
+                <th>Last Scan</th>
+              </tr>
+            </thead>
+            <tbody id="statusTableBody">
+              <tr>
+                <td colspan="5" class="status-empty">Loading…</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <p id="debugLine" class="debug-line" hidden>debug</p>
+      <div id="scanToast" class="scan-toast" role="status" aria-live="polite" hidden></div>
+    </main>
+    <script src="/scan.js?v=20"></script>
+  </body>
+</html>

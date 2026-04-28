@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Factory Scan Clock — Employees</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 7V6a2 2 0 0 1 2-2h2" />
+              <path d="M4 17v1a2 2 0 0 0 2 2h2" />
+              <path d="M16 4h2a2 2 0 0 1 2 2v1" />
+              <path d="M16 20h2a2 2 0 0 0 2-2v-1" />
+              <path d="M8 12h8" />
+              <path d="M9 9l-2 3 2 3" />
+              <path d="M15 9l2 3-2 3" />
+            </svg>
+          </div>
+          <div class="brand-text">
+            <div class="brand-title">Factory Scan Clock</div>
+            <div class="brand-sub">Employee directory</div>
+          </div>
+        </div>
+        <nav class="nav" aria-label="Primary">
+          <a href="/manager-dashboard">Manager</a>
+          <a class="active" href="/">Main Dashboard</a>
+          <a href="/scan">iPad Scan</a>
+        </nav>
+        <button id="logoutBtn" class="btn btn-sm" type="button">Logout</button>
+      </div>
+    </header>
+
+    <div class="subnav-wrap">
+      <nav class="subnav" aria-label="Main dashboard sections">
+        <a href="/">Dashboard</a>
+        <a class="active" href="/admin.html">Employees</a>
+        <a href="/summary.html">Daily Summary</a>
+      </nav>
+    </div>
+
+    <main class="container">
+      <div class="page-hero">
+        <h1>Employees</h1>
+        <p>Manage badge codes, names, and whether someone can scan at the clock.</p>
+      </div>
+
+      <section class="card">
+        <div class="card-header card-header-rows">
+          <div class="card-header-main">
+            <h2 class="card-title">Directory</h2>
+            <p class="card-kicker">Search filters instantly on this device</p>
+          </div>
+          <div class="toolbar">
+            <button class="btn btn-primary" type="button" id="btnAdd">Add employee</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="field retain-focus" style="max-width: 520px">
+            <label for="search">Search</label>
+            <input id="search" type="search" placeholder="Filter by code or name…" autocomplete="off" />
+          </div>
+          <div class="toastline" id="adminHint" style="margin-top: 10px"></div>
+        </div>
+        <div class="card-body card-body--flush">
+          <div class="table-panel">
+          <div class="table-wrap table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Code</th>
+                  <th>Name</th>
+                  <th class="th-num">Hourly rate</th>
+                  <th>Status</th>
+                  <th style="min-width: 260px">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="empBody"></tbody>
+            </table>
+          </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div class="modal-backdrop" id="modalBackdrop" role="dialog" aria-modal="true" aria-hidden="true">
+      <div class="modal" role="document">
+        <div class="modal-head">
+          <h3 class="modal-title" id="modalTitle">Employee</h3>
+          <button class="btn btn-ghost btn-sm" type="button" id="btnCloseModal">Close</button>
+        </div>
+        <div class="modal-body">
+          <div class="field retain-focus">
+            <label for="fCode">Code</label>
+            <input id="fCode" type="text" autocomplete="off" />
+          </div>
+          <div class="field retain-focus">
+            <label for="fName">Name</label>
+            <input id="fName" type="text" autocomplete="off" />
+          </div>
+          <div class="field retain-focus">
+            <label for="fRate">Hourly rate (USD)</label>
+            <input id="fRate" type="number" inputmode="decimal" min="0" step="0.01" placeholder="20" autocomplete="off" />
+          </div>
+          <div class="toastline" id="modalHint"></div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn btn-sm" type="button" id="btnCancel">Cancel</button>
+          <button class="btn btn-primary btn-sm" type="button" id="btnSave">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/admin.js"></script>
+  </body>
+</html>

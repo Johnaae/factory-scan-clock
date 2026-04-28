@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Factory Manager Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800;900&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand">
+          <div class="brand-text">
+            <div class="brand-title">Factory Manager Dashboard</div>
+            <div class="brand-sub">Tanks, workforce, overtime</div>
+          </div>
+        </div>
+        <nav class="nav">
+          <a href="/manager-dashboard" class="active">Manager</a>
+          <a href="/">Main Dashboard</a>
+          <a href="/scan">iPad Scan</a>
+        </nav>
+        <button id="logoutBtn" class="btn btn-sm" type="button">Logout</button>
+      </div>
+    </header>
+
+    <main class="container">
+      <section class="card">
+        <div class="card-header">
+          <div class="card-header-main">
+            <h2 class="card-title">Tank Management</h2>
+            <p class="card-kicker">Create, edit, archive, and search tanks</p>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="scan-manual">
+            <input id="tankNumber" type="text" placeholder="Tank number (1023 / FGT-2201)" autocomplete="off" />
+            <button id="btnAddTank" class="btn btn-primary" type="button">Add Tank</button>
+          </div>
+          <div class="scan-manual" style="margin-top:8px;">
+            <input id="tankDescription" type="text" placeholder="Description (optional)" autocomplete="off" />
+            <input id="tankSearch" type="search" placeholder="Search tanks" autocomplete="off" />
+          </div>
+          <div class="toastline" id="tankHint"></div>
+        </div>
+        <div class="card-body card-body--flush">
+          <div class="table-wrap table-scroll">
+            <table>
+              <thead>
+                <tr><th>Tank #</th><th>Description</th><th>Status</th><th>Actions</th></tr>
+              </thead>
+              <tbody id="tankBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" style="margin-top:14px;">
+        <div class="card-header">
+          <h2 class="card-title">Currently Working</h2>
+          <div class="toolbar">
+            <label for="areaFilter" class="muted">Area</label>
+            <select id="areaFilter">
+              <option value="ALL">All areas</option>
+              <option value="Area A">Area A</option>
+              <option value="Area B">Area B</option>
+              <option value="Area C">Area C</option>
+            </select>
+          </div>
+        </div>
+        <div class="card-body card-body--flush">
+          <div class="table-wrap table-scroll">
+            <table>
+              <thead>
+                <tr><th>Employee</th><th>Status</th><th>Activity</th><th>Tank #</th><th>Area</th><th>Started At</th><th>Elapsed</th><th>Daily hrs</th><th>Weekly hrs</th><th>OT</th><th>Last Scan</th></tr>
+              </thead>
+              <tbody id="currentWorkBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" style="margin-top:14px;">
+        <div class="card-header"><h2 class="card-title">Tank Summary (Today)</h2></div>
+        <div class="card-body card-body--flush">
+          <div class="table-wrap table-scroll">
+            <table>
+              <thead>
+                <tr><th>Tank #</th><th>Workers now</th><th>Total labor hours</th><th>Last activity</th><th>Status</th></tr>
+              </thead>
+              <tbody id="tankSummaryBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" style="margin-top:14px;">
+        <div class="card-header"><h2 class="card-title">Overtime Watch</h2></div>
+        <div class="card-body card-body--flush">
+          <div class="table-wrap table-scroll">
+            <table>
+              <thead>
+                <tr><th>Employee</th><th>Daily hrs</th><th>Weekly hrs</th><th>Regular</th><th>OT</th><th>Est. pay</th><th>Flags</th></tr>
+              </thead>
+              <tbody id="overtimeBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" style="margin-top:14px;">
+        <div class="card-header">
+          <div class="card-header-main">
+            <h2 class="card-title">Kiosk PIN codes</h2>
+            <p class="card-kicker">Change fast PIN login for iPad scan stations (4–6 digits each). Leave blank to skip.</p>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="scan-manual" style="flex-wrap: wrap; gap: 10px;">
+            <label class="muted" style="min-width:72px;">Area A</label>
+            <input id="pinAreaA" type="password" inputmode="numeric" maxlength="6" placeholder="New PIN" autocomplete="new-password" style="max-width:160px;" />
+            <label class="pw-inline"><input id="showPinA" type="checkbox" /> Show</label>
+          </div>
+          <div class="scan-manual" style="flex-wrap: wrap; gap: 10px; margin-top:10px;">
+            <label class="muted" style="min-width:72px;">Area B</label>
+            <input id="pinAreaB" type="password" inputmode="numeric" maxlength="6" placeholder="New PIN" autocomplete="new-password" style="max-width:160px;" />
+            <label class="pw-inline"><input id="showPinB" type="checkbox" /> Show</label>
+          </div>
+          <div class="scan-manual" style="flex-wrap: wrap; gap: 10px; margin-top:10px;">
+            <label class="muted" style="min-width:72px;">Area C</label>
+            <input id="pinAreaC" type="password" inputmode="numeric" maxlength="6" placeholder="New PIN" autocomplete="new-password" style="max-width:160px;" />
+            <label class="pw-inline"><input id="showPinC" type="checkbox" /> Show</label>
+          </div>
+          <div class="toolbar" style="margin-top:14px;">
+            <button id="btnSaveKioskPins" class="btn btn-primary" type="button">Save PIN changes</button>
+          </div>
+          <div class="toastline" id="kioskPinHint"></div>
+        </div>
+      </section>
+    </main>
+    <script src="/manager.js"></script>
+  </body>
+</html>

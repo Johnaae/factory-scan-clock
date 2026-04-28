@@ -1,0 +1,30 @@
+{
+  "name": "factory-scan-clock",
+  "version": "1.0.0",
+  "description": "Lightweight barcode employee IN/OUT clock for small factory offices",
+  "main": "server.js",
+  "scripts": {
+    "dev": "node -r dotenv/config server.js",
+    "start": "node server.js",
+    "migrate": "node -r dotenv/config scripts/migrate.js",
+    "seed": "node -r dotenv/config scripts/seed.js"
+  },
+  "keywords": [
+    "barcode",
+    "clock",
+    "sqlite",
+    "express"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": "^18.18.0 || ^20.9.0 || ^22.0.0 || ^24.0.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.9.0",
+    "express": "^4.21.2",
+    "express-session": "^1.19.0",
+    "dotenv": "^16.5.0",
+    "pdfkit": "^0.15.2",
+    "pg": "^8.16.0"
+  }
+}

@@ -1,0 +1,226 @@
+const empBody = document.getElementById('empBody');
+const search = document.getElementById('search');
+const adminHint = document.getElementById('adminHint');
+
+const modalBackdrop = document.getElementById('modalBackdrop');
+const modalTitle = document.getElementById('modalTitle');
+const modalHint = document.getElementById('modalHint');
+const fCode = document.getElementById('fCode');
+const fName = document.getElementById('fName');
+const fRate = document.getElementById('fRate');
+
+const btnAdd = document.getElementById('btnAdd');
+const btnCloseModal = document.getElementById('btnCloseModal');
+const btnCancel = document.getElementById('btnCancel');
+const btnSave = document.getElementById('btnSave');
+const logoutBtn = document.getElementById('logoutBtn');
+
+let employees = [];
+let editingId = null;
+let searchTimer = null;
+
+function escapeHtml(s) {
+  return String(s)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+}
+
+async function apiJson(url, opts) {
+  const res = await fetch(url, opts);
+  const data = await res.json().catch(() => ({}));
+  return { res, data };
+}
+
+function formatMoney(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return '$0.00';
+  return new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(v);
+}
+
+function parseRateInput() {
+  const n = Number(String(fRate.value || '').trim());
+  if (!Number.isFinite(n) || n < 0) return 20;
+  return Math.round(n * 100) / 100;
+}
+
+function openModal() {
+  modalBackdrop.classList.add('show');
+  modalBackdrop.setAttribute('aria-hidden', 'false');
+}
+
+function closeModal() {
+  modalBackdrop.classList.remove('show');
+  modalBackdrop.setAttribute('aria-hidden', 'true');
+  editingId = null;
+  modalHint.textContent = '';
+}
+
+function render() {
+  const q = search.value.trim().toLowerCase();
+  const rows = employees
+    .filter((e) => {
+      if (!q) return true;
+      return e.code.toLowerCase().includes(q) || e.name.toLowerCase().includes(q);
+    })
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+    .map((e) => {
+      const st = e.is_active ? '<span class="badge badge-in">Active</span>' : '<span class="badge badge-muted">Inactive</span>';
+      const rate = formatMoney(e.hourly_rate != null ? e.hourly_rate : 20);
+      return `<tr>
+        <td><strong>${escapeHtml(e.code)}</strong></td>
+        <td>${escapeHtml(e.name)}</td>
+        <td class="td-num">${escapeHtml(rate)}</td>
+        <td>${st}</td>
+        <td>
+          <div class="toolbar" style="justify-content:flex-start">
+            <button class="btn btn-sm" type="button" data-act="edit" data-id="${e.id}">Edit</button>
+            <button class="btn btn-sm" type="button" data-act="toggle" data-id="${e.id}">${e.is_active ? 'Deactivate' : 'Activate'}</button>
+            <button class="btn btn-danger btn-sm" type="button" data-act="del" data-id="${e.id}">Delete</button>
+          </div>
+        </td>
+      </tr>`;
+    })
+    .join('');
+
+  empBody.innerHTML = rows || '<tr><td colspan="5" class="muted">No employees found.</td></tr>';
+}
+
+async function load() {
+  adminHint.textContent = 'Loading…';
+  const { res, data } = await apiJson('/api/employees');
+  if (!res.ok) {
+    adminHint.textContent = 'Could not load employees.';
+    return;
+  }
+  employees = data.employees || [];
+  adminHint.textContent = `${employees.length} employee${employees.length === 1 ? '' : 's'} loaded.`;
+  render();
+}
+
+function startCreate() {
+  editingId = null;
+  modalTitle.textContent = 'Add employee';
+  fCode.value = '';
+  fName.value = '';
+  fRate.value = '20';
+  fCode.disabled = false;
+  modalHint.textContent = '';
+  openModal();
+  window.setTimeout(() => fCode.focus(), 0);
+}
+
+function startEdit(id) {
+  const e = employees.find((x) => x.id === id);
+  if (!e) return;
+  editingId = id;
+  modalTitle.textContent = 'Edit employee';
+  fCode.value = e.code;
+  fName.value = e.name;
+  fRate.value = String(Number.isFinite(Number(e.hourly_rate)) ? Number(e.hourly_rate) : 20);
+  fCode.disabled = false;
+  modalHint.textContent = '';
+  openModal();
+  window.setTimeout(() => fName.focus(), 0);
+}
+
+async function save() {
+  const code = String(fCode.value || '').trim().replace(/\s+/g, '').toUpperCase();
+  const name = String(fName.value || '').trim();
+  const hourly_rate = parseRateInput();
+  if (!code || !name) {
+    modalHint.textContent = 'Code and name are required.';
+    return;
+  }
+
+  btnSave.disabled = true;
+  modalHint.textContent = 'Saving…';
+  try {
+    if (!editingId) {
+      const { res, data } = await apiJson('/api/employees', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code, name, hourly_rate }),
+      });
+      if (!res.ok) {
+        modalHint.textContent = (data && data.message) || 'Could not create employee.';
+        return;
+      }
+    } else {
+      const { res, data } = await apiJson(`/api/employees/${editingId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code, name, hourly_rate }),
+      });
+      if (!res.ok) {
+        modalHint.textContent = (data && data.message) || 'Could not update employee.';
+        return;
+      }
+    }
+    closeModal();
+    await load();
+  } finally {
+    btnSave.disabled = false;
+  }
+}
+
+async function toggleActive(id) {
+  const { res, data } = await apiJson(`/api/employees/${id}/toggle-active`, { method: 'PATCH' });
+  if (!res.ok) {
+    adminHint.textContent = (data && data.message) || 'Toggle failed.';
+    return;
+  }
+  await load();
+}
+
+async function delEmp(id) {
+  const ok = window.confirm('Delete this employee? This cannot be undone.');
+  if (!ok) return;
+  const { res, data } = await apiJson(`/api/employees/${id}`, { method: 'DELETE' });
+  if (!res.ok) {
+    adminHint.textContent = (data && data.message) || 'Delete failed.';
+    return;
+  }
+  await load();
+}
+
+empBody.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-act]');
+  if (!btn) return;
+  const id = Number(btn.getAttribute('data-id'));
+  const act = btn.getAttribute('data-act');
+  if (!Number.isFinite(id)) return;
+  if (act === 'edit') startEdit(id);
+  if (act === 'toggle') void toggleActive(id);
+  if (act === 'del') void delEmp(id);
+});
+
+btnAdd.addEventListener('click', () => startCreate());
+btnCloseModal.addEventListener('click', () => closeModal());
+btnCancel.addEventListener('click', () => closeModal());
+btnSave.addEventListener('click', () => void save());
+
+modalBackdrop.addEventListener('click', (e) => {
+  if (e.target === modalBackdrop) closeModal();
+});
+
+search.addEventListener('input', () => {
+  window.clearTimeout(searchTimer);
+  searchTimer = window.setTimeout(() => render(), 120);
+});
+
+window.addEventListener('load', () => {
+  void load();
+  window.setInterval(() => {
+    void load();
+  }, 8000);
+});
+
+if (logoutBtn) {
+  logoutBtn.addEventListener('click', async () => {
+    await apiJson('/api/auth/logout', { method: 'POST' });
+    window.location.href = '/login';
+  });
+}

@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Factory Scan Clock — Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 7V6a2 2 0 0 1 2-2h2" />
+              <path d="M4 17v1a2 2 0 0 0 2 2h2" />
+              <path d="M16 4h2a2 2 0 0 1 2 2v1" />
+              <path d="M16 20h2a2 2 0 0 0 2-2v-1" />
+              <path d="M8 12h8" />
+              <path d="M9 9l-2 3 2 3" />
+              <path d="M15 9l2 3-2 3" />
+            </svg>
+          </div>
+          <div class="brand-text">
+            <div class="brand-title">Factory Scan Clock</div>
+            <div class="brand-sub">Barcode time clock</div>
+          </div>
+        </div>
+        <nav class="nav" aria-label="Primary">
+          <a href="/manager-dashboard">Manager</a>
+          <a class="active" href="/">Main Dashboard</a>
+          <a href="/scan">iPad Scan</a>
+        </nav>
+        <button id="logoutBtn" class="btn btn-sm" type="button">Logout</button>
+      </div>
+    </header>
+
+    <div class="subnav-wrap">
+      <nav class="subnav" aria-label="Main dashboard sections">
+        <a class="active" href="/">Dashboard</a>
+        <a href="/admin.html">Employees</a>
+        <a href="/summary.html">Daily Summary</a>
+      </nav>
+    </div>
+
+    <main class="container">
+      <div class="grid dashboard-grid">
+        <section class="card scan-panel" id="scanRoot">
+          <div class="card-header">
+            <div class="card-header-main">
+              <h2 class="card-title">Scan station</h2>
+              <p class="card-kicker">Ready for badge scan — use handheld barcode scanner (keyboard + Enter)</p>
+            </div>
+            <div class="toolbar">
+              <button class="btn btn-sound" type="button" id="btnSound" title="Required once for browser audio">Enable sound</button>
+              <div class="live-clock" aria-live="polite">
+                <div class="live-clock-date" id="clockDate">—</div>
+                <div class="live-clock-time" id="clock">--:--:--</div>
+              </div>
+            </div>
+          </div>
+          <div class="card-body">
+            <input id="scanInput" class="hidden-scan-input" type="text" inputmode="none" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="Barcode scan input" />
+
+            <div class="scan-hero">
+              <div class="scan-hero-glow" aria-hidden="true"></div>
+              <div class="scan-stage" id="scanStage">
+              <div class="scan-viewport">
+                <div class="scan-idle" id="scanWait" aria-hidden="false">
+                  <p class="scan-wait-kicker">Scanner ready</p>
+                  <h3 class="scan-wait-title">Ready for badge scan</h3>
+                  <p class="scan-wait-sub">Use handheld barcode scanner. It acts like a keyboard and submits with <strong>Enter</strong>.</p>
+                </div>
+
+                <div class="scan-feedback" id="scanResult" aria-live="assertive">
+                  <div class="feedback-card">
+                    <div class="result-pill" id="scanPill">IN</div>
+                    <div class="result-name" id="scanName"></div>
+                    <div class="result-code" id="scanCode"></div>
+                    <div class="result-time" id="scanTime"></div>
+                  </div>
+                </div>
+              </div>
+              </div>
+            </div>
+
+            <div class="scan-manual retain-focus">
+              <label class="sr-only" for="manualScanInput">Manual barcode input</label>
+              <input
+                id="manualScanInput"
+                type="text"
+                inputmode="text"
+                autocomplete="off"
+                autocorrect="off"
+                autocapitalize="characters"
+                spellcheck="false"
+                maxlength="40"
+                placeholder="Manual barcode (e.g. EMP001)"
+              />
+              <button class="btn btn-primary" type="button" id="btnManualScan">Scan</button>
+            </div>
+            <section class="tank-panel retain-focus" aria-label="Tank number input">
+              <h3 class="tank-title">Enter tank number</h3>
+              <p class="tank-subtitle">After activity selection, tank input is focused automatically.</p>
+              <div class="tank-input-row">
+                <input
+                  id="tankInput"
+                  type="text"
+                  inputmode="numeric"
+                  pattern="[0-9]*"
+                  maxlength="12"
+                  autocomplete="off"
+                  placeholder="Tank #"
+                  aria-label="Tank number"
+                />
+                <button class="btn btn-primary" type="button" id="btnTankConfirm">Confirm</button>
+              </div>
+              <div class="tank-keypad" id="tankKeypad" role="group" aria-label="Tank numeric keypad">
+                <button type="button" class="btn tank-key" data-tank-key="1">1</button>
+                <button type="button" class="btn tank-key" data-tank-key="2">2</button>
+                <button type="button" class="btn tank-key" data-tank-key="3">3</button>
+                <button type="button" class="btn tank-key" data-tank-key="4">4</button>
+                <button type="button" class="btn tank-key" data-tank-key="5">5</button>
+                <button type="button" class="btn tank-key" data-tank-key="6">6</button>
+                <button type="button" class="btn tank-key" data-tank-key="7">7</button>
+                <button type="button" class="btn tank-key" data-tank-key="8">8</button>
+                <button type="button" class="btn tank-key" data-tank-key="9">9</button>
+                <button type="button" class="btn tank-key tank-key-clear" data-tank-action="clear">Clear</button>
+                <button type="button" class="btn tank-key" data-tank-key="0">0</button>
+                <button type="button" class="btn tank-key tank-key-back" data-tank-action="back">⌫</button>
+              </div>
+            </section>
+            <div class="scan-ready-indicator" aria-live="polite">Scanner ready</div>
+
+            <div id="scanNoteOverlay" class="scan-note-overlay" aria-hidden="true">
+              <div
+                id="scanNoteDialog"
+                class="scan-note-dialog retain-focus"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="scanNoteHeading"
+              >
+                <div id="scanNoteDialogBody" class="scan-note-dialog-body"></div>
+              </div>
+            </div>
+            <div id="scanToast" class="scan-toast" aria-live="polite" role="status" aria-hidden="true" hidden></div>
+
+            <p class="footer-note">
+              Keep this page fullscreen on the office PC. Scan employee badges with a handheld barcode scanner. The hidden scan field auto-refocuses after actions.
+            </p>
+          </div>
+        </section>
+
+        <section class="split">
+          <div class="card card-last-scan">
+            <div class="card-header">
+              <div class="card-header-main">
+                <h2 class="card-title">Last scanned</h2>
+                <p class="card-kicker">Most recent successful clock event</p>
+              </div>
+            </div>
+            <div class="card-body" id="lastScanCard">
+              <div class="muted" style="font-weight: 700">No scans yet.</div>
+            </div>
+          </div>
+
+          <div class="card export-hub-card">
+            <div class="card-body export-hub-body retain-focus">
+              <header class="export-hub-head">
+                <h2 class="export-hub-title">Export Reports</h2>
+                <p class="export-hub-subtitle">
+                  Export payroll summaries or raw scan logs by format, date scope, and employee.
+                </p>
+              </header>
+              <div class="export-hub-controls export-panel">
+                <div class="export-hub-grid">
+                  <div class="export-hub-field">
+                    <span class="export-hub-label" id="lblExpFormat">Format</span>
+                    <div class="segmented" role="group" aria-labelledby="lblExpFormat">
+                      <label class="segmented-opt"
+                        ><input type="radio" name="expFormat" value="pdf" /><span>PDF</span></label
+                      >
+                      <label class="segmented-opt"
+                        ><input type="radio" name="expFormat" value="csv" checked /><span>CSV</span></label
+                      >
+                    </div>
+                  </div>
+                  <div class="export-hub-field">
+                    <span class="export-hub-label" id="lblExpScope">Date scope</span>
+                    <div class="segmented" role="group" aria-labelledby="lblExpScope">
+                      <label class="segmented-opt"
+                        ><input type="radio" name="expScope" value="today" checked /><span>Today</span></label
+                      >
+                      <label class="segmented-opt" title="Date range"
+                        ><input type="radio" name="expScope" value="range" /><span>Range</span></label
+                      >
+                      <label class="segmented-opt"
+                        ><input type="radio" name="expScope" value="all" /><span>All logs</span></label
+                      >
+                    </div>
+                  </div>
+                  <div class="export-hub-field">
+                    <span class="export-hub-label" id="lblExpWorkers">Workers</span>
+                    <div class="segmented" role="group" aria-labelledby="lblExpWorkers">
+                      <label class="segmented-opt"
+                        ><input type="radio" name="expWorkerMode" value="all" checked /><span>All workers</span></label
+                      >
+                      <label class="segmented-opt"
+                        ><input type="radio" name="expWorkerMode" value="single" /><span>One employee</span></label
+                      >
+                    </div>
+                  </div>
+                </div>
+                <div class="export-hub-employee is-hidden" id="expEmployeeWrap" aria-hidden="true">
+                  <label class="export-hub-label" for="expEmployee">Employee</label>
+                  <select id="expEmployee" class="export-select-premium" aria-label="Select employee for export">
+                    <option value="all">All workers</option>
+                  </select>
+                </div>
+                <div class="export-hub-dates split split-2 export-date-row is-hidden" id="expDateRow">
+                  <div class="field retain-focus">
+                    <label for="expStart">Start date</label>
+                    <input id="expStart" type="date" />
+                  </div>
+                  <div class="field retain-focus">
+                    <label for="expEnd">End date</label>
+                    <input id="expEnd" type="date" />
+                  </div>
+                </div>
+                <div class="export-hub-actions">
+                  <button class="btn btn-primary btn-export-report" type="button" id="btnExportReport" aria-busy="false">
+                    <svg class="btn-export-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                      <path
+                        d="M12 3v12m0 0 4-4m-4 4-4-4M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                      />
+                    </svg>
+                    <span class="btn-export-label">Export Report</span>
+                  </button>
+                </div>
+                <p class="export-status-line" id="exportHint" role="status"></p>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <section class="kpi-grid section-stack" aria-label="Summary metrics">
+        <article class="kpi-card kpi-total">
+          <div class="kpi-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          </div>
+          <div class="kpi-label">Total employees</div>
+          <div class="kpi-value" id="mTotal">0</div>
+        </article>
+        <article class="kpi-card kpi-in">
+          <div class="kpi-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
+          </div>
+          <div class="kpi-label">Currently IN</div>
+          <div class="kpi-value" id="mIn">0</div>
+        </article>
+        <article class="kpi-card kpi-out">
+          <div class="kpi-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
+          </div>
+          <div class="kpi-label">Currently OUT</div>
+          <div class="kpi-value" id="mOut">0</div>
+        </article>
+        <article class="kpi-card kpi-scans">
+          <div class="kpi-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>
+          </div>
+          <div class="kpi-label">Scans today</div>
+          <div class="kpi-value" id="mScansToday">0</div>
+        </article>
+      </section>
+
+      <section class="card payroll-section section-stack" aria-label="Daily work and payroll">
+        <div class="payroll-section-head">
+          <div class="payroll-section-head-main">
+            <h2 class="card-title">Daily Work &amp; Payroll</h2>
+            <p class="card-kicker">
+              Paid time from <strong>IN→OUT</strong> scan pairs today (server date). Incomplete pairs excluded. Hours rounded to whole hours;
+              wage = hours × hourly rate.
+            </p>
+          </div>
+        </div>
+
+        <div class="payroll-strip" aria-label="Payroll totals today">
+          <article class="payroll-stat payroll-stat-hours">
+            <div class="payroll-stat-label">Total hours today</div>
+            <div class="payroll-stat-value" id="payTotalHours">0</div>
+          </article>
+          <article class="payroll-stat payroll-stat-money">
+            <div class="payroll-stat-label">Total payroll today</div>
+            <div class="payroll-stat-value payroll-stat-value-money" id="payTotalWage">$0.00</div>
+          </article>
+          <article class="payroll-stat payroll-stat-avg">
+            <div class="payroll-stat-label">Avg hours / employee</div>
+            <div class="payroll-stat-value" id="payAvgHours">0</div>
+          </article>
+        </div>
+
+        <div class="card-body card-body--flush">
+          <div class="table-panel">
+            <div class="table-wrap table-scroll">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th class="th-num">Hours</th>
+                    <th class="th-num">Rate</th>
+                    <th class="th-num">Total</th>
+                  </tr>
+                </thead>
+                <tbody id="payrollBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <div class="card-body" style="padding-top: 0">
+          <p class="toastline" id="payrollHint"></p>
+        </div>
+      </section>
+
+      <div class="grid section-stack">
+        <section class="card">
+          <div class="card-header card-header-rows">
+            <div class="card-header-main">
+              <h2 class="card-title">Employee status</h2>
+              <p class="card-kicker">Presence derived from the latest scan per person</p>
+            </div>
+            <div class="card-header-tools retain-focus">
+              <label class="sr-only" for="statusFilter">Filter employees</label>
+              <input type="search" id="statusFilter" class="input-filter" placeholder="Filter by name or code" autocomplete="off" />
+            </div>
+          </div>
+          <div class="card-body card-body--flush">
+            <div class="table-panel">
+            <div class="table-wrap table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Code</th>
+                    <th>Name</th>
+                    <th>Active</th>
+                    <th>Status</th>
+                    <th>Last scan</th>
+                  </tr>
+                </thead>
+                <tbody id="statusBody"></tbody>
+              </table>
+            </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-header card-header-rows">
+            <div class="card-header-main">
+              <h2 class="card-title">Recent scan logs</h2>
+              <p class="card-kicker">Newest first — latest scan highlighted briefly</p>
+            </div>
+            <div class="card-header-tools card-header-tools-stack retain-focus">
+              <div class="filter-chips" id="logsChips" role="group" aria-label="Filter logs by direction">
+                <button type="button" class="chip chip-active" data-log-filter="all" id="logChipAll">All</button>
+                <button type="button" class="chip" data-log-filter="IN" id="logChipIn">IN</button>
+                <button type="button" class="chip" data-log-filter="OUT" id="logChipOut">OUT</button>
+              </div>
+              <label class="sr-only" for="logsFilter">Search logs</label>
+              <input type="search" id="logsFilter" class="input-filter" placeholder="Search name, code…" autocomplete="off" />
+            </div>
+          </div>
+          <div class="card-body card-body--flush">
+            <div class="table-panel">
+            <div class="table-wrap table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Code</th>
+                    <th>Name</th>
+                    <th>Status</th>
+                    <th>Note</th>
+                  </tr>
+                </thead>
+                <tbody id="logsBody"></tbody>
+              </table>
+            </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

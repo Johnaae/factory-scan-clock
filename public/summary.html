@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Factory Scan Clock — Daily Summary</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 7V6a2 2 0 0 1 2-2h2" />
+              <path d="M4 17v1a2 2 0 0 0 2 2h2" />
+              <path d="M16 4h2a2 2 0 0 1 2 2v1" />
+              <path d="M16 20h2a2 2 0 0 0 2-2v-1" />
+              <path d="M8 12h8" />
+              <path d="M9 9l-2 3 2 3" />
+              <path d="M15 9l2 3-2 3" />
+            </svg>
+          </div>
+          <div class="brand-text">
+            <div class="brand-title">Factory Scan Clock</div>
+            <div class="brand-sub">Daily attendance snapshot</div>
+          </div>
+        </div>
+        <nav class="nav" aria-label="Primary">
+          <a href="/manager-dashboard">Manager</a>
+          <a class="active" href="/">Main Dashboard</a>
+          <a href="/scan">iPad Scan</a>
+        </nav>
+        <button id="logoutBtn" class="btn btn-sm" type="button">Logout</button>
+      </div>
+    </header>
+
+    <div class="subnav-wrap">
+      <nav class="subnav" aria-label="Main dashboard sections">
+        <a href="/">Dashboard</a>
+        <a href="/admin.html">Employees</a>
+        <a class="active" href="/summary.html">Daily Summary</a>
+      </nav>
+    </div>
+
+    <main class="container">
+      <div class="page-hero">
+        <h1>Daily summary</h1>
+        <p>Per-employee first IN, last OUT, scan count, and end-of-day status for the selected calendar date.</p>
+      </div>
+
+      <section class="card">
+        <div class="card-header card-header-rows">
+          <div class="card-header-main">
+            <h2 class="card-title">Summary &amp; export</h2>
+            <p class="card-kicker">Pick a calendar date for the grid below. Exports use the unified report builder (CSV &amp; PDF).</p>
+          </div>
+          <div class="toolbar">
+            <button class="btn btn-primary" type="button" id="btnToday">Jump to today</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="field retain-focus" style="max-width: 320px">
+            <label for="sumDate">Summary date</label>
+            <input id="sumDate" type="date" />
+          </div>
+
+          <div class="card export-hub-card" style="margin-top: var(--space-5)">
+            <div class="card-body export-hub-body retain-focus">
+              <header class="export-hub-head">
+                <h2 class="export-hub-title">Export Reports</h2>
+                <p class="export-hub-subtitle">
+                  Export payroll summaries or raw scan logs by format, date scope, and employee.
+                </p>
+              </header>
+              <div class="export-hub-controls export-panel">
+                <div class="export-hub-grid">
+                  <div class="export-hub-field">
+                    <span class="export-hub-label" id="lblSxFormat">Format</span>
+                    <div class="segmented" role="group" aria-labelledby="lblSxFormat">
+                      <label class="segmented-opt"
+                        ><input type="radio" name="sxFormat" value="pdf" /><span>PDF</span></label
+                      >
+                      <label class="segmented-opt"
+                        ><input type="radio" name="sxFormat" value="csv" checked /><span>CSV</span></label
+                      >
+                    </div>
+                  </div>
+                  <div class="export-hub-field">
+                    <span class="export-hub-label" id="lblSxScope">Date scope</span>
+                    <div class="segmented" role="group" aria-labelledby="lblSxScope">
+                      <label class="segmented-opt"
+                        ><input type="radio" name="sxScope" value="today" checked /><span>Today</span></label
+                      >
+                      <label class="segmented-opt" title="Date range"
+                        ><input type="radio" name="sxScope" value="range" /><span>Range</span></label
+                      >
+                      <label class="segmented-opt"
+                        ><input type="radio" name="sxScope" value="all" /><span>All logs</span></label
+                      >
+                    </div>
+                  </div>
+                  <div class="export-hub-field">
+                    <span class="export-hub-label" id="lblSxWorkers">Workers</span>
+                    <div class="segmented" role="group" aria-labelledby="lblSxWorkers">
+                      <label class="segmented-opt"
+                        ><input type="radio" name="sxWorkerMode" value="all" checked /><span>All workers</span></label
+                      >
+                      <label class="segmented-opt"
+                        ><input type="radio" name="sxWorkerMode" value="single" /><span>One employee</span></label
+                      >
+                    </div>
+                  </div>
+                </div>
+                <div class="export-hub-employee is-hidden" id="sxEmployeeWrap" aria-hidden="true">
+                  <label class="export-hub-label" for="sxEmployee">Employee</label>
+                  <select id="sxEmployee" class="export-select-premium" aria-label="Select employee for export">
+                    <option value="all">All workers</option>
+                  </select>
+                </div>
+                <div class="export-hub-dates split split-2 export-date-row is-hidden" id="sxDateRow">
+                  <div class="field retain-focus">
+                    <label for="sxStart">Start date</label>
+                    <input id="sxStart" type="date" />
+                  </div>
+                  <div class="field retain-focus">
+                    <label for="sxEnd">End date</label>
+                    <input id="sxEnd" type="date" />
+                  </div>
+                </div>
+                <div class="export-hub-actions">
+                  <button class="btn btn-primary btn-export-report" type="button" id="btnSxExport" aria-busy="false">
+                    <svg class="btn-export-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                      <path
+                        d="M12 3v12m0 0 4-4m-4 4-4-4M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                      />
+                    </svg>
+                    <span class="btn-export-label">Export Report</span>
+                  </button>
+                </div>
+                <p class="export-status-line" id="sxExportHint" role="status"></p>
+              </div>
+            </div>
+          </div>
+
+          <div class="toastline" id="sumHint" style="margin-top: 14px"></div>
+        </div>
+        <div class="card-body card-body--flush">
+          <div class="table-panel">
+          <div class="table-wrap table-scroll">
+            <table class="summary-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Code</th>
+                  <th>Active</th>
+                  <th>First IN</th>
+                  <th>Last OUT</th>
+                  <th class="th-num">Scans</th>
+                  <th>Status (day)</th>
+                  <th class="th-num">Hours (rnd)</th>
+                  <th class="th-num">Hourly rate</th>
+                  <th class="th-num">Total wage</th>
+                </tr>
+              </thead>
+              <tbody id="sumBody"></tbody>
+            </table>
+          </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/summary.js"></script>
+  </body>
+</html>
