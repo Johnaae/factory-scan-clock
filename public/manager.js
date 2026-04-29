@@ -60,6 +60,20 @@ function fmtMoney(v) {
   return new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' }).format(n);
 }
 
+function titleCaseFlag(flag) {
+  const map = {
+    missing_out: 'Missing OUT',
+    duplicate_scan: 'Duplicate scan',
+    daily_overtime: 'Over 8h today',
+    weekly_overtime: 'Over 40h week',
+    overtime_warning: 'Overtime warning',
+  };
+  if (map[flag]) return map[flag];
+  return String(flag || '')
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 function minutesToText(mins) {
   const m = Number(mins || 0);
   const h = Math.floor(m / 60);
@@ -174,7 +188,13 @@ async function loadCurrentWork() {
       <td data-started-at="${r.started_at || ''}">${elapsedFromIso(r.started_at)}</td>
       <td>${r.daily_hours}</td>
       <td>${r.weekly_hours}</td>
-      <td>${r.overtime_warning ? '<span class="badge badge-warn">Watch</span>' : '-'}</td>
+      <td>${
+        Array.isArray(r.flags) && r.flags.length
+          ? r.flags.map((f) => `<span class="badge badge-warn">${titleCaseFlag(f)}</span>`).join(' ')
+          : r.overtime_warning
+            ? '<span class="badge badge-warn">Watch</span>'
+            : '<span class="badge badge-warn">Missing OUT</span>'
+      }</td>
       <td>${fmtIso(r.last_scan_time)}</td>
     </tr>`
       )
@@ -207,19 +227,21 @@ async function loadOvertime() {
   overtimeBody.innerHTML =
     rows
       .map((r) => {
-        const flags = [
-          r.flag_daily_over_8h ? '<span class="badge badge-out">Over 8h today</span>' : '',
-          r.flag_daily_close_8h ? '<span class="badge badge-warn">Close to 8h</span>' : '',
-          r.flag_weekly_over_40h ? '<span class="badge badge-out">Over 40h week</span>' : '',
-        ]
-          .filter(Boolean)
-          .join(' ');
+        const flags = Array.isArray(r.flags) && r.flags.length
+          ? r.flags.map((f) => `<span class="badge badge-warn">${titleCaseFlag(f)}</span>`).join(' ')
+          : [
+              r.flag_daily_over_8h ? '<span class="badge badge-out">Over 8h today</span>' : '',
+              r.flag_daily_close_8h ? '<span class="badge badge-warn">Close to 8h</span>' : '',
+              r.flag_weekly_over_40h ? '<span class="badge badge-out">Over 40h week</span>' : '',
+            ]
+              .filter(Boolean)
+              .join(' ');
         return `<tr>
           <td>${r.employee_name} (${r.employee_code})</td>
-          <td>${r.daily_hours}</td>
-          <td>${r.weekly_hours}</td>
-          <td>${r.regular_hours}</td>
-          <td>${r.overtime_hours}</td>
+          <td>${Number(r.daily_hours || 0).toFixed(2)}</td>
+          <td>${Number(r.weekly_hours || 0).toFixed(2)}</td>
+          <td>${Number(r.regular_hours || 0).toFixed(2)}</td>
+          <td>${Number(r.overtime_hours || 0).toFixed(2)}</td>
           <td>${fmtMoney(r.estimated_pay)}</td>
           <td>${flags || '-'}</td>
         </tr>`;
@@ -254,7 +276,7 @@ tankBody.addEventListener('click', (e) => {
 window.addEventListener('load', () => {
   void refreshAll();
   void refreshAuthUi();
-  window.setInterval(() => void refreshAll(), 5000);
+  window.setInterval(() => void refreshAll(), 3500);
   window.setInterval(() => refreshCurrentWorkElapsedCells(), 1000);
 });
 

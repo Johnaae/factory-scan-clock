@@ -3003,6 +3003,7 @@ async function managerCurrentWorkRows() {
 
   const rows = [];
   for (const e of employees) {
+    const eid = Number(e.id);
     const latestRes = await pool.query(
       `SELECT status, scanned_at FROM scan_logs WHERE employee_code = $1 ORDER BY scanned_at DESC, id DESC LIMIT 1`,
       [e.code]
@@ -3019,8 +3020,8 @@ async function managerCurrentWorkRows() {
     const elapsedMs = Number.isFinite(startMs) ? Math.max(0, Date.now() - startMs) : 0;
     const activity = inRow.note_value || inRow.note || '-';
     const tank_number = inRow.tank_number || '-';
-    const dailyHours = dailyMap.get(e.id) || 0;
-    const weeklyHours = weeklyMap.get(e.id) || 0;
+    const dailyHours = dailyMap.get(eid) || 0;
+    const weeklyHours = weeklyMap.get(eid) || 0;
     rows.push({
       employee_code: e.code,
       employee_name: e.name,
@@ -3037,6 +3038,7 @@ async function managerCurrentWorkRows() {
       daily_hours: dailyHours,
       weekly_hours: weeklyHours,
       overtime_warning: dailyHours > 8 || weeklyHours > 40,
+      flags: dailyHours > 8 || weeklyHours > 40 ? ['overtime_warning'] : ['missing_out'],
     });
   }
   rows.sort((a, b) => a.employee_name.localeCompare(b.employee_name, undefined, { sensitivity: 'base' }));
@@ -3113,16 +3115,50 @@ async function managerOvertimeWatch() {
   const weeklyMap = await buildWorkedHoursMapForWindow(week, weekClose);
   const emRes = await pool.query(`SELECT id, code, name, hourly_rate FROM employees WHERE is_active = 1`);
   const employees = emRes.rows;
+  const tlogRes = await pool.query(
+    `SELECT employee_code, status, scanned_at, id
+     FROM scan_logs
+     WHERE scanned_at >= $1::timestamptz AND scanned_at <= $2::timestamptz
+     ORDER BY employee_code ASC, scanned_at ASC, id ASC`,
+    [today.startIso, today.endIso]
+  );
+  /** @type {Map<string, Array<{status:string, scanned_at:string, id:number}>>} */
+  const todayLogsByCode = new Map();
+  for (const row of tlogRes.rows) {
+    const code = normalizeCode(row.employee_code);
+    if (!todayLogsByCode.has(code)) todayLogsByCode.set(code, []);
+    todayLogsByCode.get(code).push(row);
+  }
   const rows = [];
   for (const e of employees) {
-    const dailyHours = dailyMap.get(e.id) || 0;
-    const weeklyHours = weeklyMap.get(e.id) || 0;
+    const eid = Number(e.id);
+    const dailyHours = dailyMap.get(eid) || 0;
+    const weeklyHours = weeklyMap.get(eid) || 0;
     const dailyOt = Math.max(0, dailyHours - 8);
     const weeklyOt = Math.max(0, weeklyHours - 40);
     const otHours = Math.max(dailyOt, weeklyOt);
     const regularHours = Math.max(0, dailyHours - otHours);
     const rate = Number.isFinite(Number(e.hourly_rate)) ? Number(e.hourly_rate) : 20;
-    const estimatedPay = regularHours * rate + otHours * rate * 1.5;
+    const estimatedPay = dailyHours * rate;
+    const logsToday = todayLogsByCode.get(normalizeCode(e.code)) || [];
+    const latest = logsToday.length ? logsToday[logsToday.length - 1] : null;
+    let duplicateFastScan = false;
+    for (let i = 1; i < logsToday.length; i += 1) {
+      const a = logsToday[i - 1];
+      const b = logsToday[i];
+      if (String(a.status || '').toUpperCase() !== String(b.status || '').toUpperCase()) continue;
+      const ta = new Date(a.scanned_at).getTime();
+      const tb = new Date(b.scanned_at).getTime();
+      if (!Number.isNaN(ta) && !Number.isNaN(tb) && tb - ta >= 0 && tb - ta <= SCAN_DEBOUNCE_MS) {
+        duplicateFastScan = true;
+        break;
+      }
+    }
+    const flags = [];
+    if (latest && String(latest.status || '').toUpperCase() === 'IN') flags.push('missing_out');
+    if (duplicateFastScan) flags.push('duplicate_scan');
+    if (dailyHours > 8) flags.push('daily_overtime');
+    if (weeklyHours > 40) flags.push('weekly_overtime');
     rows.push({
       employee_code: e.code,
       employee_name: e.name,
@@ -3134,6 +3170,7 @@ async function managerOvertimeWatch() {
       flag_daily_over_8h: dailyHours > 8,
       flag_daily_close_8h: dailyHours >= 7 && dailyHours <= 8,
       flag_weekly_over_40h: weeklyHours > 40,
+      flags,
     });
   }
   return rows;
