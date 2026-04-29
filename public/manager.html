@@ -27,24 +27,33 @@
       </div>
     </header>
 
-    <main class="container">
-      <section class="card">
+    <main class="container manager-layout">
+      <section class="card manager-card">
         <div class="card-header">
           <div class="card-header-main">
             <h2 class="card-title">Tank Management</h2>
-            <p class="card-kicker">Create, edit, archive, and search tanks</p>
+            <p class="card-kicker">Track production tanks, update status, and print traveler barcodes.</p>
           </div>
         </div>
-        <div class="card-body">
-          <div class="scan-manual">
-            <input id="tankNumber" type="text" placeholder="Tank number (1023 / FGT-2201)" autocomplete="off" />
-            <button id="btnAddTank" class="btn btn-primary" type="button">Add Tank</button>
+        <div class="card-body manager-form-stack">
+          <div class="manager-form-grid manager-form-grid-2">
+            <div class="field">
+              <label for="tankNumber">Tank Number</label>
+              <input id="tankNumber" type="text" placeholder="e.g. 1023 or FGT-2201" autocomplete="off" />
+            </div>
+            <button id="btnAddTank" class="btn btn-primary manager-action-btn" type="button">Add Tank</button>
           </div>
-          <div class="scan-manual" style="margin-top:8px;">
-            <input id="tankDescription" type="text" placeholder="Description (optional)" autocomplete="off" />
-            <input id="tankSearch" type="search" placeholder="Search tanks" autocomplete="off" />
+          <div class="manager-form-grid manager-form-grid-2">
+            <div class="field">
+              <label for="tankDescription">Description</label>
+              <input id="tankDescription" type="text" placeholder="Optional short description" autocomplete="off" />
+            </div>
+            <div class="field">
+              <label for="tankSearch">Search Tanks</label>
+              <input id="tankSearch" type="search" placeholder="Search by tank number or description" autocomplete="off" />
+            </div>
           </div>
-          <div class="toastline" id="tankHint"></div>
+          <div class="toastline manager-alert" id="tankHint"></div>
         </div>
         <div class="card-body card-body--flush">
           <div class="table-wrap table-scroll">
@@ -58,7 +67,7 @@
         </div>
       </section>
 
-      <section class="card" style="margin-top:14px;">
+      <section class="card manager-card">
         <div class="card-header">
           <h2 class="card-title">Currently Working</h2>
           <div class="toolbar">
@@ -83,7 +92,7 @@
         </div>
       </section>
 
-      <section class="card" style="margin-top:14px;">
+      <section class="card manager-card">
         <div class="card-header"><h2 class="card-title">Tank Summary (Today)</h2></div>
         <div class="card-body card-body--flush">
           <div class="table-wrap table-scroll">
@@ -97,7 +106,7 @@
         </div>
       </section>
 
-      <section class="card" style="margin-top:14px;">
+      <section class="card manager-card">
         <div class="card-header"><h2 class="card-title">Overtime Watch</h2></div>
         <div class="card-body card-body--flush">
           <div class="table-wrap table-scroll">
@@ -111,77 +120,90 @@
         </div>
       </section>
 
-      <section class="card" id="ownerSecuritySection" style="margin-top:14px; display:none;">
+      <section class="card manager-card" id="ownerSecuritySection" style="display:none;">
         <div class="card-header">
           <div class="card-header-main">
             <h2 class="card-title">Owner Security</h2>
-            <p class="card-kicker">Visible only to Backup Owner Account.</p>
+            <p class="card-kicker">Backup owner tools, visible only to owner.</p>
           </div>
         </div>
         <div class="card-body">
-          <h3 class="card-title" style="font-size:1rem;margin:0 0 8px;">Change Owner Password</h3>
-          <div class="scan-manual" style="flex-wrap: wrap; gap: 10px; margin-bottom:8px;">
-            <label class="muted" style="min-width:170px;">Current password</label>
-            <input id="ownerCurrentPassword" type="password" autocomplete="current-password" placeholder="Current owner password" style="max-width:240px;" />
-          </div>
-          <div class="scan-manual" style="flex-wrap: wrap; gap: 10px; margin-bottom:8px;">
-            <label class="muted" style="min-width:170px;">New password</label>
-            <input id="ownerNewPassword" type="password" autocomplete="new-password" placeholder="At least 6 characters" style="max-width:240px;" />
-          </div>
-          <div class="scan-manual" style="flex-wrap: wrap; gap: 10px;">
-            <label class="muted" style="min-width:170px;">Confirm new password</label>
-            <input id="ownerConfirmPassword" type="password" autocomplete="new-password" placeholder="Confirm password" style="max-width:240px;" />
-            <label class="pw-inline"><input id="showOwnerPasswords" type="checkbox" /> Show</label>
-          </div>
-          <div class="toolbar" style="margin-top:14px;">
-            <button id="btnChangeOwnerPassword" class="btn btn-primary" type="button">Change Owner Password</button>
-          </div>
-          <div class="toastline" id="ownerPasswordHint" style="margin-bottom:14px;"></div>
+          <div class="manager-security-grid">
+            <article class="manager-subcard">
+              <h3 class="manager-subcard-title">Change Owner Password</h3>
+              <div class="field">
+                <label for="ownerCurrentPassword">Current Password</label>
+                <input id="ownerCurrentPassword" type="password" autocomplete="current-password" placeholder="Enter current owner password" />
+              </div>
+              <div class="field">
+                <label for="ownerNewPassword">New Password</label>
+                <input id="ownerNewPassword" type="password" autocomplete="new-password" placeholder="Enter new owner password" />
+              </div>
+              <div class="field">
+                <label for="ownerConfirmPassword">Confirm New Password</label>
+                <input id="ownerConfirmPassword" type="password" autocomplete="new-password" placeholder="Re-enter new owner password" />
+              </div>
+              <label class="pw-inline manager-checkbox"><input id="showOwnerPasswords" type="checkbox" /> Show passwords</label>
+              <button id="btnChangeOwnerPassword" class="btn btn-primary manager-full-btn" type="button">Change Owner Password</button>
+              <div class="toastline manager-alert" id="ownerPasswordHint"></div>
+            </article>
 
-          <h3 class="card-title" style="font-size:1rem;margin:8px 0;">Reset Manager Password</h3>
-          <div class="scan-manual" style="flex-wrap: wrap; gap: 10px; margin-bottom:8px;">
-            <label class="muted" style="min-width:170px;">New manager password</label>
-            <input id="managerResetPassword" type="password" autocomplete="new-password" placeholder="At least 6 characters" style="max-width:240px;" />
+            <article class="manager-subcard">
+              <h3 class="manager-subcard-title">Reset Manager Password</h3>
+              <div class="field">
+                <label for="managerResetPassword">New Manager Password</label>
+                <input id="managerResetPassword" type="password" autocomplete="new-password" placeholder="Enter new manager password" />
+              </div>
+              <div class="field">
+                <label for="managerResetConfirmPassword">Confirm Manager Password</label>
+                <input id="managerResetConfirmPassword" type="password" autocomplete="new-password" placeholder="Re-enter new manager password" />
+              </div>
+              <label class="pw-inline manager-checkbox"><input id="showManagerResetPassword" type="checkbox" /> Show passwords</label>
+              <button id="btnResetManagerPassword" class="btn btn-primary manager-full-btn" type="button">Reset Manager Password</button>
+              <div class="toastline manager-alert" id="managerResetHint"></div>
+            </article>
           </div>
-          <div class="scan-manual" style="flex-wrap: wrap; gap: 10px;">
-            <label class="muted" style="min-width:170px;">Confirm manager password</label>
-            <input id="managerResetConfirmPassword" type="password" autocomplete="new-password" placeholder="Confirm password" style="max-width:240px;" />
-            <label class="pw-inline"><input id="showManagerResetPassword" type="checkbox" /> Show</label>
-          </div>
-          <div class="toolbar" style="margin-top:14px;">
-            <button id="btnResetManagerPassword" class="btn btn-primary" type="button">Reset Manager Password</button>
-          </div>
-          <div class="toastline" id="managerResetHint"></div>
         </div>
       </section>
 
-      <section class="card" style="margin-top:14px;">
+      <section class="card manager-card">
         <div class="card-header">
           <div class="card-header-main">
-            <h2 class="card-title">Kiosk PIN codes</h2>
-            <p class="card-kicker">Change fast PIN login for iPad scan stations (4–6 digits each). Leave blank to skip.</p>
+            <h2 class="card-title">Kiosk PIN Codes</h2>
+            <p class="card-kicker">Leave blank to keep current PIN.</p>
           </div>
         </div>
         <div class="card-body">
-          <div class="scan-manual" style="flex-wrap: wrap; gap: 10px;">
-            <label class="muted" style="min-width:72px;">Area A</label>
-            <input id="pinAreaA" type="password" inputmode="numeric" maxlength="6" placeholder="New PIN" autocomplete="new-password" style="max-width:160px;" />
-            <label class="pw-inline"><input id="showPinA" type="checkbox" /> Show</label>
+          <div class="manager-pin-grid">
+            <article class="manager-subcard">
+              <h3 class="manager-subcard-title">Area A</h3>
+              <div class="field">
+                <label for="pinAreaA">New PIN</label>
+                <input id="pinAreaA" type="password" inputmode="numeric" maxlength="6" placeholder="4-6 digit PIN" autocomplete="new-password" />
+              </div>
+              <label class="pw-inline manager-checkbox"><input id="showPinA" type="checkbox" /> Show PIN</label>
+            </article>
+            <article class="manager-subcard">
+              <h3 class="manager-subcard-title">Area B</h3>
+              <div class="field">
+                <label for="pinAreaB">New PIN</label>
+                <input id="pinAreaB" type="password" inputmode="numeric" maxlength="6" placeholder="4-6 digit PIN" autocomplete="new-password" />
+              </div>
+              <label class="pw-inline manager-checkbox"><input id="showPinB" type="checkbox" /> Show PIN</label>
+            </article>
+            <article class="manager-subcard">
+              <h3 class="manager-subcard-title">Area C</h3>
+              <div class="field">
+                <label for="pinAreaC">New PIN</label>
+                <input id="pinAreaC" type="password" inputmode="numeric" maxlength="6" placeholder="4-6 digit PIN" autocomplete="new-password" />
+              </div>
+              <label class="pw-inline manager-checkbox"><input id="showPinC" type="checkbox" /> Show PIN</label>
+            </article>
           </div>
-          <div class="scan-manual" style="flex-wrap: wrap; gap: 10px; margin-top:10px;">
-            <label class="muted" style="min-width:72px;">Area B</label>
-            <input id="pinAreaB" type="password" inputmode="numeric" maxlength="6" placeholder="New PIN" autocomplete="new-password" style="max-width:160px;" />
-            <label class="pw-inline"><input id="showPinB" type="checkbox" /> Show</label>
+          <div class="manager-pin-actions">
+            <button id="btnSaveKioskPins" class="btn btn-primary" type="button">Save PIN Changes</button>
+            <div class="toastline manager-alert" id="kioskPinHint"></div>
           </div>
-          <div class="scan-manual" style="flex-wrap: wrap; gap: 10px; margin-top:10px;">
-            <label class="muted" style="min-width:72px;">Area C</label>
-            <input id="pinAreaC" type="password" inputmode="numeric" maxlength="6" placeholder="New PIN" autocomplete="new-password" style="max-width:160px;" />
-            <label class="pw-inline"><input id="showPinC" type="checkbox" /> Show</label>
-          </div>
-          <div class="toolbar" style="margin-top:14px;">
-            <button id="btnSaveKioskPins" class="btn btn-primary" type="button">Save PIN changes</button>
-          </div>
-          <div class="toastline" id="kioskPinHint"></div>
         </div>
       </section>
     </main>

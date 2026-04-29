@@ -31,6 +31,15 @@ const btnResetManagerPassword = document.getElementById('btnResetManagerPassword
 const managerResetHint = document.getElementById('managerResetHint');
 let currentAuthUser = null;
 
+function setAlert(el, message, type) {
+  if (!el) return;
+  el.textContent = message || '';
+  el.classList.remove('is-success', 'is-error');
+  if (!message) return;
+  if (type === 'success') el.classList.add('is-success');
+  if (type === 'error') el.classList.add('is-error');
+}
+
 async function apiJson(url, opts) {
   const res = await fetch(url, opts);
   const data = await res.json().catch(() => ({}));
@@ -261,7 +270,7 @@ async function refreshAuthUi() {
 
 async function saveKioskPins() {
   if (!kioskPinHint) return;
-  kioskPinHint.textContent = '';
+  setAlert(kioskPinHint, '', null);
   const body = {};
   const a = pinAreaA && String(pinAreaA.value || '').trim();
   const b = pinAreaB && String(pinAreaB.value || '').trim();
@@ -270,82 +279,91 @@ async function saveKioskPins() {
   if (b) body.area_b_pin = b;
   if (c) body.area_c_pin = c;
   if (!Object.keys(body).length) {
-    kioskPinHint.textContent = 'Enter at least one new PIN to update.';
+    setAlert(kioskPinHint, 'Enter at least one new PIN to update.', 'error');
     return;
   }
+  if (btnSaveKioskPins) btnSaveKioskPins.disabled = true;
   const { res, data } = await apiJson('/api/manager/kiosk-pins', {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    kioskPinHint.textContent = (data && data.message) || 'Could not save PINs.';
+    setAlert(kioskPinHint, (data && data.message) || 'Could not save PINs.', 'error');
+    if (btnSaveKioskPins) btnSaveKioskPins.disabled = false;
     return;
   }
-  kioskPinHint.textContent = 'Kiosk PINs updated.';
+  setAlert(kioskPinHint, 'Kiosk PINs updated.', 'success');
   if (pinAreaA) pinAreaA.value = '';
   if (pinAreaB) pinAreaB.value = '';
   if (pinAreaC) pinAreaC.value = '';
+  if (btnSaveKioskPins) btnSaveKioskPins.disabled = false;
 }
 
 if (btnSaveKioskPins) btnSaveKioskPins.addEventListener('click', () => void saveKioskPins());
 
 async function resetManagerPassword() {
   if (!managerResetHint || !managerResetPassword) return;
-  managerResetHint.textContent = '';
+  setAlert(managerResetHint, '', null);
   const next = String(managerResetPassword.value || '');
   const confirm = String(managerResetConfirmPassword && managerResetConfirmPassword.value ? managerResetConfirmPassword.value : '');
   if (next.trim().length < 6) {
-    managerResetHint.textContent = 'Password must be at least 6 characters.';
+    setAlert(managerResetHint, 'Password must be at least 6 characters.', 'error');
     return;
   }
   if (next !== confirm) {
-    managerResetHint.textContent = 'Passwords do not match.';
+    setAlert(managerResetHint, 'Passwords do not match.', 'error');
     return;
   }
+  if (btnResetManagerPassword) btnResetManagerPassword.disabled = true;
   const { res, data } = await apiJson('/api/owner/reset-manager-password', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ new_password: next }),
   });
   if (!res.ok) {
-    managerResetHint.textContent = (data && data.message) || 'Could not reset manager password.';
+    setAlert(managerResetHint, (data && data.message) || 'Could not reset manager password.', 'error');
+    if (btnResetManagerPassword) btnResetManagerPassword.disabled = false;
     return;
   }
-  managerResetHint.textContent = 'Manager password reset.';
+  setAlert(managerResetHint, 'Manager password reset.', 'success');
   managerResetPassword.value = '';
   if (managerResetConfirmPassword) managerResetConfirmPassword.value = '';
+  if (btnResetManagerPassword) btnResetManagerPassword.disabled = false;
 }
 
 if (btnResetManagerPassword) btnResetManagerPassword.addEventListener('click', () => void resetManagerPassword());
 
 async function changeOwnerPassword() {
   if (!ownerPasswordHint || !ownerCurrentPassword || !ownerNewPassword || !ownerConfirmPassword) return;
-  ownerPasswordHint.textContent = '';
+  setAlert(ownerPasswordHint, '', null);
   const current = String(ownerCurrentPassword.value || '');
   const next = String(ownerNewPassword.value || '');
   const confirm = String(ownerConfirmPassword.value || '');
   if (!current || next.trim().length < 6) {
-    ownerPasswordHint.textContent = 'Current password and a new password (min 6 chars) are required.';
+    setAlert(ownerPasswordHint, 'Current password and a new password (min 6 chars) are required.', 'error');
     return;
   }
   if (next !== confirm) {
-    ownerPasswordHint.textContent = 'New password and confirm password must match.';
+    setAlert(ownerPasswordHint, 'New password and confirm password must match.', 'error');
     return;
   }
+  if (btnChangeOwnerPassword) btnChangeOwnerPassword.disabled = true;
   const { res, data } = await apiJson('/api/owner/change-password', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ current_password: current, new_password: next }),
   });
   if (!res.ok) {
-    ownerPasswordHint.textContent = (data && data.message) || 'Could not change owner password.';
+    setAlert(ownerPasswordHint, (data && data.message) || 'Could not change owner password.', 'error');
+    if (btnChangeOwnerPassword) btnChangeOwnerPassword.disabled = false;
     return;
   }
-  ownerPasswordHint.textContent = 'Owner password changed.';
+  setAlert(ownerPasswordHint, 'Owner password changed.', 'success');
   ownerCurrentPassword.value = '';
   ownerNewPassword.value = '';
   ownerConfirmPassword.value = '';
+  if (btnChangeOwnerPassword) btnChangeOwnerPassword.disabled = false;
 }
 
 if (btnChangeOwnerPassword) btnChangeOwnerPassword.addEventListener('click', () => void changeOwnerPassword());
