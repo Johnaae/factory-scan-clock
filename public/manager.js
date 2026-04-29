@@ -17,10 +17,19 @@ const showPinB = document.getElementById('showPinB');
 const showPinC = document.getElementById('showPinC');
 const btnSaveKioskPins = document.getElementById('btnSaveKioskPins');
 const kioskPinHint = document.getElementById('kioskPinHint');
+const ownerSecuritySection = document.getElementById('ownerSecuritySection');
+const ownerCurrentPassword = document.getElementById('ownerCurrentPassword');
+const ownerNewPassword = document.getElementById('ownerNewPassword');
+const ownerConfirmPassword = document.getElementById('ownerConfirmPassword');
+const showOwnerPasswords = document.getElementById('showOwnerPasswords');
+const btnChangeOwnerPassword = document.getElementById('btnChangeOwnerPassword');
+const ownerPasswordHint = document.getElementById('ownerPasswordHint');
 const managerResetPassword = document.getElementById('managerResetPassword');
+const managerResetConfirmPassword = document.getElementById('managerResetConfirmPassword');
 const showManagerResetPassword = document.getElementById('showManagerResetPassword');
 const btnResetManagerPassword = document.getElementById('btnResetManagerPassword');
 const managerResetHint = document.getElementById('managerResetHint');
+let currentAuthUser = null;
 
 async function apiJson(url, opts) {
   const res = await fetch(url, opts);
@@ -215,6 +224,7 @@ tankBody.addEventListener('click', (e) => {
 
 window.addEventListener('load', () => {
   void refreshAll();
+  void refreshAuthUi();
   window.setInterval(() => void refreshAll(), 5000);
 });
 
@@ -236,7 +246,18 @@ function wirePinShow(checkbox, input) {
 wirePinShow(showPinA, pinAreaA);
 wirePinShow(showPinB, pinAreaB);
 wirePinShow(showPinC, pinAreaC);
+wirePinShow(showOwnerPasswords, ownerCurrentPassword);
+wirePinShow(showOwnerPasswords, ownerNewPassword);
+wirePinShow(showOwnerPasswords, ownerConfirmPassword);
 wirePinShow(showManagerResetPassword, managerResetPassword);
+wirePinShow(showManagerResetPassword, managerResetConfirmPassword);
+
+async function refreshAuthUi() {
+  const { res, data } = await apiJson('/api/auth/me');
+  currentAuthUser = res.ok && data && data.user ? data.user : null;
+  const isOwner = !!currentAuthUser && String(currentAuthUser.role || '').toUpperCase() === 'MANAGER' && String(currentAuthUser.username || '').toLowerCase() === 'owner';
+  if (ownerSecuritySection) ownerSecuritySection.style.display = isOwner ? '' : 'none';
+}
 
 async function saveKioskPins() {
   if (!kioskPinHint) return;
@@ -273,12 +294,17 @@ async function resetManagerPassword() {
   if (!managerResetHint || !managerResetPassword) return;
   managerResetHint.textContent = '';
   const next = String(managerResetPassword.value || '');
+  const confirm = String(managerResetConfirmPassword && managerResetConfirmPassword.value ? managerResetConfirmPassword.value : '');
   if (next.trim().length < 6) {
     managerResetHint.textContent = 'Password must be at least 6 characters.';
     return;
   }
-  const { res, data } = await apiJson('/api/manager/reset-manager-password', {
-    method: 'PATCH',
+  if (next !== confirm) {
+    managerResetHint.textContent = 'Passwords do not match.';
+    return;
+  }
+  const { res, data } = await apiJson('/api/owner/reset-manager-password', {
+    method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ new_password: next }),
   });
@@ -288,6 +314,38 @@ async function resetManagerPassword() {
   }
   managerResetHint.textContent = 'Manager password reset.';
   managerResetPassword.value = '';
+  if (managerResetConfirmPassword) managerResetConfirmPassword.value = '';
 }
 
 if (btnResetManagerPassword) btnResetManagerPassword.addEventListener('click', () => void resetManagerPassword());
+
+async function changeOwnerPassword() {
+  if (!ownerPasswordHint || !ownerCurrentPassword || !ownerNewPassword || !ownerConfirmPassword) return;
+  ownerPasswordHint.textContent = '';
+  const current = String(ownerCurrentPassword.value || '');
+  const next = String(ownerNewPassword.value || '');
+  const confirm = String(ownerConfirmPassword.value || '');
+  if (!current || next.trim().length < 6) {
+    ownerPasswordHint.textContent = 'Current password and a new password (min 6 chars) are required.';
+    return;
+  }
+  if (next !== confirm) {
+    ownerPasswordHint.textContent = 'New password and confirm password must match.';
+    return;
+  }
+  const { res, data } = await apiJson('/api/owner/change-password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ current_password: current, new_password: next }),
+  });
+  if (!res.ok) {
+    ownerPasswordHint.textContent = (data && data.message) || 'Could not change owner password.';
+    return;
+  }
+  ownerPasswordHint.textContent = 'Owner password changed.';
+  ownerCurrentPassword.value = '';
+  ownerNewPassword.value = '';
+  ownerConfirmPassword.value = '';
+}
+
+if (btnChangeOwnerPassword) btnChangeOwnerPassword.addEventListener('click', () => void changeOwnerPassword());

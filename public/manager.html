@@ -111,17 +111,41 @@
         </div>
       </section>
 
-      <section class="card" style="margin-top:14px;">
+      <section class="card" id="ownerSecuritySection" style="margin-top:14px; display:none;">
         <div class="card-header">
           <div class="card-header-main">
-            <h2 class="card-title">Manager Password Recovery</h2>
-            <p class="card-kicker">Manager-only action. Backup Owner Account can reset the manager password.</p>
+            <h2 class="card-title">Owner Security</h2>
+            <p class="card-kicker">Visible only to Backup Owner Account.</p>
           </div>
         </div>
         <div class="card-body">
+          <h3 class="card-title" style="font-size:1rem;margin:0 0 8px;">Change Owner Password</h3>
+          <div class="scan-manual" style="flex-wrap: wrap; gap: 10px; margin-bottom:8px;">
+            <label class="muted" style="min-width:170px;">Current password</label>
+            <input id="ownerCurrentPassword" type="password" autocomplete="current-password" placeholder="Current owner password" style="max-width:240px;" />
+          </div>
+          <div class="scan-manual" style="flex-wrap: wrap; gap: 10px; margin-bottom:8px;">
+            <label class="muted" style="min-width:170px;">New password</label>
+            <input id="ownerNewPassword" type="password" autocomplete="new-password" placeholder="At least 6 characters" style="max-width:240px;" />
+          </div>
           <div class="scan-manual" style="flex-wrap: wrap; gap: 10px;">
-            <label class="muted" style="min-width:150px;">New manager password</label>
+            <label class="muted" style="min-width:170px;">Confirm new password</label>
+            <input id="ownerConfirmPassword" type="password" autocomplete="new-password" placeholder="Confirm password" style="max-width:240px;" />
+            <label class="pw-inline"><input id="showOwnerPasswords" type="checkbox" /> Show</label>
+          </div>
+          <div class="toolbar" style="margin-top:14px;">
+            <button id="btnChangeOwnerPassword" class="btn btn-primary" type="button">Change Owner Password</button>
+          </div>
+          <div class="toastline" id="ownerPasswordHint" style="margin-bottom:14px;"></div>
+
+          <h3 class="card-title" style="font-size:1rem;margin:8px 0;">Reset Manager Password</h3>
+          <div class="scan-manual" style="flex-wrap: wrap; gap: 10px; margin-bottom:8px;">
+            <label class="muted" style="min-width:170px;">New manager password</label>
             <input id="managerResetPassword" type="password" autocomplete="new-password" placeholder="At least 6 characters" style="max-width:240px;" />
+          </div>
+          <div class="scan-manual" style="flex-wrap: wrap; gap: 10px;">
+            <label class="muted" style="min-width:170px;">Confirm manager password</label>
+            <input id="managerResetConfirmPassword" type="password" autocomplete="new-password" placeholder="Confirm password" style="max-width:240px;" />
             <label class="pw-inline"><input id="showManagerResetPassword" type="checkbox" /> Show</label>
           </div>
           <div class="toolbar" style="margin-top:14px;">

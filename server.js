@@ -1628,6 +1628,7 @@ app.use((req, res, next) => {
   }
   if (
     p.startsWith('/api/manager/') ||
+    p.startsWith('/api/owner/') ||
     p.startsWith('/api/employees') ||
     p.startsWith('/api/tanks') ||
     p.startsWith('/api/export') ||
@@ -2752,29 +2753,66 @@ app.patch('/api/manager/kiosk-pins', async (req, res) => {
   return res.json({ ok: true });
 });
 
-/** Manager-only recovery: reset the manager account password. */
-app.patch('/api/manager/reset-manager-password', async (req, res) => {
+function isOwnerManager(auth) {
+  return !!auth && auth.role === ROLE.MANAGER && String(auth.username || '').toLowerCase() === 'owner';
+}
+
+app.post('/api/owner/change-password', async (req, res) => {
   const auth = currentAuthFromSession(req);
-  if (!auth || auth.role !== ROLE.MANAGER) {
-    return authJson(res, 403, 'Forbidden.', 'forbidden');
+  if (!isOwnerManager(auth)) {
+    return res.status(403).json({ ok: false, error: 'forbidden', message: 'Owner access required.' });
+  }
+  const currentPassword = String((req.body && req.body.current_password) || '');
+  const newPassword = String((req.body && req.body.new_password) || '');
+  if (!currentPassword || !newPassword || newPassword.trim().length < 6) {
+    return res
+      .status(400)
+      .json({ ok: false, error: 'validation', message: 'current_password and new_password (min 6 chars) are required.' });
+  }
+  try {
+    const cur = await pool.query(`SELECT password_hash FROM users WHERE username = 'owner' AND role = 'MANAGER' LIMIT 1`);
+    const row = cur.rows[0];
+    if (!row) {
+      return res.status(404).json({ ok: false, error: 'not_found', message: 'Owner account not found.' });
+    }
+    if (!verifyPassword(currentPassword, row.password_hash)) {
+      return res.status(400).json({ ok: false, error: 'invalid_current_password', message: 'Current password is incorrect.' });
+    }
+    const ts = nowIso();
+    const nextHash = hashPassword(newPassword);
+    await pool.query(
+      `UPDATE users SET password_hash = $1, updated_at = $2::timestamptz WHERE username = 'owner' AND role = 'MANAGER'`,
+      [nextHash, ts]
+    );
+    return res.json({ ok: true, success: true });
+  } catch (e) {
+    console.error('[owner/change-password]', e);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not change owner password.' });
+  }
+});
+
+app.post('/api/owner/reset-manager-password', async (req, res) => {
+  const auth = currentAuthFromSession(req);
+  if (!isOwnerManager(auth)) {
+    return res.status(403).json({ ok: false, error: 'forbidden', message: 'Owner access required.' });
   }
   const newPassword = String((req.body && req.body.new_password) || '');
-  if (newPassword.trim().length < 6) {
+  if (!newPassword || newPassword.trim().length < 6) {
     return res.status(400).json({ ok: false, error: 'validation', message: 'new_password must be at least 6 characters.' });
   }
-  const ts = nowIso();
-  const hash = hashPassword(newPassword);
   try {
+    const ts = nowIso();
+    const nextHash = hashPassword(newPassword);
     const upd = await pool.query(
       `UPDATE users SET password_hash = $1, updated_at = $2::timestamptz WHERE username = 'manager' AND role = 'MANAGER'`,
-      [hash, ts]
+      [nextHash, ts]
     );
     if (!upd.rowCount) {
       return res.status(404).json({ ok: false, error: 'not_found', message: 'Manager account not found.' });
     }
     return res.json({ ok: true, success: true });
   } catch (e) {
-    console.error('[reset-manager-password]', e);
+    console.error('[owner/reset-manager-password]', e);
     return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not reset manager password.' });
   }
 });
