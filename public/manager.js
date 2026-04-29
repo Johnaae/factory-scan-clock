@@ -17,6 +17,10 @@ const showPinB = document.getElementById('showPinB');
 const showPinC = document.getElementById('showPinC');
 const btnSaveKioskPins = document.getElementById('btnSaveKioskPins');
 const kioskPinHint = document.getElementById('kioskPinHint');
+const managerResetPassword = document.getElementById('managerResetPassword');
+const showManagerResetPassword = document.getElementById('showManagerResetPassword');
+const btnResetManagerPassword = document.getElementById('btnResetManagerPassword');
+const managerResetHint = document.getElementById('managerResetHint');
 
 async function apiJson(url, opts) {
   const res = await fetch(url, opts);
@@ -232,6 +236,7 @@ function wirePinShow(checkbox, input) {
 wirePinShow(showPinA, pinAreaA);
 wirePinShow(showPinB, pinAreaB);
 wirePinShow(showPinC, pinAreaC);
+wirePinShow(showManagerResetPassword, managerResetPassword);
 
 async function saveKioskPins() {
   if (!kioskPinHint) return;
@@ -263,3 +268,26 @@ async function saveKioskPins() {
 }
 
 if (btnSaveKioskPins) btnSaveKioskPins.addEventListener('click', () => void saveKioskPins());
+
+async function resetManagerPassword() {
+  if (!managerResetHint || !managerResetPassword) return;
+  managerResetHint.textContent = '';
+  const next = String(managerResetPassword.value || '');
+  if (next.trim().length < 6) {
+    managerResetHint.textContent = 'Password must be at least 6 characters.';
+    return;
+  }
+  const { res, data } = await apiJson('/api/manager/reset-manager-password', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ new_password: next }),
+  });
+  if (!res.ok) {
+    managerResetHint.textContent = (data && data.message) || 'Could not reset manager password.';
+    return;
+  }
+  managerResetHint.textContent = 'Manager password reset.';
+  managerResetPassword.value = '';
+}
+
+if (btnResetManagerPassword) btnResetManagerPassword.addEventListener('click', () => void resetManagerPassword());

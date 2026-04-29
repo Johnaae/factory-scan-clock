@@ -114,6 +114,26 @@
       <section class="card" style="margin-top:14px;">
         <div class="card-header">
           <div class="card-header-main">
+            <h2 class="card-title">Manager Password Recovery</h2>
+            <p class="card-kicker">Manager-only action. Backup Owner Account can reset the manager password.</p>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="scan-manual" style="flex-wrap: wrap; gap: 10px;">
+            <label class="muted" style="min-width:150px;">New manager password</label>
+            <input id="managerResetPassword" type="password" autocomplete="new-password" placeholder="At least 6 characters" style="max-width:240px;" />
+            <label class="pw-inline"><input id="showManagerResetPassword" type="checkbox" /> Show</label>
+          </div>
+          <div class="toolbar" style="margin-top:14px;">
+            <button id="btnResetManagerPassword" class="btn btn-primary" type="button">Reset Manager Password</button>
+          </div>
+          <div class="toastline" id="managerResetHint"></div>
+        </div>
+      </section>
+
+      <section class="card" style="margin-top:14px;">
+        <div class="card-header">
+          <div class="card-header-main">
             <h2 class="card-title">Kiosk PIN codes</h2>
             <p class="card-kicker">Change fast PIN login for iPad scan stations (4–6 digits each). Leave blank to skip.</p>
           </div>

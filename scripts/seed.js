@@ -27,6 +27,14 @@ async function seedUsers(client) {
       pin: null,
     },
     {
+      username: 'owner',
+      password: process.env.OWNER_PASSWORD || 'owner123',
+      role: 'MANAGER',
+      station_name: 'Backup Owner Account',
+      area_name: 'Office',
+      pin: null,
+    },
+    {
       username: 'kiosk_area_a',
       password: process.env.DEFAULT_KIOSK_PASSWORD_A || 'kioskA123',
       role: 'KIOSK',
