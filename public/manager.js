@@ -30,6 +30,7 @@ const showManagerResetPassword = document.getElementById('showManagerResetPasswo
 const btnResetManagerPassword = document.getElementById('btnResetManagerPassword');
 const managerResetHint = document.getElementById('managerResetHint');
 let currentAuthUser = null;
+let currentWorkRowsCache = [];
 
 function setAlert(el, message, type) {
   if (!el) return;
@@ -64,6 +65,23 @@ function minutesToText(mins) {
   const h = Math.floor(m / 60);
   const mm = m % 60;
   return `${h}h ${mm}m`;
+}
+
+function elapsedFromIso(iso) {
+  if (!iso) return '0h 0m';
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return '0h 0m';
+  const mins = Math.max(0, Math.floor((Date.now() - t) / 60000));
+  return minutesToText(mins);
+}
+
+function refreshCurrentWorkElapsedCells() {
+  if (!currentWorkBody) return;
+  const cells = currentWorkBody.querySelectorAll('[data-started-at]');
+  cells.forEach((cell) => {
+    const iso = cell.getAttribute('data-started-at');
+    cell.textContent = elapsedFromIso(iso);
+  });
 }
 
 async function loadTanks() {
@@ -142,6 +160,7 @@ async function loadCurrentWork() {
   if (!res.ok) return;
   const selectedArea = areaFilter ? areaFilter.value : 'ALL';
   const rows = (data.rows || []).filter((r) => selectedArea === 'ALL' || (r.area_name || '') === selectedArea);
+  currentWorkRowsCache = rows;
   currentWorkBody.innerHTML =
     rows
       .map(
@@ -152,7 +171,7 @@ async function loadCurrentWork() {
       <td><strong>${r.tank_number || '-'}</strong></td>
       <td>${r.area_name || '-'}</td>
       <td>${fmtIso(r.started_at)}</td>
-      <td>${minutesToText(r.elapsed_minutes)}</td>
+      <td data-started-at="${r.started_at || ''}">${elapsedFromIso(r.started_at)}</td>
       <td>${r.daily_hours}</td>
       <td>${r.weekly_hours}</td>
       <td>${r.overtime_warning ? '<span class="badge badge-warn">Watch</span>' : '-'}</td>
@@ -160,6 +179,7 @@ async function loadCurrentWork() {
     </tr>`
       )
       .join('') || '<tr><td colspan="11" class="muted">No one currently clocked IN.</td></tr>';
+  if (currentWorkRowsCache.length) refreshCurrentWorkElapsedCells();
 }
 
 async function loadTankSummary() {
@@ -235,6 +255,7 @@ window.addEventListener('load', () => {
   void refreshAll();
   void refreshAuthUi();
   window.setInterval(() => void refreshAll(), 5000);
+  window.setInterval(() => refreshCurrentWorkElapsedCells(), 1000);
 });
 
 if (areaFilter) areaFilter.addEventListener('change', () => void loadCurrentWork());

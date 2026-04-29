@@ -392,6 +392,7 @@ function computeWorkAnalyticsFromLogs(logsAsc) {
       const t = new Date(log.scanned_at).getTime();
       if (Number.isNaN(t)) continue;
       if (log.status === 'IN') {
+        if (pendingIn) continue;
         pendingIn = log;
       } else if (log.status === 'OUT') {
         if (!pendingIn) continue;
@@ -424,7 +425,60 @@ function computeWorkAnalyticsFromLogs(logsAsc) {
   return out;
 }
 
-function computeTankSummaryFromLogs(logsAsc) {
+/** Duration attributed to the tank stamped on each IN row (IN→OUT segments; trailing IN to closeMs). */
+function laborMsAttributedByTank(logsAsc, closeMs = Date.now()) {
+  const groups = new Map();
+  for (const log of logsAsc) {
+    const code = log.employee_code;
+    if (!groups.has(code)) groups.set(code, []);
+    groups.get(code).push(log);
+  }
+  const tankMs = new Map();
+  for (const [, logs] of groups) {
+    logs.sort((a, b) => {
+      const ta = new Date(a.scanned_at).getTime();
+      const tb = new Date(b.scanned_at).getTime();
+      if (ta !== tb) return ta - tb;
+      return (Number(a.id) || 0) - (Number(b.id) || 0);
+    });
+    let pendingIn = null;
+    for (const row of logs) {
+      const st = String(row.status || '').toUpperCase();
+      const t = new Date(row.scanned_at).getTime();
+      if (Number.isNaN(t)) continue;
+      if (st === 'IN') {
+        if (pendingIn) continue;
+        pendingIn = row;
+      } else if (st === 'OUT') {
+        if (!pendingIn) continue;
+        const t0 = new Date(pendingIn.scanned_at).getTime();
+        if (!Number.isNaN(t0) && t >= t0) {
+          const tank = normalizeTankNumber(pendingIn.tank_number || '');
+          if (tank) {
+            const dur = t - t0;
+            tankMs.set(tank, (tankMs.get(tank) || 0) + dur);
+          }
+        }
+        pendingIn = null;
+      }
+    }
+    if (pendingIn) {
+      const tank = normalizeTankNumber(pendingIn.tank_number || '');
+      if (tank) {
+        const t0 = new Date(pendingIn.scanned_at).getTime();
+        if (!Number.isNaN(t0)) {
+          const dur = Math.max(0, closeMs - t0);
+          tankMs.set(tank, (tankMs.get(tank) || 0) + dur);
+        }
+      }
+    }
+  }
+  return tankMs;
+}
+
+function computeTankSummaryFromLogs(logsAsc, closeMs) {
+  const closeAt = closeMs != null ? closeMs : Date.now();
+  const tankMs = laborMsAttributedByTank(logsAsc, closeAt);
   const map = new Map();
   const byEmp = new Map();
   for (const log of logsAsc) {
@@ -438,16 +492,15 @@ function computeTankSummaryFromLogs(logsAsc) {
     if (log.status !== 'IN') continue;
     const resolved = tank || byEmp.get(code);
     if (!resolved) continue;
-    if (!map.has(resolved)) map.set(resolved, { workers: new Set(), logs: [], activities: new Set() });
+    if (!map.has(resolved)) map.set(resolved, { workers: new Set(), activities: new Set() });
     const ent = map.get(resolved);
     ent.workers.add(code);
-    ent.logs.push(log);
     const label = workActivityLabelFromInRow(log);
     if (label && label !== '-') ent.activities.add(label);
   }
   const out = [];
   for (const [tankNumber, ent] of map.entries()) {
-    const ms = workedMsFromLogsAsc(ent.logs);
+    const ms = tankMs.get(tankNumber) || 0;
     out.push({
       tank_number: tankNumber,
       workers: ent.workers.size,
@@ -683,22 +736,269 @@ function roundWorkedHours(decimalHours) {
   return Math.round(decimalHours);
 }
 
-function workedMsFromLogsAsc(logsAsc) {
+function roundMoney2(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return 0;
+  return Math.round(v * 100) / 100;
+}
+
+function roundHours2(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return 0;
+  return Math.round(v * 100) / 100;
+}
+
+/** Ms overlap of intervals [a0,a1] and [b0,b1] (inclusive bounds). */
+function intervalOverlapMs(a0, a1, b0, b1) {
+  const s = Math.max(a0, b0);
+  const e = Math.min(a1, b1);
+  return Math.max(0, e - s);
+}
+
+/**
+ * Pair IN→OUT chronologically; ignore duplicate IN while pending; ignore OUT without pending IN.
+ * Unmatched trailing IN closes to closeMs (open session). Optionally clip all segments to a local-day window
+ * for cross-midnight / carry-in from the previous day.
+ */
+function pairSessionsMsForWindow(logsAsc, opts) {
+  const closeMs = opts.closeMs;
+  const windowStartMs = opts.windowStartMs;
+  const windowEndMs = opts.windowEndMs;
+  const isToday = !!opts.isToday;
+  const carry = opts.carryPendingIn;
+
   let pendingInMs = null;
-  let total = 0;
+  if (carry && String(carry.status || '').toUpperCase() === 'IN') {
+    const t0 = new Date(carry.scanned_at).getTime();
+    if (!Number.isNaN(t0)) pendingInMs = t0;
+  }
+
+  let totalMs = 0;
+  /** @type {Array<{ in: string, out: string, duration_ms: number }>} */
+  const sessions = [];
+
+  function addSegment(inMs, outMs) {
+    const ms = intervalOverlapMs(inMs, outMs, windowStartMs, windowEndMs);
+    if (ms <= 0) return;
+    totalMs += ms;
+    sessions.push({
+      in: new Date(inMs).toISOString(),
+      out: new Date(outMs).toISOString(),
+      duration_ms: ms,
+    });
+  }
+
   for (const row of logsAsc) {
+    const st = String(row.status || '').toUpperCase();
     const t = new Date(row.scanned_at).getTime();
     if (Number.isNaN(t)) continue;
-    if (row.status === 'IN') {
+    if (st === 'IN') {
+      if (pendingInMs !== null) continue;
       pendingInMs = t;
-    } else if (row.status === 'OUT') {
-      if (pendingInMs !== null && t >= pendingInMs) {
-        total += t - pendingInMs;
+    } else if (st === 'OUT') {
+      if (pendingInMs === null) continue;
+      if (t < pendingInMs) {
+        pendingInMs = null;
+        continue;
       }
+      addSegment(pendingInMs, t);
       pendingInMs = null;
     }
   }
-  return total;
+
+  let currentlyWorking = false;
+  let currentSessionStart = null;
+  if (pendingInMs !== null) {
+    currentSessionStart = new Date(pendingInMs).toISOString();
+    currentlyWorking = isToday;
+    addSegment(pendingInMs, closeMs);
+  }
+
+  return { totalMs, sessions, currentlyWorking, currentSessionStart };
+}
+
+/**
+ * @param {Array<{status:string, scanned_at:string}>} logsAsc
+ * @param {{ closeMs: number, windowStartMs: number, windowEndMs: number, isToday?: boolean, carryPendingIn?: object|null }} opts
+ */
+function workedMsFromPairedLogs(logsAsc, opts) {
+  return pairSessionsMsForWindow(logsAsc, opts).totalMs;
+}
+
+/** Backward-compatible: same calendar day as logs, close at now or end-of-window; no carry. */
+function workedMsFromLogsAsc(logsAsc, nowMs = Date.now()) {
+  if (!logsAsc || !logsAsc.length) return 0;
+  let winStart = Infinity;
+  let winEnd = -Infinity;
+  for (const row of logsAsc) {
+    const t = new Date(row.scanned_at).getTime();
+    if (!Number.isNaN(t)) {
+      winStart = Math.min(winStart, t);
+      winEnd = Math.max(winEnd, t);
+    }
+  }
+  if (!Number.isFinite(winStart)) return 0;
+  const dayKey = localDateString(new Date(winStart));
+  const b = startEndOfLocalDay(dayKey);
+  if (!b) return 0;
+  const windowStartMs = new Date(b.startIso).getTime();
+  const windowEndMs = new Date(b.endIso).getTime();
+  const todayKey = localDateString();
+  const isToday = dayKey === todayKey;
+  const closeMs = isToday ? nowMs : windowEndMs;
+  return workedMsFromPairedLogs(logsAsc, {
+    closeMs,
+    windowStartMs,
+    windowEndMs,
+    isToday,
+    carryPendingIn: null,
+  });
+}
+
+const SCAN_DEBOUNCE_MS = Math.min(Math.max(Number(process.env.SCAN_DEBOUNCE_MS) || 2500, 500), 10000);
+
+async function fetchCarryInBeforeDay(startIso) {
+  const { rows } = await pool.query(
+    `SELECT DISTINCT ON (employee_id) employee_id, status, scanned_at, id, tank_number
+     FROM scan_logs
+     WHERE employee_id IS NOT NULL AND scanned_at < $1::timestamptz
+     ORDER BY employee_id, scanned_at DESC, id DESC`,
+    [startIso]
+  );
+  /** @type {Map<number, { status: string, scanned_at: string }>} */
+  const map = new Map();
+  for (const r of rows) {
+    const id = Number(r.employee_id);
+    if (Number.isInteger(id) && id > 0) map.set(id, r);
+  }
+  return map;
+}
+
+/**
+ * Reusable daily hours for one employee (local calendar date).
+ * @param {number} employeeId
+ * @param {string} yyyyMmDd
+ */
+async function computeDailyHours(employeeId, yyyyMmDd) {
+  const id = Number(employeeId);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  const bounds = startEndOfLocalDay(yyyyMmDd);
+  if (!bounds) return null;
+  const todayKey = localDateString();
+  const isToday = yyyyMmDd === todayKey;
+  const windowStartMs = new Date(bounds.startIso).getTime();
+  const windowEndMs = new Date(bounds.endIso).getTime();
+  const closeMs = isToday ? Date.now() : windowEndMs;
+
+  const carryRes = await pool.query(
+    `SELECT status, scanned_at FROM scan_logs WHERE employee_id = $1 AND scanned_at < $2::timestamptz ORDER BY scanned_at DESC, id DESC LIMIT 1`,
+    [id, bounds.startIso]
+  );
+  const carryRow = carryRes.rows[0] || null;
+
+  const logsRes = await pool.query(
+    `SELECT status, scanned_at FROM scan_logs
+     WHERE employee_id = $1 AND scanned_at >= $2::timestamptz AND scanned_at <= $3::timestamptz
+     ORDER BY scanned_at ASC, id ASC`,
+    [id, bounds.startIso, bounds.endIso]
+  );
+
+  const paired = pairSessionsMsForWindow(logsRes.rows, {
+    closeMs,
+    windowStartMs,
+    windowEndMs,
+    isToday,
+    carryPendingIn: carryRow && String(carryRow.status || '').toUpperCase() === 'IN' ? carryRow : null,
+  });
+
+  const totalHours = roundHours2(paired.totalMs / 3600000);
+  return {
+    date: yyyyMmDd,
+    employee_id: id,
+    totalHours,
+    total_ms: paired.totalMs,
+    sessions: paired.sessions.map((s) => ({
+      in: s.in,
+      out: s.out,
+      duration: roundHours2(s.duration_ms / 3600000),
+      duration_ms: s.duration_ms,
+    })),
+    currentlyWorking: isToday && paired.currentlyWorking,
+    currentSessionStart: isToday && paired.currentlyWorking ? paired.currentSessionStart : null,
+  };
+}
+
+/**
+ * Worked hours per employee for a local-time window (carry before window start; close open IN at closeMs).
+ * @param {{ startIso: string, endIso: string }} bounds
+ * @param {number} closeMs
+ * @returns {Promise<Map<number, number>>}
+ */
+async function buildWorkedHoursMapForWindow(bounds, closeMs) {
+  const carryMap = await fetchCarryInBeforeDay(bounds.startIso);
+  const logRes = await pool.query(
+    `SELECT employee_id, employee_code, status, scanned_at, id FROM scan_logs
+     WHERE scanned_at >= $1::timestamptz AND scanned_at <= $2::timestamptz
+     ORDER BY scanned_at ASC, id ASC`,
+    [bounds.startIso, bounds.endIso]
+  );
+  const emRes = await pool.query(`SELECT id, code FROM employees`);
+  const byId = new Map();
+  for (const e of emRes.rows) {
+    const eid = Number(e.id);
+    if (Number.isInteger(eid) && eid > 0) byId.set(eid, []);
+  }
+  for (const row of logRes.rows) {
+    const eid = row.employee_id != null ? Number(row.employee_id) : null;
+    if (eid && byId.has(eid)) byId.get(eid).push(row);
+    else {
+      const emp = emRes.rows.find((x) => normalizeCode(x.code) === normalizeCode(row.employee_code));
+      if (emp) {
+        const mappedId = Number(emp.id);
+        if (byId.has(mappedId)) byId.get(mappedId).push(row);
+      }
+    }
+  }
+  const ws = new Date(bounds.startIso).getTime();
+  const we = new Date(bounds.endIso).getTime();
+  const spanIncludesNow = Date.now() >= ws && Date.now() <= we;
+  /** @type {Map<number, number>} */
+  const out = new Map();
+  for (const e of emRes.rows) {
+    const eid = Number(e.id);
+    const list = byId.get(eid) || [];
+    const carry = carryMap.get(eid);
+    const paired = pairSessionsMsForWindow(list, {
+      closeMs,
+      windowStartMs: ws,
+      windowEndMs: we,
+      isToday: spanIncludesNow,
+      carryPendingIn: carry && String(carry.status || '').toUpperCase() === 'IN' ? carry : null,
+    });
+    out.set(eid, roundHours2(paired.totalMs / 3600000));
+  }
+  return out;
+}
+
+async function getLatestLogForEmployeeCode(code) {
+  const n = normalizeCode(code);
+  if (!n) return null;
+  const { rows } = await pool.query(
+    `SELECT id, status, scanned_at, employee_code, employee_name
+     FROM scan_logs
+     WHERE REPLACE(UPPER(TRIM(COALESCE(employee_code, ''))), ' ', '') = $1
+     ORDER BY scanned_at DESC, id DESC
+     LIMIT 1`,
+    [n]
+  );
+  return rows[0] || null;
+}
+
+function recentDuplicateScan(latestRow, nowMs = Date.now()) {
+  if (!latestRow || !latestRow.scanned_at) return false;
+  const t = new Date(latestRow.scanned_at).getTime();
+  if (Number.isNaN(t)) return false;
+  return nowMs - t >= 0 && nowMs - t <= SCAN_DEBOUNCE_MS;
 }
 
 function isAllEmployeesParam(raw) {
@@ -742,36 +1042,110 @@ async function queryScanLogsForExport(q) {
   return rows;
 }
 
+function exportSpanBounds(scope, startStr, endStr, logsAll) {
+  if (scope === 'today') {
+    const day = localDateString();
+    const b = startEndOfLocalDay(day);
+    if (!b) return null;
+    return { startIso: b.startIso, endIso: b.endIso };
+  }
+  if (scope === 'range') {
+    const sb = startEndOfLocalDay(startStr || '');
+    const eb = startEndOfLocalDay(endStr || '');
+    if (!sb || !eb) return null;
+    return { startIso: sb.startIso, endIso: eb.endIso };
+  }
+  if (!logsAll || !logsAll.length) {
+    const b = startEndOfLocalDay(localDateString());
+    return b ? { startIso: b.startIso, endIso: b.endIso } : null;
+  }
+  let minT = Infinity;
+  let maxT = -Infinity;
+  for (const l of logsAll) {
+    const t = new Date(l.scanned_at).getTime();
+    if (!Number.isNaN(t)) {
+      minT = Math.min(minT, t);
+      maxT = Math.max(maxT, t);
+    }
+  }
+  if (!Number.isFinite(minT)) {
+    const b = startEndOfLocalDay(localDateString());
+    return b ? { startIso: b.startIso, endIso: b.endIso } : null;
+  }
+  return { startIso: new Date(minT).toISOString(), endIso: new Date(maxT).toISOString() };
+}
+
 /**
- * Payroll rows for employees in `employeesList` using logs already filtered by date/employee.
+ * Payroll rows: IN→OUT pairing with optional carry before span, open session closed at min(now, span end).
+ * Wage uses decimal hours × rate (8h regular, OT 1.5×). Amounts rounded to 2 decimals.
  */
-function computePayrollRowsFromLogs(employeesList, logsAsc) {
-  const byCode = new Map();
+async function computePayrollRowsFromScopedLogs(employeesList, logsAsc, spanStartIso, spanEndIso) {
+  const spanStartMs = new Date(spanStartIso).getTime();
+  const spanEndMs = new Date(spanEndIso).getTime();
+  const nowMs = Date.now();
+  const closeMs = Math.min(nowMs, spanEndMs);
+  const spanIncludesNow = nowMs >= spanStartMs && nowMs <= spanEndMs;
+
+  const carryRes = await pool.query(
+    `SELECT DISTINCT ON (employee_id) employee_id, status, scanned_at
+     FROM scan_logs
+     WHERE employee_id IS NOT NULL AND scanned_at < $1::timestamptz
+     ORDER BY employee_id, scanned_at DESC, id DESC`,
+    [spanStartIso]
+  );
+  const carryById = new Map();
+  for (const r of carryRes.rows) {
+    const eid = Number(r.employee_id);
+    if (Number.isInteger(eid) && eid > 0) carryById.set(eid, r);
+  }
+
+  const byEmpId = new Map();
   for (const e of employeesList) {
-    byCode.set(e.code, []);
+    byEmpId.set(e.id, []);
   }
   for (const log of logsAsc) {
-    if (!byCode.has(log.employee_code)) byCode.set(log.employee_code, []);
-    byCode.get(log.employee_code).push(log);
+    const eid = log.employee_id != null ? Number(log.employee_id) : null;
+    if (eid && byEmpId.has(eid)) {
+      byEmpId.get(eid).push(log);
+    } else {
+      const c = normalizeCode(log.employee_code);
+      const emp = employeesList.find((x) => normalizeCode(x.code) === c);
+      if (emp) byEmpId.get(emp.id).push(log);
+    }
   }
 
   const rows = [];
-  let totalHoursRounded = 0;
+  let totalHoursDecimalSum = 0;
   let totalPayroll = 0;
 
   for (const e of employeesList) {
-    const list = byCode.get(e.code) || [];
-    const ms = workedMsFromLogsAsc(list);
+    const list = byEmpId.get(e.id) || [];
+    list.sort((a, b) => {
+      const ta = new Date(a.scanned_at).getTime();
+      const tb = new Date(b.scanned_at).getTime();
+      if (ta !== tb) return ta - tb;
+      return (Number(a.id) || 0) - (Number(b.id) || 0);
+    });
+    const carry = carryById.get(e.id);
+    const paired = pairSessionsMsForWindow(list, {
+      closeMs,
+      windowStartMs: spanStartMs,
+      windowEndMs: spanEndMs,
+      isToday: spanIncludesNow,
+      carryPendingIn: carry && String(carry.status || '').toUpperCase() === 'IN' ? carry : null,
+    });
+
+    const ms = paired.totalMs;
     const minutesWorked = Math.round(ms / 60000);
-    const hoursDecimal = ms / 3600000;
-    const roundedMinutes = roundWorkedHours(hoursDecimal) * 60;
-    const hoursRounded = roundWorkedHours(hoursDecimal);
-    const regularHours = Math.min(hoursRounded, 8);
-    const overtimeHours = Math.max(0, hoursRounded - 8);
+    const hoursDecimal = roundHours2(ms / 3600000);
     const rate = Number(e.hourly_rate);
     const safeRate = Number.isFinite(rate) && rate >= 0 ? rate : 20;
-    const wage = Math.round((regularHours * safeRate + overtimeHours * safeRate * 1.5) * 100) / 100;
-    totalHoursRounded += hoursRounded;
+    const regularHoursDec = Math.min(hoursDecimal, 8);
+    const overtimeHoursDec = Math.max(0, hoursDecimal - 8);
+    const wage = roundMoney2(regularHoursDec * safeRate + overtimeHoursDec * safeRate * 1.5);
+    const hoursRounded = roundWorkedHours(hoursDecimal);
+
+    totalHoursDecimalSum += hoursDecimal;
     totalPayroll += wage;
     rows.push({
       employee_code: e.code,
@@ -779,11 +1153,11 @@ function computePayrollRowsFromLogs(employeesList, logsAsc) {
       is_active: !!e.is_active,
       hourly_rate: safeRate,
       minutes_worked: minutesWorked,
-      rounded_minutes: roundedMinutes,
-      hours_decimal: Math.round(hoursDecimal * 100) / 100,
+      rounded_minutes: hoursRounded * 60,
+      hours_decimal: hoursDecimal,
       hours_rounded: hoursRounded,
-      regular_hours: regularHours,
-      overtime_hours: overtimeHours,
+      regular_hours: roundHours2(regularHoursDec),
+      overtime_hours: roundHours2(overtimeHoursDec),
       wage,
     });
   }
@@ -792,12 +1166,14 @@ function computePayrollRowsFromLogs(employeesList, logsAsc) {
 
   const employeeCount = employeesList.length;
   const averageHoursPerEmployee =
-    employeeCount > 0 ? Math.round((totalHoursRounded / employeeCount) * 100) / 100 : 0;
+    employeeCount > 0 ? roundHours2(totalHoursDecimalSum / employeeCount) : 0;
 
   return {
     rows,
-    total_hours_rounded: totalHoursRounded,
-    total_payroll: Math.round(totalPayroll * 100) / 100,
+    total_hours: roundHours2(totalHoursDecimalSum),
+    total_hours_decimal: roundHours2(totalHoursDecimalSum),
+    total_hours_rounded: Math.round(totalHoursDecimalSum),
+    total_payroll: roundMoney2(totalPayroll),
     employee_count: employeeCount,
     average_hours_per_employee: averageHoursPerEmployee,
   };
@@ -838,10 +1214,13 @@ async function computePayrollForExport(scope, startStr, endStr, employeeRaw) {
     employee: employeeRaw,
   });
 
-  const base = computePayrollRowsFromLogs(employeesList, logsAll);
+  const span = exportSpanBounds(scope, startStr, endStr, logsAll);
+  if (!span) return null;
+  const base = await computePayrollRowsFromScopedLogs(employeesList, logsAll, span.startIso, span.endIso);
   enrichPayrollRowsWithScanHints(base.rows, logsAll);
   const workAnalytics = computeWorkAnalyticsFromLogs(logsAll);
-  const tankSummary = computeTankSummaryFromLogs(logsAll);
+  const tankCloseMs = Math.min(Date.now(), new Date(span.endIso).getTime());
+  const tankSummary = computeTankSummaryFromLogs(logsAll, tankCloseMs);
   const pdfSubtitle =
     scope === 'today'
       ? 'Daily Payroll Summary'
@@ -883,15 +1262,14 @@ async function computePayrollForDate(yyyyMmDd) {
   const employees = emRes.rows;
 
   const logRes = await pool.query(
-    `SELECT employee_code, employee_name, status, scanned_at, note, note_category, note_value
+    `SELECT employee_id, employee_code, employee_name, status, scanned_at, note, note_category, note_value
      FROM scan_logs
-     WHERE scanned_at >= $1 AND scanned_at <= $2
+     WHERE scanned_at >= $1::timestamptz AND scanned_at <= $2::timestamptz
      ORDER BY scanned_at ASC, id ASC`,
     [bounds.startIso, bounds.endIso]
   );
-  const logs = logRes.rows;
 
-  const agg = computePayrollRowsFromLogs(employees, logs);
+  const agg = await computePayrollRowsFromScopedLogs(employees, logRes.rows, bounds.startIso, bounds.endIso);
   return {
     date: yyyyMmDd,
     rounding: hoursRoundMode(),
@@ -1741,6 +2119,15 @@ app.post('/api/scan', async (req, res) => {
     return res.status(403).json({ ok: false, error: 'inactive_employee', message: 'Employee is inactive.' });
   }
 
+  const latestAny = await getLatestLogForEmployeeCode(code);
+  if (recentDuplicateScan(latestAny)) {
+    return res.status(429).json({
+      ok: false,
+      error: 'duplicate_scan',
+      message: 'Duplicate scan ignored. Please wait a moment before scanning again.',
+    });
+  }
+
   const latest = await getLatestLogForCode(code);
   const status = nextStatusFromLatest(latest);
   const scannedAt = nowIso();
@@ -1793,6 +2180,15 @@ async function postScanRecord(req, res) {
   const employee = await getEmployeeByCode(code);
   if (!employee) return res.status(404).json({ ok: false, error: 'unknown_employee', message: 'Unknown employee.' });
   if (!employee.is_active) return res.status(403).json({ ok: false, error: 'inactive_employee', message: 'Employee is inactive.' });
+
+  const latestAny = await getLatestLogForEmployeeCode(code);
+  if (recentDuplicateScan(latestAny)) {
+    return res.status(429).json({
+      ok: false,
+      error: 'duplicate_scan',
+      message: 'Duplicate scan ignored. Please wait a moment before scanning again.',
+    });
+  }
 
   const latest = await getLatestLogForCode(code);
   const expected = nextStatusFromLatest(latest);
@@ -2012,6 +2408,7 @@ app.get('/api/status', async (_req, res) => {
     `SELECT id, code, name, is_active, hourly_rate, created_at, updated_at FROM employees ORDER BY LOWER(name) ASC`
   );
   const employees = emRes.rows;
+  const workedMap = bounds ? await buildWorkedHoursMapForWindow(bounds, Math.min(Date.now(), new Date(bounds.endIso).getTime())) : new Map();
 
   const payload = [];
   for (const e of employees) {
@@ -2026,6 +2423,7 @@ app.get('/api/status', async (_req, res) => {
       current_status = latest.status;
       last_scan_at = latest.scanned_at;
     }
+    const daily = await computeDailyHours(Number(e.id), day);
     payload.push({
       id: e.id,
       code: e.code,
@@ -2034,10 +2432,74 @@ app.get('/api/status', async (_req, res) => {
       hourly_rate: Number.isFinite(Number(e.hourly_rate)) ? Number(e.hourly_rate) : 20,
       current_status,
       last_scan_at,
+      daily_hours: Number.isFinite(Number(workedMap.get(Number(e.id)))) ? Number(workedMap.get(Number(e.id))) : 0,
+      currently_working: !!(daily && daily.currentlyWorking),
+      current_session_start: daily && daily.currentlyWorking ? daily.currentSessionStart : null,
+      elapsed_seconds:
+        daily && daily.currentlyWorking && daily.currentSessionStart
+          ? Math.max(0, Math.floor((Date.now() - new Date(daily.currentSessionStart).getTime()) / 1000))
+          : 0,
     });
   }
 
   res.json({ ok: true, scans_today: scansToday, employees: payload });
+});
+
+app.get('/api/dashboard', async (_req, res) => {
+  const [status, payroll] = await Promise.all([
+    (async () => {
+      const r = await pool.query(`SELECT 1`);
+      void r;
+      return null;
+    })(),
+    computePayrollForDate(localDateString()),
+  ]);
+  void status;
+  const statusRes = await (async () => {
+    const day = localDateString();
+    const bounds = startEndOfLocalDay(day);
+    let scansToday = 0;
+    if (bounds) {
+      const cRes = await pool.query(
+        `SELECT COUNT(*)::int AS c FROM scan_logs WHERE scanned_at >= $1::timestamptz AND scanned_at <= $2::timestamptz`,
+        [bounds.startIso, bounds.endIso]
+      );
+      scansToday = cRes.rows[0].c;
+    }
+    const emRes = await pool.query(
+      `SELECT id, code, name, is_active, hourly_rate, created_at, updated_at FROM employees ORDER BY LOWER(name) ASC`
+    );
+    const workedMap = bounds ? await buildWorkedHoursMapForWindow(bounds, Math.min(Date.now(), new Date(bounds.endIso).getTime())) : new Map();
+    const out = [];
+    for (const e of emRes.rows) {
+      const latestRes = await pool.query(
+        `SELECT status, scanned_at FROM scan_logs WHERE employee_code = $1 ORDER BY scanned_at DESC, id DESC LIMIT 1`,
+        [e.code]
+      );
+      const latest = latestRes.rows[0];
+      const daily = await computeDailyHours(Number(e.id), day);
+      out.push({
+        id: e.id,
+        code: e.code,
+        name: e.name,
+        is_active: !!e.is_active,
+        hourly_rate: Number.isFinite(Number(e.hourly_rate)) ? Number(e.hourly_rate) : 20,
+        current_status: latest ? latest.status : 'OUT',
+        last_scan_at: latest ? latest.scanned_at : null,
+        daily_hours: Number.isFinite(Number(workedMap.get(Number(e.id)))) ? Number(workedMap.get(Number(e.id))) : 0,
+        currently_working: !!(daily && daily.currentlyWorking),
+        current_session_start: daily && daily.currentlyWorking ? daily.currentSessionStart : null,
+      });
+    }
+    return { scans_today: scansToday, employees: out };
+  })();
+  res.json({
+    ok: true,
+    date: localDateString(),
+    scans_today: statusRes.scans_today,
+    employees: statusRes.employees,
+    payroll: payroll || null,
+  });
 });
 
 app.get('/api/logs', async (req, res) => {
@@ -2281,6 +2743,9 @@ app.get('/api/payroll', async (req, res) => {
 
 app.get('/api/employees', async (req, res) => {
   const search = req.query.search ? String(req.query.search).trim() : '';
+  const day = localDateString();
+  const bounds = startEndOfLocalDay(day);
+  const workedMap = bounds ? await buildWorkedHoursMapForWindow(bounds, Math.min(Date.now(), new Date(bounds.endIso).getTime())) : new Map();
   let rows;
   if (search) {
     const safe = search.replace(/%/g, '').replace(/_/g, '');
@@ -2304,6 +2769,7 @@ app.get('/api/employees', async (req, res) => {
       ...e,
       is_active: !!e.is_active,
       hourly_rate: Number.isFinite(Number(e.hourly_rate)) ? Number(e.hourly_rate) : 20,
+      daily_hours: Number.isFinite(Number(workedMap.get(Number(e.id)))) ? Number(workedMap.get(Number(e.id))) : 0,
     })),
   });
 });
@@ -2529,6 +2995,12 @@ async function managerCurrentWorkRows() {
   const employees = emRes.rows;
   const day = startEndOfLocalDay(localDateString());
   const week = weekBoundsLocal();
+  if (!day) return [];
+  const dayClose = Math.min(Date.now(), new Date(day.endIso).getTime());
+  const weekClose = Math.min(Date.now(), new Date(week.endIso).getTime());
+  const dailyMap = await buildWorkedHoursMapForWindow(day, dayClose);
+  const weeklyMap = await buildWorkedHoursMapForWindow(week, weekClose);
+
   const rows = [];
   for (const e of employees) {
     const latestRes = await pool.query(
@@ -2547,19 +3019,8 @@ async function managerCurrentWorkRows() {
     const elapsedMs = Number.isFinite(startMs) ? Math.max(0, Date.now() - startMs) : 0;
     const activity = inRow.note_value || inRow.note || '-';
     const tank_number = inRow.tank_number || '-';
-    let dailyHours = 0;
-    if (day) {
-      const dr = await pool.query(
-        `SELECT status, scanned_at FROM scan_logs WHERE employee_code = $1 AND scanned_at >= $2 AND scanned_at <= $3 ORDER BY scanned_at ASC, id ASC`,
-        [e.code, day.startIso, day.endIso]
-      );
-      dailyHours = workedMsFromLogsAsc(dr.rows) / 3600000;
-    }
-    const wr = await pool.query(
-      `SELECT status, scanned_at FROM scan_logs WHERE employee_code = $1 AND scanned_at >= $2 AND scanned_at <= $3 ORDER BY scanned_at ASC, id ASC`,
-      [e.code, week.startIso, week.endIso]
-    );
-    const weeklyHours = workedMsFromLogsAsc(wr.rows) / 3600000;
+    const dailyHours = dailyMap.get(e.id) || 0;
+    const weeklyHours = weeklyMap.get(e.id) || 0;
     rows.push({
       employee_code: e.code,
       employee_name: e.name,
@@ -2573,8 +3034,8 @@ async function managerCurrentWorkRows() {
       elapsed_minutes: Math.round(elapsedMs / 60000),
       last_scan_time: latest.scanned_at,
       hourly_rate: Number.isFinite(Number(e.hourly_rate)) ? Number(e.hourly_rate) : 20,
-      daily_hours: Math.round(dailyHours * 100) / 100,
-      weekly_hours: Math.round(weeklyHours * 100) / 100,
+      daily_hours: dailyHours,
+      weekly_hours: weeklyHours,
       overtime_warning: dailyHours > 8 || weeklyHours > 40,
     });
   }
@@ -2589,11 +3050,13 @@ async function managerTankSummaryRows() {
   const logRes = await pool.query(
     `SELECT employee_code, employee_name, status, scanned_at, note_value, note, tank_number
      FROM scan_logs
-     WHERE scanned_at >= $1 AND scanned_at <= $2
+     WHERE scanned_at >= $1::timestamptz AND scanned_at <= $2::timestamptz
      ORDER BY scanned_at ASC, id ASC`,
     [bounds.startIso, bounds.endIso]
   );
   const rows = logRes.rows;
+  const closeAt = Math.min(Date.now(), new Date(bounds.endIso).getTime());
+  const tankMs = laborMsAttributedByTank(rows, closeAt);
   const byTank = new Map();
   const workerTank = new Map();
   for (const r of rows) {
@@ -2607,17 +3070,19 @@ async function managerTankSummaryRows() {
     if (r.status !== 'IN') continue;
     const resolvedTank = tank || workerTank.get(code);
     if (!resolvedTank) continue;
-    if (!byTank.has(resolvedTank)) byTank.set(resolvedTank, { logs: [], workersNow: new Set(), last_activity: '-' });
-    byTank.get(resolvedTank).logs.push(r);
+    if (!byTank.has(resolvedTank)) byTank.set(resolvedTank, { workersNow: new Set(), last_activity: '-' });
     byTank.get(resolvedTank).last_activity = r.note_value || r.note || '-';
   }
   for (const [code, tank] of workerTank.entries()) {
-    if (!byTank.has(tank)) byTank.set(tank, { logs: [], workersNow: new Set(), last_activity: '-' });
+    if (!byTank.has(tank)) byTank.set(tank, { workersNow: new Set(), last_activity: '-' });
     byTank.get(tank).workersNow.add(code);
+  }
+  for (const [tank, ms] of tankMs.entries()) {
+    if (!byTank.has(tank)) byTank.set(tank, { workersNow: new Set(), last_activity: '-' });
   }
   const out = [];
   for (const [tank, item] of byTank.entries()) {
-    const ms = workedMsFromLogsAsc(item.logs);
+    const ms = tankMs.get(tank) || 0;
     out.push({
       tank_number: tank,
       workers_currently_on_tank: item.workersNow.size,
@@ -2642,22 +3107,16 @@ async function managerOvertimeWatch() {
   const today = startEndOfLocalDay(localDateString());
   if (!today) return [];
   const week = weekBoundsLocal();
-  const emRes = await pool.query(`SELECT code, name, hourly_rate FROM employees WHERE is_active = 1`);
+  const dayClose = Math.min(Date.now(), new Date(today.endIso).getTime());
+  const weekClose = Math.min(Date.now(), new Date(week.endIso).getTime());
+  const dailyMap = await buildWorkedHoursMapForWindow(today, dayClose);
+  const weeklyMap = await buildWorkedHoursMapForWindow(week, weekClose);
+  const emRes = await pool.query(`SELECT id, code, name, hourly_rate FROM employees WHERE is_active = 1`);
   const employees = emRes.rows;
   const rows = [];
   for (const e of employees) {
-    const dailyRes = await pool.query(
-      `SELECT status, scanned_at FROM scan_logs WHERE employee_code = $1 AND scanned_at >= $2 AND scanned_at <= $3 ORDER BY scanned_at ASC, id ASC`,
-      [e.code, today.startIso, today.endIso]
-    );
-    const weeklyRes = await pool.query(
-      `SELECT status, scanned_at FROM scan_logs WHERE employee_code = $1 AND scanned_at >= $2 AND scanned_at <= $3 ORDER BY scanned_at ASC, id ASC`,
-      [e.code, week.startIso, week.endIso]
-    );
-    const dailyLogs = dailyRes.rows;
-    const weeklyLogs = weeklyRes.rows;
-    const dailyHours = workedMsFromLogsAsc(dailyLogs) / 3600000;
-    const weeklyHours = workedMsFromLogsAsc(weeklyLogs) / 3600000;
+    const dailyHours = dailyMap.get(e.id) || 0;
+    const weeklyHours = weeklyMap.get(e.id) || 0;
     const dailyOt = Math.max(0, dailyHours - 8);
     const weeklyOt = Math.max(0, weeklyHours - 40);
     const otHours = Math.max(dailyOt, weeklyOt);

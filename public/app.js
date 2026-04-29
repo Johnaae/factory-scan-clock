@@ -48,6 +48,15 @@ function formatMoney(n) {
   return new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(v);
 }
 
+function formatElapsed(seconds) {
+  const s = Math.max(0, Number(seconds) || 0);
+  const hh = Math.floor(s / 3600);
+  const mm = Math.floor((s % 3600) / 60);
+  const ss = Math.floor(s % 60);
+  if (hh > 0) return `${pad2(hh)}:${pad2(mm)}:${pad2(ss)}`;
+  return `${pad2(mm)}:${pad2(ss)}`;
+}
+
 function normalizeScanValue(v) {
   return String(v || '')
     .trim()
@@ -578,6 +587,8 @@ function renderStatusTable() {
           ? '<span class="badge badge-in">IN</span>'
           : '<span class="badge badge-out">OUT</span>'
         : '<span class="badge badge-muted">—</span>';
+      const daily = Number.isFinite(Number(e.daily_hours)) ? Number(e.daily_hours).toFixed(2) : '0.00';
+      const elapsed = e.currently_working && e.current_session_start ? formatElapsed(e.elapsed_seconds || 0) : '—';
       const last = e.is_active ? formatDisplayDateTime(e.last_scan_at) : '—';
       const rowHi = highlightEmployeeCode && e.code === highlightEmployeeCode ? ' row-employee-updated' : '';
       return `<tr class="${rowHi}">
@@ -585,13 +596,15 @@ function renderStatusTable() {
         <td>${escapeHtml(e.name)}</td>
         <td>${active}</td>
         <td>${st}</td>
+        <td class="td-num">${escapeHtml(daily)}</td>
+        <td class="muted td-time">${escapeHtml(elapsed)}</td>
         <td class="muted td-time">${escapeHtml(last)}</td>
       </tr>`;
     })
     .join('');
 
   statusBody.innerHTML =
-    rows || `<tr><td colspan="5" class="muted">${q ? 'No matches for this filter.' : 'No employees yet.'}</td></tr>`;
+    rows || `<tr><td colspan="7" class="muted">${q ? 'No matches for this filter.' : 'No employees yet.'}</td></tr>`;
 }
 
 function renderLogsTable() {
@@ -864,7 +877,7 @@ window.addEventListener('load', () => {
   showWaiting();
   focusScanSoon();
   tickClock();
-  window.setInterval(tickClock, 250);
+  window.setInterval(tickClock, 1000);
   window.setInterval(() => {
     refreshDashboard().catch(() => {});
   }, 3500);
@@ -875,6 +888,15 @@ function tickClock() {
   const now = new Date();
   if (clockDateEl) clockDateEl.textContent = formatClockDate(now);
   clockEl.textContent = formatTime(now);
+  for (const e of lastEmployees) {
+    if (e && e.currently_working && e.current_session_start) {
+      const ms = Date.now() - new Date(e.current_session_start).getTime();
+      e.elapsed_seconds = Math.max(0, Math.floor(ms / 1000));
+    } else if (e) {
+      e.elapsed_seconds = 0;
+    }
+  }
+  renderStatusTable();
 }
 
 function triggerScanFromCode(rawValue) {
