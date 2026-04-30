@@ -3416,7 +3416,7 @@ app.get('/scan.html', (_req, res) => {
 });
 
 app.get('/login', (_req, res) => {
-  res.sendFile(path.join(PUBLIC_DIR, 'login.html'));
+  res.redirect(302, '/manager-login');
 });
 
 app.get('/manager-login', (_req, res) => {

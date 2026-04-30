@@ -2,7 +2,7 @@
   "name": "Factory Scan Clock",
   "short_name": "Factory Scan",
   "description": "Factory workforce scanning, manager dashboard, and kiosk clock flow.",
-  "start_url": "/login",
+  "start_url": "/manager-login",
   "scope": "/",
   "display": "standalone",
   "background_color": "#eef2ff",
