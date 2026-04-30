@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Factory Scan Clock - Manager Login</title>
+    <meta name="theme-color" content="#4f46e5" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Factory Scan" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="icon" href="/icons/icon-192.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icons/icon-192.svg" />
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: Inter, "Segoe UI", Arial, sans-serif;
+        background: linear-gradient(180deg, #eef2ff 0%, #e2e8f0 100%);
+        display: grid;
+        place-items: center;
+        color: #0f172a;
+      }
+      .card {
+        width: min(420px, 92vw);
+        background: #fff;
+        border: 1px solid #dbeafe;
+        border-radius: 18px;
+        box-shadow: 0 18px 40px rgba(30, 41, 59, 0.15);
+        padding: 24px;
+      }
+      h1 { margin: 0; font-size: 28px; }
+      p.lead { margin: 6px 0 18px; color: #475569; }
+      label { display: block; margin: 10px 0 6px; font-weight: 600; }
+      input {
+        width: 100%;
+        border: 1px solid #cbd5e1;
+        border-radius: 10px;
+        padding: 11px 12px;
+        font-size: 15px;
+      }
+      .pw-toggle {
+        margin-top: 8px;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        color: #334155;
+        user-select: none;
+      }
+      .pw-toggle input {
+        width: auto;
+        margin: 0;
+      }
+      button.submit {
+        width: 100%;
+        margin-top: 16px;
+        border: 0;
+        border-radius: 10px;
+        padding: 11px 12px;
+        font-weight: 700;
+        color: #fff;
+        background: linear-gradient(135deg, #4f46e5, #7c3aed);
+        cursor: pointer;
+      }
+      .hint { margin-top: 10px; min-height: 18px; color: #b91c1c; font-size: 13px; }
+      .install-links { margin-top: 14px; text-align: center; font-size: 13px; }
+      .install-links a { color: #4338ca; text-decoration: none; font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Factory Scan Clock</h1>
+      <p class="lead">Manager Login</p>
+
+      <form id="panelManager" autocomplete="off">
+        <label for="username">Username</label>
+        <input id="username" name="username" type="text" required />
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" required />
+        <label class="pw-toggle" for="showPassword">
+          <input id="showPassword" type="checkbox" />
+          Show password
+        </label>
+        <button type="submit" class="submit">Login</button>
+        <div class="hint" id="hintManager" role="status" aria-live="polite"></div>
+      </form>
+      <div class="install-links">
+        <a href="/install">Install shortcuts guide</a>
+      </div>
+    </div>
+    <script>
+      const panelManager = document.getElementById('panelManager');
+      const hintManager = document.getElementById('hintManager');
+      const showPassword = document.getElementById('showPassword');
+      const passwordInput = document.getElementById('password');
+      showPassword.addEventListener('change', () => {
+        passwordInput.type = showPassword.checked ? 'text' : 'password';
+      });
+      panelManager.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        hintManager.textContent = '';
+        const username = document.getElementById('username').value.trim();
+        const password = passwordInput.value;
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) {
+          hintManager.textContent = (data && data.message) || 'Login failed. Please check username and password.';
+          return;
+        }
+        window.location.href = data.redirect || '/manager-dashboard';
+      });
+    </script>
+    <script src="/pwa.js"></script>
+  </body>
+  </html>

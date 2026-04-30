@@ -3420,7 +3420,7 @@ app.get('/login', (_req, res) => {
 });
 
 app.get('/manager-login', (_req, res) => {
-  res.redirect(302, '/login?mode=manager');
+  res.sendFile(path.join(PUBLIC_DIR, 'manager-login.html'));
 });
 
 app.get('/kiosk-login', (_req, res) => {

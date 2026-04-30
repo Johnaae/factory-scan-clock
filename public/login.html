@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Factory Scan Clock Login</title>
+    <title>Factory Scan Clock</title>
     <meta name="theme-color" content="#4f46e5" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
@@ -33,65 +33,28 @@
       }
       h1 { margin: 0; font-size: 28px; }
       p.lead { margin: 6px 0 18px; color: #475569; }
-      .tabs {
-        display: flex;
-        gap: 8px;
-        margin-bottom: 18px;
+      .actions {
+        display: grid;
+        gap: 10px;
       }
-      .tabs button {
-        flex: 1;
-        padding: 10px 12px;
-        border-radius: 10px;
-        border: 1px solid #cbd5e1;
-        background: #f8fafc;
-        font-weight: 600;
-        font-size: 14px;
-        cursor: pointer;
-        color: #475569;
-      }
-      .tabs button.active {
-        background: linear-gradient(135deg, #4f46e5, #7c3aed);
-        color: #fff;
-        border-color: transparent;
-      }
-      .panel { display: none; }
-      .panel.active { display: block; }
-      label { display: block; margin: 10px 0 6px; font-weight: 600; }
-      input, select {
+      .link-btn {
+        display: block;
         width: 100%;
-        border: 1px solid #cbd5e1;
-        border-radius: 10px;
-        padding: 11px 12px;
-        font-size: 15px;
-      }
-      .password-row {
-        position: relative;
-      }
-      .pw-toggle {
-        margin-top: 8px;
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        font-size: 13px;
-        color: #334155;
-        user-select: none;
-      }
-      .pw-toggle input {
-        width: auto;
-        margin: 0;
-      }
-      button.submit {
-        width: 100%;
-        margin-top: 16px;
-        border: 0;
+        text-align: center;
+        text-decoration: none;
         border-radius: 10px;
         padding: 11px 12px;
         font-weight: 700;
+      }
+      .link-btn.manager {
         color: #fff;
         background: linear-gradient(135deg, #4f46e5, #7c3aed);
-        cursor: pointer;
       }
-      .hint { margin-top: 10px; min-height: 18px; color: #b91c1c; font-size: 13px; }
+      .link-btn.kiosk {
+        color: #4338ca;
+        border: 1px solid #cbd5e1;
+        background: #f8fafc;
+      }
       .install-links { margin-top: 14px; text-align: center; font-size: 13px; }
       .install-links a { color: #4338ca; text-decoration: none; font-weight: 600; }
     </style>
@@ -99,130 +62,15 @@
   <body>
     <div class="card">
       <h1>Factory Scan Clock</h1>
-      <p class="lead">Sign in as manager or kiosk station.</p>
-
-      <div class="tabs" role="tablist">
-        <button type="button" id="tabManager" class="active" role="tab" aria-selected="true">Manager Login</button>
-        <button type="button" id="tabKiosk" role="tab" aria-selected="false">Kiosk PIN Login</button>
+      <p class="lead">Choose your access mode.</p>
+      <div class="actions">
+        <a class="link-btn manager" href="/manager-login">Manager Login</a>
+        <a class="link-btn kiosk" href="/kiosk-login">Kiosk PIN Login</a>
       </div>
-
-      <form class="panel active" id="panelManager" autocomplete="off">
-        <label for="username">Username</label>
-        <input id="username" name="username" type="text" required />
-        <label for="password">Password</label>
-        <div class="password-row">
-          <input id="password" name="password" type="password" required />
-        </div>
-        <label class="pw-toggle" for="showPassword">
-          <input id="showPassword" type="checkbox" />
-          Show password
-        </label>
-        <button type="submit" class="submit">Login</button>
-        <div class="hint" id="hintManager" role="status" aria-live="polite"></div>
-      </form>
-
-      <form class="panel" id="panelKiosk" autocomplete="off">
-        <label for="kioskArea">Area</label>
-        <select id="kioskArea" name="area" required>
-          <option value="">Select area…</option>
-          <option value="Area A">Area A</option>
-          <option value="Area B">Area B</option>
-          <option value="Area C">Area C</option>
-        </select>
-        <label for="kioskPin">PIN (4–6 digits)</label>
-        <input id="kioskPin" name="pin" type="password" inputmode="numeric" pattern="[0-9]{4,6}" minlength="4" maxlength="6" autocomplete="one-time-code" required />
-        <label class="pw-toggle" for="showKioskPin">
-          <input id="showKioskPin" type="checkbox" />
-          Show PIN
-        </label>
-        <button type="submit" class="submit">Login</button>
-        <div class="hint" id="hintKiosk" role="status" aria-live="polite"></div>
-      </form>
       <div class="install-links">
         <a href="/install">Install shortcuts guide</a>
       </div>
     </div>
-    <script>
-      const tabManager = document.getElementById('tabManager');
-      const tabKiosk = document.getElementById('tabKiosk');
-      const panelManager = document.getElementById('panelManager');
-      const panelKiosk = document.getElementById('panelKiosk');
-      const hintManager = document.getElementById('hintManager');
-      const hintKiosk = document.getElementById('hintKiosk');
-
-      function showTab(which) {
-        const isMgr = which === 'manager';
-        tabManager.classList.toggle('active', isMgr);
-        tabKiosk.classList.toggle('active', !isMgr);
-        tabManager.setAttribute('aria-selected', isMgr ? 'true' : 'false');
-        tabKiosk.setAttribute('aria-selected', !isMgr ? 'true' : 'false');
-        panelManager.classList.toggle('active', isMgr);
-        panelKiosk.classList.toggle('active', !isMgr);
-      }
-      tabManager.addEventListener('click', () => showTab('manager'));
-      tabKiosk.addEventListener('click', () => showTab('kiosk'));
-      const mode = new URLSearchParams(window.location.search).get('mode');
-      const modeLc = String(mode || '').toLowerCase();
-      if (modeLc === 'kiosk') {
-        showTab('kiosk');
-        tabManager.style.display = 'none';
-      } else if (modeLc === 'manager') {
-        showTab('manager');
-        tabKiosk.style.display = 'none';
-      } else {
-        showTab('manager');
-      }
-
-      const showPassword = document.getElementById('showPassword');
-      const passwordInput = document.getElementById('password');
-      showPassword.addEventListener('change', () => {
-        passwordInput.type = showPassword.checked ? 'text' : 'password';
-      });
-
-      const showKioskPin = document.getElementById('showKioskPin');
-      const kioskPinInput = document.getElementById('kioskPin');
-      showKioskPin.addEventListener('change', () => {
-        kioskPinInput.type = showKioskPin.checked ? 'text' : 'password';
-      });
-
-      panelManager.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        hintManager.textContent = '';
-        const username = document.getElementById('username').value.trim();
-        const password = passwordInput.value;
-        const res = await fetch('/api/auth/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, password }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok || !data.ok) {
-          hintManager.textContent =
-            (data && data.message) || 'Login failed. Please check username and password.';
-          return;
-        }
-        window.location.href = data.redirect || '/scan';
-      });
-
-      panelKiosk.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        hintKiosk.textContent = '';
-        const area = document.getElementById('kioskArea').value.trim();
-        const pin = kioskPinInput.value.trim();
-        const res = await fetch('/api/auth/login-kiosk-pin', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ area, pin }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok || !data.ok) {
-          hintKiosk.textContent =
-            (data && data.message) || 'Login failed. Check area and PIN.';
-          return;
-        }
-        window.location.href = data.redirect || '/scan';
-      });
-    </script>
     <script src="/pwa.js"></script>
   </body>
 </html>
