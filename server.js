@@ -2961,11 +2961,24 @@ app.patch('/api/employees/:id/toggle-active', async (req, res) => {
 
 app.get('/api/tanks', async (req, res) => {
   const search = String(req.query.search || '').trim().toUpperCase();
+  const statusFilter = String(req.query.status || '').trim().toLowerCase();
   const activeOnly = String(req.query.active_only || '').toLowerCase() === '1';
   let sql = `SELECT id, tank_number, description, status, created_at, updated_at FROM tanks WHERE 1=1`;
   const params = [];
   let n = 1;
-  if (activeOnly) sql += ` AND status = 'ACTIVE'`;
+  if (statusFilter === 'active') {
+    sql += ` AND status = 'ACTIVE'`;
+  } else if (statusFilter === 'archived') {
+    sql += ` AND status = 'ARCHIVED'`;
+  } else if (statusFilter === 'all' || statusFilter === '') {
+    if (activeOnly) sql += ` AND status = 'ACTIVE'`;
+  } else {
+    return res.status(400).json({
+      ok: false,
+      error: 'validation',
+      message: 'status filter must be active, archived, or all.',
+    });
+  }
   if (search) {
     sql += ` AND (tank_number LIKE $${n} OR description LIKE $${n + 1})`;
     params.push(`%${search}%`, `%${search}%`);

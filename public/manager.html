@@ -57,6 +57,12 @@
             <div class="field">
               <label for="tankSearch">Search Tanks</label>
               <input id="tankSearch" type="search" placeholder="Search by tank number or description" autocomplete="off" />
+              <label for="tankStatusFilter" style="margin-top:10px">Tank Filter</label>
+              <select id="tankStatusFilter">
+                <option value="active" selected>Active</option>
+                <option value="archived">Archived</option>
+                <option value="all">All</option>
+              </select>
             </div>
           </div>
           <div class="toastline manager-alert" id="tankHint"></div>
