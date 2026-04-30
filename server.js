@@ -366,6 +366,68 @@ function workActivityLabelFromInRow(inRow) {
 }
 
 /**
+ * Same cumulative regular / OT rules as pairSessionsMsForWindow, without window clipping (full wall times).
+ * @param {boolean} includeTrailing If false, an open trailing IN is ignored (matches legacy analytics).
+ */
+function walkCumulativePairSegmentsNoWindow(logsAsc, closeMs, onClose, includeTrailing) {
+  /** @type {Map<string, number>} */
+  const regularByDay = new Map();
+  let pendingMs = null;
+  /** @type {object | null} */
+  let pendingRow = null;
+  let pendingOt = false;
+
+  function clearP() {
+    pendingMs = null;
+    pendingRow = null;
+    pendingOt = false;
+  }
+
+  function closeAt(outMs) {
+    if (pendingMs === null) return;
+    const tin = pendingMs;
+    if (outMs <= tin) {
+      clearP();
+      return;
+    }
+    const eff = pendingOt ? outMs : closeRegularSegmentEnd(tin, outMs, regularByDay);
+    if (eff > tin) onClose(tin, eff, pendingRow, pendingOt);
+    clearP();
+  }
+
+  for (const row of logsAsc) {
+    const st = String(row.status || '').toUpperCase();
+    const t = new Date(row.scanned_at).getTime();
+    if (Number.isNaN(t)) continue;
+    if (st === 'IN') {
+      if (pendingMs !== null) {
+        if (!pendingOt) {
+          const virtEnd = peekRegularSegmentEnd(pendingMs, t, regularByDay);
+          if (virtEnd > pendingMs && virtEnd < t) closeAt(virtEnd);
+        }
+        if (pendingMs !== null) continue;
+      }
+      pendingMs = t;
+      pendingRow = row;
+      const dk = localDateString(new Date(t));
+      pendingOt = (regularByDay.get(dk) || 0) >= REGULAR_SHIFT_CAP_MS;
+    } else if (st === 'OUT') {
+      if (pendingMs === null) continue;
+      if (t < pendingMs) {
+        clearP();
+        continue;
+      }
+      closeAt(t);
+    }
+  }
+  if (includeTrailing && pendingMs !== null) {
+    const tin = pendingMs;
+    const eff = pendingOt ? closeMs : closeRegularSegmentEnd(tin, closeMs, regularByDay);
+    if (eff > tin) onClose(tin, eff, pendingRow, pendingOt);
+  }
+}
+
+/**
  * IN→OUT pairs; duration attributed to the IN row’s work (note_value). Incomplete pairs ignored.
  * @param {Array<Object>} logsAsc
  * @returns {Array<{ employee_id: number|null, employee_code: string, employee_name: string, activities: Array<{ label: string, hours: number }> }>}
@@ -385,6 +447,7 @@ function computeWorkAnalyticsFromLogs(logsAsc) {
     byCode.get(code).logs.push(log);
   }
   const out = [];
+  const closeAt = Date.now();
   for (const bundle of byCode.values()) {
     const activityMs = new Map();
     bundle.logs.sort((a, b) => {
@@ -393,33 +456,11 @@ function computeWorkAnalyticsFromLogs(logsAsc) {
       if (ta !== tb) return ta - tb;
       return (Number(a.id) || 0) - (Number(b.id) || 0);
     });
-    let pendingIn = null;
-    let sessionSeq = 0;
-    let pendingSessionNum = 0;
-    for (const log of bundle.logs) {
-      const t = new Date(log.scanned_at).getTime();
-      if (Number.isNaN(t)) continue;
-      if (log.status === 'IN') {
-        if (pendingIn) continue;
-        pendingIn = log;
-        sessionSeq += 1;
-        pendingSessionNum = sessionSeq;
-      } else if (log.status === 'OUT') {
-        if (!pendingIn) continue;
-        const t0 = new Date(pendingIn.scanned_at).getTime();
-        if (Number.isNaN(t0) || t < t0) {
-          pendingIn = null;
-          pendingSessionNum = 0;
-          continue;
-        }
-        const label = workActivityLabelFromInRow(pendingIn);
-        const effOut = pendingSessionNum <= 1 ? Math.min(t, t0 + REGULAR_SHIFT_CAP_MS) : t;
-        const dur = effOut - t0;
-        activityMs.set(label, (activityMs.get(label) || 0) + dur);
-        pendingIn = null;
-        pendingSessionNum = 0;
-      }
-    }
+    walkCumulativePairSegmentsNoWindow(bundle.logs, closeAt, (tin, tout, inRow) => {
+      const label = workActivityLabelFromInRow(inRow);
+      const dur = tout - tin;
+      if (dur > 0) activityMs.set(label, (activityMs.get(label) || 0) + dur);
+    }, false);
     const activities = [...activityMs.entries()]
       .map(([label, ms]) => ({
         label,
@@ -454,44 +495,17 @@ function laborMsAttributedByTank(logsAsc, closeMs = Date.now()) {
       if (ta !== tb) return ta - tb;
       return (Number(a.id) || 0) - (Number(b.id) || 0);
     });
-    let pendingIn = null;
-    let pendingSessionNum = 0;
-    let sessionSeq = 0;
-    for (const row of logs) {
-      const st = String(row.status || '').toUpperCase();
-      const t = new Date(row.scanned_at).getTime();
-      if (Number.isNaN(t)) continue;
-      if (st === 'IN') {
-        if (pendingIn) continue;
-        pendingIn = row;
-        sessionSeq += 1;
-        pendingSessionNum = sessionSeq;
-      } else if (st === 'OUT') {
-        if (!pendingIn) continue;
-        const t0 = new Date(pendingIn.scanned_at).getTime();
-        if (!Number.isNaN(t0) && t >= t0) {
-          const tank = normalizeTankNumber(pendingIn.tank_number || '');
-          if (tank) {
-            const effOut = pendingSessionNum <= 1 ? Math.min(t, t0 + REGULAR_SHIFT_CAP_MS) : t;
-            const dur = effOut - t0;
-            if (dur > 0) tankMs.set(tank, (tankMs.get(tank) || 0) + dur);
-          }
-        }
-        pendingIn = null;
-        pendingSessionNum = 0;
-      }
-    }
-    if (pendingIn) {
-      const tank = normalizeTankNumber(pendingIn.tank_number || '');
-      if (tank) {
-        const t0 = new Date(pendingIn.scanned_at).getTime();
-        if (!Number.isNaN(t0)) {
-          const effClose = pendingSessionNum <= 1 ? Math.min(closeMs, t0 + REGULAR_SHIFT_CAP_MS) : closeMs;
-          const dur = Math.max(0, effClose - t0);
-          tankMs.set(tank, (tankMs.get(tank) || 0) + dur);
-        }
-      }
-    }
+    walkCumulativePairSegmentsNoWindow(
+      logs,
+      closeMs,
+      (tin, tout, inRow) => {
+        const tank = normalizeTankNumber(inRow.tank_number || '');
+        if (!tank) return;
+        const dur = tout - tin;
+        if (dur > 0) tankMs.set(tank, (tankMs.get(tank) || 0) + dur);
+      },
+      true
+    );
   }
   return tankMs;
 }
@@ -775,13 +789,56 @@ function intervalOverlapMs(a0, a1, b0, b1) {
   return Math.max(0, e - s);
 }
 
+/** Max regular (non-explicit-OT) hours per local calendar day. */
+const REGULAR_SHIFT_CAP_MS = 8 * 60 * 60 * 1000;
+
+/** Upper bound when peeking virtual regular-shift end for open sessions. */
+const REGULAR_PAIRING_PEEK_MS = 48 * 60 * 60 * 1000;
+
+function localDayAfterStartMs(tMs) {
+  const d = new Date(tMs);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, 0, 0, 0, 0).getTime();
+}
+
+function cloneRegularByDayMap(regularByDay) {
+  return new Map(regularByDay);
+}
+
 /**
- * Pair IN→OUT chronologically; ignore duplicate IN while pending; ignore OUT without pending IN.
- * Unmatched trailing IN closes to closeMs (open session). Optionally clip all segments to a local-day window
- * for cross-midnight / carry-in from the previous day.
+ * Advance from tin toward tout, crediting regular time against each local calendar day (max 8h/day).
+ * Mutates regularByDay (keys yyyy-mm-dd local). Returns effective segment end (<= tout).
+ */
+function closeRegularSegmentEnd(tin, tout, regularByDay) {
+  if (!(Number.isFinite(tin) && Number.isFinite(tout)) || tout <= tin) return tin;
+  let cur = tin;
+  while (cur < tout) {
+    const dayKey = localDateString(new Date(cur));
+    const used = regularByDay.get(dayKey) || 0;
+    const remDay = Math.max(0, REGULAR_SHIFT_CAP_MS - used);
+    if (remDay === 0) break;
+    const dayEndNext = localDayAfterStartMs(cur);
+    const chunkEnd = Math.min(tout, dayEndNext);
+    const chunkLen = chunkEnd - cur;
+    const take = Math.min(chunkLen, remDay);
+    cur += take;
+    regularByDay.set(dayKey, used + take);
+    if (take < chunkLen) break;
+    if (cur >= tout) break;
+  }
+  return cur;
+}
+
+function peekRegularSegmentEnd(tin, tout, regularByDay) {
+  return closeRegularSegmentEnd(tin, tout, cloneRegularByDayMap(regularByDay));
+}
+
+/**
+ * Pair IN→OUT chronologically; ignore duplicate IN while pending (unless cumulative 8h regular forces a virtual OUT before the next IN).
+ * Unmatched trailing IN closes to closeMs (open session). Optionally clip all segments to a local-day window.
  *
- * Regular-shift auto-end (no cron): the first IN session of the window (session 1) never contributes more than
- * 8 hours until the next IN (explicit overtime start). Session 2+ uses full IN→OUT durations.
+ * Regular hours: cumulative max 8h per local calendar day across all completed segments; an open regular session
+ * ends virtually when the day’s remaining regular budget is exhausted. Overtime only after an IN when that day’s
+ * regular bucket is already full (explicit OT IN).
  */
 function pairSessionsMsForWindow(logsAsc, opts) {
   const closeMs = opts.closeMs;
@@ -790,11 +847,15 @@ function pairSessionsMsForWindow(logsAsc, opts) {
   const isToday = !!opts.isToday;
   const carry = opts.carryPendingIn;
 
+  /** @type {Map<string, number>} */
+  const regularByDay = new Map();
+
   let pendingInMs = null;
   /** @type {object | null} */
   let pendingInRow = null;
   let pendingSessionNum = 0;
   let sessionSeq = 0;
+  let pendingIsOvertime = false;
 
   if (carry && String(carry.status || '').toUpperCase() === 'IN') {
     const t0 = new Date(carry.scanned_at).getTime();
@@ -803,6 +864,8 @@ function pairSessionsMsForWindow(logsAsc, opts) {
       pendingInRow = carry;
       sessionSeq = 1;
       pendingSessionNum = 1;
+      const dk = localDateString(new Date(t0));
+      pendingIsOvertime = (regularByDay.get(dk) || 0) >= REGULAR_SHIFT_CAP_MS;
     }
   }
 
@@ -821,42 +884,75 @@ function pairSessionsMsForWindow(logsAsc, opts) {
     });
   }
 
+  function clearPending() {
+    pendingInMs = null;
+    pendingInRow = null;
+    pendingSessionNum = 0;
+    pendingIsOvertime = false;
+  }
+
+  function closePendingAtOutMs(outMs) {
+    if (pendingInMs === null) return;
+    const tin = pendingInMs;
+    if (outMs <= tin) {
+      clearPending();
+      return;
+    }
+    const effOutMs = pendingIsOvertime ? outMs : closeRegularSegmentEnd(tin, outMs, regularByDay);
+    addSegment(tin, effOutMs);
+    clearPending();
+  }
+
   for (const row of logsAsc) {
     const st = String(row.status || '').toUpperCase();
     const t = new Date(row.scanned_at).getTime();
     if (Number.isNaN(t)) continue;
     if (st === 'IN') {
-      if (pendingInMs !== null) continue;
+      if (pendingInMs !== null) {
+        if (!pendingIsOvertime) {
+          const virtEnd = peekRegularSegmentEnd(pendingInMs, t, regularByDay);
+          if (virtEnd > pendingInMs && virtEnd < t) {
+            closePendingAtOutMs(virtEnd);
+          }
+        }
+        if (pendingInMs !== null) continue;
+      }
       pendingInMs = t;
       pendingInRow = row;
       sessionSeq += 1;
       pendingSessionNum = sessionSeq;
+      const dk = localDateString(new Date(t));
+      pendingIsOvertime = (regularByDay.get(dk) || 0) >= REGULAR_SHIFT_CAP_MS;
     } else if (st === 'OUT') {
       if (pendingInMs === null) continue;
       if (t < pendingInMs) {
-        pendingInMs = null;
-        pendingInRow = null;
-        pendingSessionNum = 0;
+        clearPending();
         continue;
       }
-      const effOutMs = pendingSessionNum <= 1 ? Math.min(t, pendingInMs + REGULAR_SHIFT_CAP_MS) : t;
-      addSegment(pendingInMs, effOutMs);
-      pendingInMs = null;
-      pendingInRow = null;
-      pendingSessionNum = 0;
+      closePendingAtOutMs(t);
     }
   }
 
   let currentlyWorking = false;
   let currentSessionStart = null;
   let regularAutoEnded = false;
+  /** @type {number | null} */
+  let pendingRegularCapEndMs = null;
+
   if (pendingInMs !== null) {
     currentSessionStart = new Date(pendingInMs).toISOString();
-    const effCloseMs = pendingSessionNum <= 1 ? Math.min(closeMs, pendingInMs + REGULAR_SHIFT_CAP_MS) : closeMs;
+    if (!pendingIsOvertime) {
+      pendingRegularCapEndMs = peekRegularSegmentEnd(
+        pendingInMs,
+        pendingInMs + REGULAR_PAIRING_PEEK_MS,
+        regularByDay
+      );
+    }
+    const effCloseMs = pendingIsOvertime ? closeMs : closeRegularSegmentEnd(pendingInMs, closeMs, regularByDay);
     addSegment(pendingInMs, effCloseMs);
-    if (pendingSessionNum <= 1) {
-      currentlyWorking = isToday && closeMs < pendingInMs + REGULAR_SHIFT_CAP_MS;
-      regularAutoEnded = closeMs >= pendingInMs + REGULAR_SHIFT_CAP_MS;
+    if (!pendingIsOvertime && pendingRegularCapEndMs != null) {
+      currentlyWorking = isToday && closeMs < pendingRegularCapEndMs;
+      regularAutoEnded = isToday && closeMs >= pendingRegularCapEndMs && pendingRegularCapEndMs > pendingInMs;
     } else {
       currentlyWorking = isToday;
       regularAutoEnded = false;
@@ -870,6 +966,8 @@ function pairSessionsMsForWindow(logsAsc, opts) {
     currentSessionStart,
     pendingInSourceRow: pendingInRow,
     pendingSessionNum: pendingInMs !== null ? pendingSessionNum : 0,
+    pendingOvertimeSession: pendingInMs !== null && pendingIsOvertime,
+    pendingRegularCapEndMs,
     regularAutoEnded,
   };
 }
@@ -928,9 +1026,6 @@ function workedMsFromLogsAsc(logsAsc, nowMs = Date.now()) {
 }
 
 const SCAN_DEBOUNCE_MS = Math.min(Math.max(Number(process.env.SCAN_DEBOUNCE_MS) || 2500, 500), 10000);
-
-/** Max duration for the first IN→OUT session of a local day without an intervening scan split (missing OUT). */
-const REGULAR_SHIFT_CAP_MS = 8 * 60 * 60 * 1000;
 
 async function fetchCarryInBeforeDay(startIso) {
   const { rows } = await pool.query(
@@ -1000,6 +1095,8 @@ async function computeDailyHours(employeeId, yyyyMmDd) {
     })),
     currentlyWorking: isToday && paired.currentlyWorking,
     currentSessionStart: isToday && paired.currentlyWorking ? paired.currentSessionStart : null,
+    pendingRegularCapEndMs: isToday ? paired.pendingRegularCapEndMs : null,
+    pendingOvertimeSession: isToday ? paired.pendingOvertimeSession : false,
   };
 }
 
@@ -1915,6 +2012,8 @@ async function getTodayPairingStateForEmployeeCode(code) {
       currentSessionStart: null,
       pendingInSourceRow: null,
       pendingSessionNum: 0,
+      pendingOvertimeSession: false,
+      pendingRegularCapEndMs: null,
       regularAutoEnded: false,
       latestRow: null,
     };
@@ -1929,6 +2028,8 @@ async function getTodayPairingStateForEmployeeCode(code) {
       currentSessionStart: null,
       pendingInSourceRow: null,
       pendingSessionNum: 0,
+      pendingOvertimeSession: false,
+      pendingRegularCapEndMs: null,
       regularAutoEnded: false,
       latestRow: null,
     };
@@ -2268,7 +2369,7 @@ async function handleKioskEmployeeLookup(req, res) {
       String(latest.status || '').toUpperCase() === 'IN' &&
       !paired.currentlyWorking &&
       paired.regularAutoEnded &&
-      paired.pendingSessionNum <= 1;
+      !paired.pendingOvertimeSession;
     let kiosk_notice = null;
     if (next_status === 'IN' && staleRegularAuto) {
       kiosk_notice = 'Regular shift auto-ended at 8 hours. Overtime started.';
@@ -2276,7 +2377,7 @@ async function handleKioskEmployeeLookup(req, res) {
 
     let current_session_type = null;
     if (paired.currentlyWorking) {
-      current_session_type = paired.pendingSessionNum >= 2 ? 'OVERTIME' : 'REGULAR';
+      current_session_type = paired.pendingOvertimeSession ? 'OVERTIME' : 'REGULAR';
     }
 
     console.log('[kiosk lookup] current_status:', current_status);
@@ -2420,7 +2521,7 @@ async function postScanRecord(req, res) {
   const scannedAt = nowIso();
 
   let kiosk_message = null;
-  if (status === 'OUT' && pairedBefore.currentlyWorking && pairedBefore.pendingSessionNum >= 2) {
+  if (status === 'OUT' && pairedBefore.currentlyWorking && pairedBefore.pendingOvertimeSession) {
     kiosk_message = 'Overtime ended.';
   }
 
@@ -2677,10 +2778,23 @@ app.get('/api/status', async (_req, res) => {
     let current_status = 'OUT';
     let last_scan_at = null;
     if (latest) {
-      current_status = latest.status;
       last_scan_at = latest.scanned_at;
     }
     const daily = await computeDailyHours(Number(e.id), day);
+    if (latest) {
+      const s = String(latest.status || '').toUpperCase();
+      if (s === 'IN' && daily && !daily.currentlyWorking) current_status = 'OUT';
+      else current_status = s;
+    }
+    const startMs =
+      daily && daily.currentlyWorking && daily.currentSessionStart
+        ? new Date(daily.currentSessionStart).getTime()
+        : NaN;
+    let effNow = Date.now();
+    if (daily && daily.currentlyWorking && !daily.pendingOvertimeSession && daily.pendingRegularCapEndMs != null) {
+      const cap = Number(daily.pendingRegularCapEndMs);
+      if (Number.isFinite(cap)) effNow = Math.min(Date.now(), cap);
+    }
     payload.push({
       id: e.id,
       code: e.code,
@@ -2693,8 +2807,8 @@ app.get('/api/status', async (_req, res) => {
       currently_working: !!(daily && daily.currentlyWorking),
       current_session_start: daily && daily.currentlyWorking ? daily.currentSessionStart : null,
       elapsed_seconds:
-        daily && daily.currentlyWorking && daily.currentSessionStart
-          ? Math.max(0, Math.floor((Date.now() - new Date(daily.currentSessionStart).getTime()) / 1000))
+        daily && daily.currentlyWorking && Number.isFinite(startMs)
+          ? Math.max(0, Math.floor((effNow - startMs) / 1000))
           : 0,
     });
   }
@@ -2735,13 +2849,19 @@ app.get('/api/dashboard', async (_req, res) => {
       );
       const latest = latestRes.rows[0];
       const daily = await computeDailyHours(Number(e.id), day);
+      let current_status = 'OUT';
+      if (latest) {
+        const s = String(latest.status || '').toUpperCase();
+        if (s === 'IN' && daily && !daily.currentlyWorking) current_status = 'OUT';
+        else current_status = s;
+      }
       out.push({
         id: e.id,
         code: e.code,
         name: e.name,
         is_active: !!e.is_active,
         hourly_rate: Number.isFinite(Number(e.hourly_rate)) ? Number(e.hourly_rate) : 20,
-        current_status: latest ? latest.status : 'OUT',
+        current_status,
         last_scan_at: latest ? latest.scanned_at : null,
         daily_hours: Number.isFinite(Number(workedMap.get(Number(e.id)))) ? Number(workedMap.get(Number(e.id))) : 0,
         currently_working: !!(daily && daily.currentlyWorking),
@@ -3302,17 +3422,23 @@ async function managerCurrentWorkRows() {
     const inRow = paired.pendingInSourceRow;
     const lastRow = list.length ? list[list.length - 1] : null;
     const startMs = new Date(inRow.scanned_at).getTime();
-    const effNow =
-      paired.pendingSessionNum <= 1 ? Math.min(Date.now(), startMs + REGULAR_SHIFT_CAP_MS) : Date.now();
+    const effNow = paired.pendingOvertimeSession
+      ? Date.now()
+      : Math.min(
+          Date.now(),
+          paired.pendingRegularCapEndMs != null && Number.isFinite(paired.pendingRegularCapEndMs)
+            ? paired.pendingRegularCapEndMs
+            : startMs + REGULAR_SHIFT_CAP_MS
+        );
     const elapsedMs = Number.isFinite(startMs) ? Math.max(0, effNow - startMs) : 0;
     const activity = inRow.note_value || inRow.note || '-';
     const tank_number = inRow.tank_number || '-';
     const dailyHours = dailyMap.get(eid) || 0;
     const weeklyHours = weeklyMap.get(eid) || 0;
     const flags = [];
-    if (paired.pendingSessionNum >= 2) flags.push('overtime_session');
+    if (paired.pendingOvertimeSession) flags.push('overtime_session');
     if (weeklyHours > 40) flags.push('weekly_overtime');
-    const overtime_warning = paired.pendingSessionNum >= 2 && (dailyHours > 8 || weeklyHours > 40);
+    const overtime_warning = paired.pendingOvertimeSession && (dailyHours > 8 || weeklyHours > 40);
     rows.push({
       employee_code: e.code,
       employee_name: e.name,
@@ -3480,9 +3606,9 @@ async function managerOvertimeWatch() {
     }
     const flags = [];
     const latestIn = latest && String(latest.status || '').toUpperCase() === 'IN';
-    const staleAuto = latestIn && !paired.currentlyWorking && paired.regularAutoEnded && paired.pendingSessionNum <= 1;
+    const staleAuto = latestIn && !paired.currentlyWorking && paired.regularAutoEnded && !paired.pendingOvertimeSession;
     if (staleAuto) flags.push('auto_ended_at_8h');
-    else if (latestIn && paired.currentlyWorking && paired.pendingSessionNum <= 1) flags.push('missing_out');
+    else if (latestIn && paired.currentlyWorking && !paired.pendingOvertimeSession) flags.push('missing_out');
     if (duplicateFastScan) flags.push('duplicate_scan');
     if (dailyHours > 8) flags.push('daily_overtime');
     if (weeklyHours > 40) flags.push('weekly_overtime');
