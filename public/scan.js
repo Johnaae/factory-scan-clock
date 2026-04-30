@@ -97,6 +97,7 @@ const state = {
   isBusy: false,
   lastAction: '',
   authUser: null,
+  kioskArea: '',
 };
 
 function normalizeBarcode(raw) {
@@ -458,8 +459,10 @@ async function refreshStatusList() {
     statusTableBody.innerHTML = '<tr><td colspan="5" class="status-empty">Failed to load status.</td></tr>';
     return;
   }
+  const currentArea = data.kiosk_area || state.kioskArea || (state.authUser && state.authUser.area_name) || '';
   if (data.rows.length === 0) {
-    statusTableBody.innerHTML = '<tr><td colspan="5" class="status-empty">No employees found.</td></tr>';
+    const areaLabel = currentArea ? ` in ${currentArea}` : '';
+    statusTableBody.innerHTML = `<tr><td colspan="5" class="status-empty">No employees have scanned${areaLabel} yet.</td></tr>`;
     return;
   }
   statusTableBody.innerHTML = '';
@@ -485,6 +488,7 @@ async function loadAuthUser() {
     return;
   }
   state.authUser = data.user;
+  state.kioskArea = state.authUser && state.authUser.area_name ? String(state.authUser.area_name) : '';
   if (state.authUser.role === 'KIOSK' && state.authUser.area_name) {
     kioskStationLabel.textContent = `${state.authUser.area_name} Kiosk`;
     if (managerQuickNav) managerQuickNav.hidden = true;

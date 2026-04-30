@@ -2314,61 +2314,55 @@ app.post('/api/scan/record', postScanRecord);
 /** Kiosk multi-step flow: same body as /api/scan/record (single INSERT when all fields collected). */
 app.post('/api/kiosk/complete-scan', postScanRecord);
 
-app.get('/api/kiosk/status', async (_req, res) => {
+app.get('/api/kiosk/status', async (req, res) => {
   try {
+    const kioskAuth = currentKioskFromSession(req);
+    const kioskArea = kioskAuth && kioskAuth.area_name ? String(kioskAuth.area_name).trim() : '';
+    if (!kioskArea) {
+      return res.status(400).json({
+        ok: false,
+        error: 'kiosk_area_missing',
+        message: 'Kiosk area is missing from session.',
+      });
+    }
+
     const { rows } = await pool.query(
-      `SELECT
+      `WITH latest_logs AS (
+         SELECT DISTINCT ON (l.employee_id)
+           l.employee_id,
+           l.employee_code,
+           l.employee_name,
+           l.status,
+           l.note_value,
+           l.note,
+           l.tank_number,
+           l.area_name,
+           l.station_name,
+           l.scanned_at
+         FROM scan_logs l
+         WHERE l.employee_id IS NOT NULL
+         ORDER BY l.employee_id, l.scanned_at DESC, l.id DESC
+       )
+       SELECT
          e.code AS employee_code,
          e.name AS employee_name,
          e.is_active AS is_active,
-         COALESCE((
-           SELECT l.status
-           FROM scan_logs l
-           WHERE REPLACE(UPPER(TRIM(COALESCE(l.employee_code, ''))), ' ', '') = REPLACE(UPPER(TRIM(COALESCE(e.code, ''))), ' ', '')
-           ORDER BY l.scanned_at DESC, l.id DESC
-           LIMIT 1
-         ), 'OUT') AS status,
-         (
-           SELECT COALESCE(NULLIF(TRIM(l.note_value), ''), NULLIF(TRIM(l.note), ''))
-           FROM scan_logs l
-           WHERE REPLACE(UPPER(TRIM(COALESCE(l.employee_code, ''))), ' ', '') = REPLACE(UPPER(TRIM(COALESCE(e.code, ''))), ' ', '')
-           ORDER BY l.scanned_at DESC, l.id DESC
-           LIMIT 1
-         ) AS note_value,
-         (
-           SELECT l.tank_number
-           FROM scan_logs l
-           WHERE REPLACE(UPPER(TRIM(COALESCE(l.employee_code, ''))), ' ', '') = REPLACE(UPPER(TRIM(COALESCE(e.code, ''))), ' ', '')
-           ORDER BY l.scanned_at DESC, l.id DESC
-           LIMIT 1
-         ) AS tank_number,
-         (
-           SELECT l.area_name
-           FROM scan_logs l
-           WHERE REPLACE(UPPER(TRIM(COALESCE(l.employee_code, ''))), ' ', '') = REPLACE(UPPER(TRIM(COALESCE(e.code, ''))), ' ', '')
-           ORDER BY l.scanned_at DESC, l.id DESC
-           LIMIT 1
-         ) AS area_name,
-         (
-           SELECT l.station_name
-           FROM scan_logs l
-           WHERE REPLACE(UPPER(TRIM(COALESCE(l.employee_code, ''))), ' ', '') = REPLACE(UPPER(TRIM(COALESCE(e.code, ''))), ' ', '')
-           ORDER BY l.scanned_at DESC, l.id DESC
-           LIMIT 1
-         ) AS station_name,
-         (
-           SELECT l.scanned_at
-           FROM scan_logs l
-           WHERE REPLACE(UPPER(TRIM(COALESCE(l.employee_code, ''))), ' ', '') = REPLACE(UPPER(TRIM(COALESCE(e.code, ''))), ' ', '')
-           ORDER BY l.scanned_at DESC, l.id DESC
-           LIMIT 1
-         ) AS scanned_at
-       FROM employees e
-       ORDER BY LOWER(e.name) ASC`
+         latest_logs.status AS status,
+         COALESCE(NULLIF(TRIM(latest_logs.note_value), ''), NULLIF(TRIM(latest_logs.note), '')) AS note_value,
+         latest_logs.tank_number AS tank_number,
+         latest_logs.area_name AS area_name,
+         latest_logs.station_name AS station_name,
+         latest_logs.scanned_at AS scanned_at
+       FROM latest_logs
+       JOIN employees e ON e.id = latest_logs.employee_id
+       WHERE TRIM(COALESCE(latest_logs.area_name, '')) = $1
+       ORDER BY LOWER(e.name) ASC`,
+      [kioskArea]
     );
 
     return res.json({
       ok: true,
+      kiosk_area: kioskArea,
       rows: rows.map((r) => ({
         employee_code: String(r.employee_code || ''),
         employee_name: String(r.employee_name || ''),
