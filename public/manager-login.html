@@ -21,7 +21,7 @@
         background: linear-gradient(160deg, #f8fbff 0%, #eaf2ff 100%);
         color: #0f172a;
         position: relative;
-        overflow-x: hidden;
+        overflow: hidden auto;
       }
       .bg-shapes {
         position: fixed;
@@ -31,97 +31,122 @@
       }
       .shape-top {
         position: absolute;
-        width: min(60vw, 860px);
-        height: min(52vw, 560px);
-        top: -210px;
-        left: -250px;
-        border-radius: 50%;
-        background: radial-gradient(circle at 65% 60%, #1e90ff 0%, #0b3a66 48%, #0f2a44 100%);
-        opacity: 0.2;
+        width: min(62vw, 920px);
+        height: min(44vw, 560px);
+        top: -190px;
+        left: -220px;
+        border-radius: 0 0 70% 20%;
+        background: linear-gradient(135deg, #0f2a44 6%, #0b3a66 58%, #1e90ff 100%);
+        opacity: 0.9;
+        transform: rotate(-8deg);
+      }
+      .shape-top::after {
+        content: "";
+        position: absolute;
+        width: 66%;
+        height: 74%;
+        right: -14%;
+        top: -32%;
+        border-radius: 0 0 70% 24%;
+        background: rgba(255, 255, 255, 0.85);
+        transform: rotate(9deg);
       }
       .shape-bottom {
         position: absolute;
-        width: min(75vw, 980px);
-        height: min(50vw, 520px);
-        bottom: -250px;
-        left: -260px;
-        border-radius: 52% 48% 0 0;
-        background: linear-gradient(135deg, #0f2a44 0%, #0b3a66 58%, #1e90ff 100%);
-        opacity: 0.22;
+        width: min(86vw, 1200px);
+        height: min(33vw, 380px);
+        bottom: -210px;
+        left: -160px;
+        border-radius: 48% 52% 0 0;
+        background: linear-gradient(130deg, #0f2a44 5%, #0c3561 62%, #1e90ff 100%);
+        opacity: 0.95;
       }
       .tank-ghost {
         position: absolute;
-        top: 70px;
-        right: 6%;
-        width: min(46vw, 520px);
-        aspect-ratio: 1 / 1;
-        opacity: 0.16;
-        filter: blur(1px);
+        top: 26px;
+        right: 3%;
+        width: min(48vw, 620px);
+        height: min(58vh, 640px);
+        opacity: 0.18;
+        filter: blur(0.6px);
         background:
-          radial-gradient(circle at 62% 30%, rgba(15, 42, 68, 0.22), rgba(15, 42, 68, 0) 60%),
-          linear-gradient(180deg, rgba(15, 42, 68, 0.24), rgba(15, 42, 68, 0.08));
-        border-radius: 44% 56% 50% 50%;
+          radial-gradient(circle at 67% 30%, rgba(15, 42, 68, 0.2), rgba(15, 42, 68, 0.02) 56%, transparent 68%),
+          linear-gradient(180deg, rgba(15, 42, 68, 0.2), rgba(15, 42, 68, 0.04));
+        border-radius: 42% 42% 50% 50%;
       }
       .tank-ghost::before,
       .tank-ghost::after {
         content: "";
         position: absolute;
-        border: 2px solid rgba(15, 42, 68, 0.2);
+        border: 2px solid rgba(15, 42, 68, 0.22);
         border-radius: 50%;
       }
       .tank-ghost::before {
-        width: 64%;
-        height: 64%;
-        top: 18%;
-        left: 18%;
+        width: 76%;
+        height: 76%;
+        top: 10%;
+        left: 12%;
       }
       .tank-ghost::after {
-        width: 36%;
-        height: 36%;
-        top: 31%;
-        left: 31%;
+        width: 50%;
+        height: 50%;
+        top: 24%;
+        left: 25%;
+      }
+      .tank-rails {
+        position: absolute;
+        width: 70%;
+        height: 2px;
+        left: 16%;
+        top: 10%;
+        background: rgba(15, 42, 68, 0.16);
+        box-shadow:
+          0 16px 0 rgba(15, 42, 68, 0.09),
+          0 220px 0 rgba(15, 42, 68, 0.09);
       }
       .page {
         display: grid;
         place-items: center;
         min-height: 100vh;
-        padding: 24px 16px;
+        padding: 26px 14px 110px;
         position: relative;
         z-index: 1;
       }
       .card {
-        width: min(500px, calc(100% - 32px));
+        width: min(520px, calc(100% - 12px));
         background: rgba(255, 255, 255, 0.94);
         border: 1px solid rgba(15, 42, 68, 0.08);
         border-radius: 28px;
         box-shadow: 0 30px 80px rgba(15, 42, 68, 0.18);
-        padding: 36px;
+        padding: 38px 38px 32px;
       }
       .brand {
         text-align: center;
-        margin-bottom: 22px;
+        margin-bottom: 20px;
       }
       .brand img {
-        width: 92px;
-        height: 92px;
-        border-radius: 20px;
+        width: 104px;
+        height: 104px;
+        border-radius: 22px;
         box-shadow: 0 14px 34px rgba(15, 42, 68, 0.22);
       }
       h1 {
-        margin: 14px 0 0;
-        font-size: clamp(1.8rem, 2.8vw, 2.3rem);
+        margin: 12px 0 0;
+        font-size: clamp(2rem, 3vw, 2.75rem);
         letter-spacing: -0.02em;
         color: #0f172a;
+        font-weight: 800;
       }
       p.lead {
-        margin: 8px 0 12px;
+        margin: 8px 0 10px;
         color: #4f46e5;
         font-weight: 600;
+        font-size: 1.1rem;
       }
       .divider {
         position: relative;
-        margin: 8px auto 20px;
-        width: min(290px, 100%);
+        margin: 8px auto 18px;
+        width: min(340px, 100%);
         height: 1px;
         background: #d9e2f0;
       }
@@ -138,30 +163,31 @@
       }
       label {
         display: block;
-        margin: 12px 0 8px;
+        margin: 13px 0 8px;
         font-weight: 600;
         color: #1e293b;
+        font-size: 1.1rem;
       }
       .input-wrap {
         position: relative;
       }
       .field-icon {
         position: absolute;
-        left: 16px;
+        left: 18px;
         top: 50%;
-        width: 18px;
-        height: 18px;
+        width: 19px;
+        height: 19px;
         transform: translateY(-50%);
         stroke: #8fa1b8;
         pointer-events: none;
       }
       input {
         width: 100%;
-        height: 54px;
+        height: 56px;
         border: 1px solid #dbe3ef;
         border-radius: 14px;
-        padding: 0 14px 0 44px;
-        font-size: 15px;
+        padding: 0 16px 0 48px;
+        font-size: 1.08rem;
         outline: none;
         transition: border-color 0.2s ease, box-shadow 0.2s ease;
       }
@@ -174,7 +200,7 @@
         display: inline-flex;
         align-items: center;
         gap: 8px;
-        font-size: 13px;
+        font-size: 1rem;
         color: #334155;
         user-select: none;
       }
@@ -192,61 +218,80 @@
         border-radius: 14px;
         padding: 0 18px;
         font-weight: 700;
-        font-size: 15px;
+        font-size: 1.05rem;
         letter-spacing: 0.01em;
         color: #fff;
         background: linear-gradient(135deg, #4f46e5, #7c3aed);
         cursor: pointer;
         transition: filter 0.2s ease, transform 0.08s ease;
       }
-      button.submit::after { content: " \2192"; }
+      button.submit::before { content: "\21AA  "; font-size: 1.05rem; }
       button.submit:hover { filter: brightness(1.05); }
       button.submit:active { transform: translateY(1px); }
       .security {
         text-align: center;
-        margin-top: 10px;
-        font-size: 12px;
+        margin-top: 12px;
+        font-size: 0.98rem;
         color: #64748b;
       }
-      .hint { margin-top: 10px; min-height: 18px; color: #b91c1c; font-size: 13px; }
+      .hint { margin-top: 10px; min-height: 18px; color: #b91c1c; font-size: 0.95rem; }
       .install-links {
-        margin-top: 14px;
+        margin-top: 16px;
         text-align: center;
-        font-size: 12px;
+        font-size: 0.98rem;
       }
       .install-links a {
         color: #4f46e5;
         text-decoration: none;
         font-weight: 600;
       }
-      .install-links a::before { content: "\1F4F2  "; }
+      .install-links a::before { content: "\1F4D6  "; }
       .trust-row {
-        margin-top: 18px;
+        width: min(860px, calc(100vw - 22px));
+        position: absolute;
+        left: 50%;
+        bottom: 16px;
+        transform: translateX(-50%);
         display: grid;
         grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 10px;
+        gap: 0;
+        border-radius: 18px;
+        overflow: hidden;
+        box-shadow: 0 14px 34px rgba(5, 23, 48, 0.3);
       }
       .trust-item {
-        text-align: center;
-        border: 1px solid rgba(15, 42, 68, 0.08);
-        border-radius: 12px;
-        padding: 10px 8px;
-        background: rgba(255, 255, 255, 0.82);
+        text-align: left;
+        padding: 16px 14px;
+        background: linear-gradient(120deg, #0b2d53 0%, #0f3f73 100%);
+        color: #fff;
+        border-right: 1px solid rgba(255, 255, 255, 0.16);
       }
+      .trust-item:last-child { border-right: 0; }
       .trust-item strong {
-        display: block;
-        color: #0f2a44;
-        font-size: 12px;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        color: #fff;
+        font-size: 1rem;
+      }
+      .trust-item strong::before {
+        content: "";
+        width: 28px;
+        height: 28px;
+        border-radius: 9px;
+        background: linear-gradient(135deg, #4f46e5, #7c3aed);
+        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.24);
       }
       .trust-item span {
         display: block;
-        margin-top: 3px;
-        font-size: 11px;
-        color: #64748b;
+        margin-top: 4px;
+        font-size: 0.94rem;
+        color: rgba(235, 245, 255, 0.95);
       }
       @media (max-width: 720px) {
+        body { overflow-y: auto; }
         .card {
-          width: min(500px, calc(100% - 32px));
+          width: calc(100% - 10px);
           padding: 26px;
           border-radius: 24px;
         }
@@ -255,16 +300,36 @@
           height: 76px;
           border-radius: 16px;
         }
+        label { font-size: 1rem; }
+        button.submit { font-size: 1.05rem; }
+        .trust-row {
+          width: calc(100% - 16px);
+          bottom: 8px;
+        }
+        .trust-item {
+          padding: 11px 8px;
+          text-align: center;
+        }
         .trust-item span { display: none; }
+        .trust-item strong {
+          font-size: 0.9rem;
+          justify-content: center;
+        }
+        .trust-item strong::before {
+          width: 22px;
+          height: 22px;
+        }
       }
       @media (max-width: 520px) {
         .shape-top,
-        .shape-bottom { opacity: 0.14; }
+        .shape-bottom { opacity: 0.68; }
         .tank-ghost {
-          right: -20%;
-          top: 90px;
-          width: 74vw;
+          right: -26%;
+          top: 72px;
+          width: 84vw;
+          opacity: 0.14;
         }
+        .page { padding-bottom: 92px; }
       }
     </style>
   </head>
@@ -273,6 +338,7 @@
       <div class="shape-top"></div>
       <div class="shape-bottom"></div>
       <div class="tank-ghost"></div>
+      <div class="tank-rails"></div>
     </div>
     <main class="page">
       <div class="card">
