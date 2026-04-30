@@ -32,7 +32,7 @@
       "name": "Kiosk Scan",
       "short_name": "Kiosk",
       "description": "Open iPad kiosk scan flow",
-      "url": "/kiosk"
+      "url": "/kiosk-login"
     }
   ]
 }

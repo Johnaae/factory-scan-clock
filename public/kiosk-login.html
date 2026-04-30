@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Factory Scan Clock - Kiosk PIN Login</title>
+    <meta name="theme-color" content="#4f46e5" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Factory Scan Kiosk" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="icon" href="/icons/icon-192.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icons/icon-192.svg" />
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: Inter, "Segoe UI", Arial, sans-serif;
+        background: linear-gradient(180deg, #eef2ff 0%, #e2e8f0 100%);
+        display: grid;
+        place-items: center;
+        color: #0f172a;
+      }
+      .card {
+        width: min(420px, 92vw);
+        background: #fff;
+        border: 1px solid #dbeafe;
+        border-radius: 18px;
+        box-shadow: 0 18px 40px rgba(30, 41, 59, 0.15);
+        padding: 24px;
+      }
+      h1 { margin: 0; font-size: 28px; }
+      p.lead { margin: 6px 0 18px; color: #475569; }
+      label { display: block; margin: 10px 0 6px; font-weight: 600; }
+      input, select {
+        width: 100%;
+        border: 1px solid #cbd5e1;
+        border-radius: 10px;
+        padding: 11px 12px;
+        font-size: 15px;
+      }
+      .pw-toggle {
+        margin-top: 8px;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        color: #334155;
+        user-select: none;
+      }
+      .pw-toggle input {
+        width: auto;
+        margin: 0;
+      }
+      button.submit {
+        width: 100%;
+        margin-top: 16px;
+        border: 0;
+        border-radius: 10px;
+        padding: 11px 12px;
+        font-weight: 700;
+        color: #fff;
+        background: linear-gradient(135deg, #4f46e5, #7c3aed);
+        cursor: pointer;
+      }
+      .hint { margin-top: 10px; min-height: 18px; color: #b91c1c; font-size: 13px; }
+      .install-links { margin-top: 14px; text-align: center; font-size: 13px; }
+      .install-links a { color: #4338ca; text-decoration: none; font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Factory Scan Clock</h1>
+      <p class="lead">Kiosk PIN Login</p>
+
+      <form id="panelKiosk" autocomplete="off">
+        <label for="kioskArea">Area</label>
+        <select id="kioskArea" name="area" required>
+          <option value="">Select area...</option>
+          <option value="Area A">Area A</option>
+          <option value="Area B">Area B</option>
+          <option value="Area C">Area C</option>
+        </select>
+        <label for="kioskPin">PIN (4-6 digits)</label>
+        <input id="kioskPin" name="pin" type="password" inputmode="numeric" pattern="[0-9]{4,6}" minlength="4" maxlength="6" autocomplete="one-time-code" required />
+        <label class="pw-toggle" for="showKioskPin">
+          <input id="showKioskPin" type="checkbox" />
+          Show PIN
+        </label>
+        <button type="submit" class="submit">Login</button>
+        <div class="hint" id="hintKiosk" role="status" aria-live="polite"></div>
+      </form>
+      <div class="install-links">
+        <a href="/install">Install shortcuts guide</a>
+      </div>
+    </div>
+    <script>
+      const panelKiosk = document.getElementById('panelKiosk');
+      const hintKiosk = document.getElementById('hintKiosk');
+      const showKioskPin = document.getElementById('showKioskPin');
+      const kioskPinInput = document.getElementById('kioskPin');
+      showKioskPin.addEventListener('change', () => {
+        kioskPinInput.type = showKioskPin.checked ? 'text' : 'password';
+      });
+      panelKiosk.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        hintKiosk.textContent = '';
+        const area = document.getElementById('kioskArea').value.trim();
+        const pin = kioskPinInput.value.trim();
+        const res = await fetch('/api/auth/login-kiosk-pin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ area, pin }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) {
+          hintKiosk.textContent = (data && data.message) || 'Login failed. Check area and PIN.';
+          return;
+        }
+        window.location.href = '/kiosk';
+      });
+    </script>
+    <script src="/pwa.js"></script>
+  </body>
+  </html>

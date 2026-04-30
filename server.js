@@ -1866,8 +1866,7 @@ function authJson(res, status, message, error = 'auth') {
   return res.status(status).json({ ok: false, error, message });
 }
 
-function currentAuthFromSession(req) {
-  const u = req.session && req.session.user;
+function sessionUserToAuth(u) {
   if (!u) return null;
   return {
     id: Number(u.id),
@@ -1878,13 +1877,27 @@ function currentAuthFromSession(req) {
   };
 }
 
-function requireRoles(allowedRoles) {
+function currentManagerFromSession(req) {
+  const u = req.session && req.session.manager_user;
+  return sessionUserToAuth(u);
+}
+
+function currentKioskFromSession(req) {
+  const u = req.session && req.session.kiosk_user;
+  return sessionUserToAuth(u);
+}
+
+function currentAuthFromSession(req) {
+  return currentManagerFromSession(req) || currentKioskFromSession(req);
+}
+
+function requireRoles(allowedRoles, authResolver = currentAuthFromSession, redirectTo = '/login') {
   return (req, res, next) => {
-    const auth = currentAuthFromSession(req);
+    const auth = authResolver(req);
     req.auth = auth;
     if (!auth) {
       if (isApiPath(req.path)) return authJson(res, 401, 'Login required.', 'not_authenticated');
-      return res.redirect('/login');
+      return res.redirect(redirectTo);
     }
     if (!isRoleAllowed(auth.role, allowedRoles)) {
       if (isApiPath(req.path)) return authJson(res, 403, 'Forbidden.', 'forbidden');
@@ -1894,8 +1907,9 @@ function requireRoles(allowedRoles) {
   };
 }
 
-const requireManager = requireRoles([ROLE.MANAGER]);
-const requireScanRole = requireRoles([ROLE.MANAGER, ROLE.KIOSK]);
+const requireManager = requireRoles([ROLE.MANAGER], currentManagerFromSession, '/manager-login');
+const requireKiosk = requireRoles([ROLE.KIOSK], currentKioskFromSession, '/kiosk-login');
+const requireScanRole = requireRoles([ROLE.MANAGER, ROLE.KIOSK], currentAuthFromSession, '/manager-login');
 
 app.use(async (req, res, next) => {
   try {
@@ -1913,6 +1927,12 @@ app.get('/api/auth/me', (req, res) => {
   return res.json({ ok: true, user: auth });
 });
 
+app.get('/api/auth/me-kiosk', (req, res) => {
+  const auth = currentKioskFromSession(req);
+  if (!auth) return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Kiosk login required.' });
+  return res.json({ ok: true, user: auth });
+});
+
 app.post('/api/auth/login', async (req, res) => {
   const username = String(req.body && req.body.username ? req.body.username : '').trim().toLowerCase();
   const password = String(req.body && req.body.password ? req.body.password : '');
@@ -1926,7 +1946,7 @@ app.post('/api/auth/login', async (req, res) => {
   if (!verifyPassword(password, user.password_hash)) {
     return res.status(401).json({ ok: false, error: 'invalid_credentials', message: 'Invalid username or password.' });
   }
-  req.session.user = {
+  req.session.manager_user = {
     id: user.id,
     username: user.username,
     role: user.role,
@@ -1968,7 +1988,7 @@ app.post('/api/auth/login-kiosk-pin', async (req, res) => {
     return res.status(401).json({ ok: false, error: 'invalid_credentials', message: 'Incorrect PIN.' });
   }
   pinRateLimitReset(ip);
-  req.session.user = {
+  req.session.kiosk_user = {
     id: user.id,
     username: user.username,
     role: user.role,
@@ -1978,21 +1998,49 @@ app.post('/api/auth/login-kiosk-pin', async (req, res) => {
   return res.json({
     ok: true,
     role: ROLE.KIOSK,
-    redirect: '/scan',
+    redirect: '/kiosk',
   });
 });
 
 app.post('/api/auth/logout', (req, res) => {
-  req.session.destroy(() => {
-    res.clearCookie('factory_scan_sid');
-    res.json({ ok: true });
-  });
+  if (req.session) delete req.session.manager_user;
+  if (req.session && !req.session.kiosk_user) {
+    req.session.save(() => res.json({ ok: true }));
+    return;
+  }
+  if (req.session) {
+    req.session.save(() => res.json({ ok: true }));
+    return;
+  }
+  res.json({ ok: true });
+});
+
+app.post('/api/auth/kiosk-logout', (req, res) => {
+  if (req.session) delete req.session.kiosk_user;
+  if (req.session && !req.session.manager_user) {
+    req.session.save(() => res.json({ ok: true }));
+    return;
+  }
+  if (req.session) {
+    req.session.save(() => res.json({ ok: true }));
+    return;
+  }
+  res.json({ ok: true });
 });
 
 app.use((req, res, next) => {
   const p = String(req.path || '');
-  if (p === '/login' || p === '/manager-login' || p === '/install' || p === '/install.html' || p.startsWith('/api/auth/')) return next();
-  if (p === '/kiosk' || p === '/ipad-scan') return next();
+  if (
+    p === '/login' ||
+    p === '/manager-login' ||
+    p === '/kiosk-login' ||
+    p === '/install' ||
+    p === '/install.html' ||
+    p.startsWith('/api/auth/')
+  ) {
+    return next();
+  }
+  if (p === '/kiosk' || p === '/ipad-scan') return requireKiosk(req, res, next);
   if (
     p === '/scan' ||
     p === '/scan/' ||
@@ -2009,7 +2057,10 @@ app.use((req, res, next) => {
   if (p === '/manager-dashboard' || p === '/manager' || p === '/manager/tank-print' || p === '/dashboard' || p === '/') {
     return requireManager(req, res, next);
   }
-  if (p.startsWith('/api/kiosk/') || p.startsWith('/api/scan')) {
+  if (p.startsWith('/api/kiosk/')) {
+    return requireKiosk(req, res, next);
+  }
+  if (p.startsWith('/api/scan')) {
     return requireScanRole(req, res, next);
   }
   if (
@@ -3345,9 +3396,7 @@ app.get('/kiosk', (_req, res) => {
 });
 
 app.get('/ipad-scan', (_req, res) => {
-  scanKioskCacheHeaders(res);
-  res.type('html');
-  res.sendFile(path.join(PUBLIC_DIR, 'scan.html'));
+  res.redirect(302, '/kiosk-login');
 });
 
 app.get('/scan.css', (_req, res) => {
@@ -3372,6 +3421,10 @@ app.get('/login', (_req, res) => {
 
 app.get('/manager-login', (_req, res) => {
   res.redirect(302, '/login?mode=manager');
+});
+
+app.get('/kiosk-login', (_req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'kiosk-login.html'));
 });
 
 app.get('/install', (_req, res) => {
