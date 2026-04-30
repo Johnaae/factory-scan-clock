@@ -17,60 +17,312 @@
       body {
         margin: 0;
         min-height: 100vh;
-        font-family: Inter, "Segoe UI", Arial, sans-serif;
-        background: linear-gradient(180deg, #eef2ff 0%, #e2e8f0 100%);
+        font-family: Inter, "Segoe UI", "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+        background:
+          radial-gradient(1200px 700px at 8% 0%, rgba(124, 58, 237, 0.14), transparent 55%),
+          radial-gradient(1000px 680px at 92% 100%, rgba(106, 92, 255, 0.12), transparent 60%),
+          linear-gradient(165deg, #f8fafc 0%, #eef2ff 55%, #eaf1ff 100%);
         display: grid;
         place-items: center;
-        color: #0f172a;
+        color: #111827;
+        padding: 20px;
       }
       .card {
-        width: min(420px, 92vw);
-        background: #fff;
-        border: 1px solid #dbeafe;
-        border-radius: 18px;
-        box-shadow: 0 18px 40px rgba(30, 41, 59, 0.15);
-        padding: 24px;
+        width: min(460px, 100%);
+        background: rgba(255, 255, 255, 0.92);
+        border: 1px solid #e5e7eb;
+        border-radius: 20px;
+        box-shadow: 0 26px 50px rgba(15, 23, 42, 0.12);
+        backdrop-filter: blur(8px);
+        padding: 30px;
       }
-      h1 { margin: 0; font-size: 28px; }
-      p.lead { margin: 6px 0 18px; color: #475569; }
-      .actions {
-        display: grid;
-        gap: 10px;
-      }
-      .link-btn {
-        display: block;
-        width: 100%;
+      .brand {
         text-align: center;
-        text-decoration: none;
+        margin-bottom: 24px;
+      }
+      .logo-chip {
+        width: 54px;
+        height: 54px;
+        margin: 0 auto 12px;
+        border-radius: 16px;
+        display: grid;
+        place-items: center;
+        background: linear-gradient(135deg, #6a5cff, #7c3aed);
+        box-shadow: 0 10px 20px rgba(106, 92, 255, 0.28);
+      }
+      .logo-chip svg {
+        width: 28px;
+        height: 28px;
+        stroke: #fff;
+      }
+      h1 {
+        margin: 0;
+        font-size: clamp(1.7rem, 2.8vw, 2.05rem);
+        letter-spacing: -0.02em;
+        color: #0f172a;
+      }
+      .lead {
+        margin: 8px 0 0;
+        color: #6b7280;
+        font-size: 0.95rem;
+      }
+      .field {
+        margin-bottom: 14px;
+      }
+      label {
+        display: block;
+        margin-bottom: 7px;
+        font-size: 0.9rem;
+        font-weight: 600;
+        color: #374151;
+      }
+      .input-wrap {
+        position: relative;
+      }
+      .field-icon {
+        position: absolute;
+        left: 14px;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 18px;
+        height: 18px;
+        stroke: #94a3b8;
+        pointer-events: none;
+      }
+      input,
+      select {
+        width: 100%;
+        height: 48px;
+        border: 1px solid #e5e7eb;
         border-radius: 10px;
-        padding: 11px 12px;
+        background: #fff;
+        color: #111827;
+        font-size: 0.95rem;
+        padding: 0 14px 0 42px;
+        outline: none;
+        transition: border-color 0.2s ease, box-shadow 0.2s ease;
+      }
+      select {
+        appearance: none;
+        background-image:
+          linear-gradient(45deg, transparent 50%, #9ca3af 50%),
+          linear-gradient(135deg, #9ca3af 50%, transparent 50%);
+        background-position:
+          calc(100% - 18px) 20px,
+          calc(100% - 13px) 20px;
+        background-size: 5px 5px, 5px 5px;
+        background-repeat: no-repeat;
+        padding-right: 34px;
+      }
+      input:focus,
+      select:focus {
+        border-color: #8b5cf6;
+        box-shadow: 0 0 0 4px rgba(139, 92, 246, 0.2);
+      }
+      .pw-toggle {
+        margin: 4px 0 16px;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        color: #4b5563;
+        font-size: 0.86rem;
+        user-select: none;
+      }
+      .pw-toggle input {
+        width: 16px;
+        height: 16px;
+        margin: 0;
+      }
+      .submit {
+        width: 100%;
+        height: 50px;
+        border: 0;
+        border-radius: 12px;
+        font-size: 0.96rem;
         font-weight: 700;
-      }
-      .link-btn.manager {
+        letter-spacing: 0.01em;
         color: #fff;
-        background: linear-gradient(135deg, #4f46e5, #7c3aed);
+        background: linear-gradient(135deg, #6a5cff, #7c3aed);
+        cursor: pointer;
+        transition: filter 0.2s ease, transform 0.08s ease;
       }
-      .link-btn.kiosk {
-        color: #4338ca;
-        border: 1px solid #cbd5e1;
-        background: #f8fafc;
+      .submit:hover { filter: brightness(1.05); }
+      .submit:active { transform: translateY(1px); }
+      .hint {
+        min-height: 20px;
+        margin-top: 10px;
+        color: #b91c1c;
+        font-size: 0.86rem;
       }
-      .install-links { margin-top: 14px; text-align: center; font-size: 13px; }
-      .install-links a { color: #4338ca; text-decoration: none; font-weight: 600; }
+      .bottom {
+        margin-top: 16px;
+        text-align: center;
+      }
+      .bottom a {
+        color: #5b4ef7;
+        text-decoration: none;
+        font-size: 0.84rem;
+        font-weight: 600;
+      }
+      .security-note {
+        margin-top: 8px;
+        font-size: 0.76rem;
+        color: #9ca3af;
+        letter-spacing: 0.02em;
+      }
+      .hidden {
+        display: none !important;
+      }
+      @media (max-width: 640px) {
+        .card {
+          width: min(440px, 100%);
+          padding: 24px;
+          border-radius: 18px;
+        }
+        body { padding: 14px; }
+      }
     </style>
   </head>
   <body>
     <div class="card">
-      <h1>Factory Scan Clock</h1>
-      <p class="lead">Choose your access mode.</p>
-      <div class="actions">
-        <a class="link-btn manager" href="/manager-login">Manager Login</a>
-        <a class="link-btn kiosk" href="/kiosk-login">Kiosk PIN Login</a>
+      <div class="brand">
+        <div class="logo-chip" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none">
+            <path d="M3 7.5h18M7.5 3v9M16.5 3v9M6 14.5h12M8.5 20.5h7" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+          </svg>
+        </div>
+        <h1>Factory Scan Clock</h1>
+        <p class="lead" id="modeSubtitle">Manager Login</p>
       </div>
-      <div class="install-links">
+
+      <form id="panelManager" autocomplete="off">
+        <div class="field">
+          <label for="username">Username</label>
+          <div class="input-wrap">
+            <svg class="field-icon" viewBox="0 0 24 24" fill="none">
+              <path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm7 8a7 7 0 1 0-14 0" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+            </svg>
+            <input id="username" name="username" type="text" required />
+          </div>
+        </div>
+        <div class="field">
+          <label for="password">Password</label>
+          <div class="input-wrap">
+            <svg class="field-icon" viewBox="0 0 24 24" fill="none">
+              <path d="M7 10V8a5 5 0 0 1 10 0v2m-9 0h8a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2Z" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+            </svg>
+            <input id="password" name="password" type="password" required />
+          </div>
+        </div>
+        <label class="pw-toggle" for="showPassword">
+          <input id="showPassword" type="checkbox" />
+          Show password
+        </label>
+        <button type="submit" class="submit">Login</button>
+        <div class="hint" id="hintManager" role="status" aria-live="polite"></div>
+      </form>
+
+      <form id="panelKiosk" class="hidden" autocomplete="off">
+        <div class="field">
+          <label for="kioskArea">Area</label>
+          <div class="input-wrap">
+            <svg class="field-icon" viewBox="0 0 24 24" fill="none">
+              <path d="M12 20.5s7-6.3 7-11.2A7 7 0 1 0 5 9.3c0 4.9 7 11.2 7 11.2Z" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+              <path d="M12 12a2.4 2.4 0 1 0 0-4.8 2.4 2.4 0 0 0 0 4.8Z" stroke-width="1.8"></path>
+            </svg>
+            <select id="kioskArea" name="area" required>
+              <option value="">Select area...</option>
+              <option value="Area A">Area A</option>
+              <option value="Area B">Area B</option>
+              <option value="Area C">Area C</option>
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <label for="kioskPin">PIN (4-6 digits)</label>
+          <div class="input-wrap">
+            <svg class="field-icon" viewBox="0 0 24 24" fill="none">
+              <path d="M7 10V8a5 5 0 0 1 10 0v2m-9 0h8a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2Z" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+            </svg>
+            <input id="kioskPin" name="pin" type="password" inputmode="numeric" pattern="[0-9]{4,6}" minlength="4" maxlength="6" autocomplete="one-time-code" required />
+          </div>
+        </div>
+        <label class="pw-toggle" for="showKioskPin">
+          <input id="showKioskPin" type="checkbox" />
+          Show PIN
+        </label>
+        <button type="submit" class="submit">Login</button>
+        <div class="hint" id="hintKiosk" role="status" aria-live="polite"></div>
+      </form>
+
+      <div class="bottom">
         <a href="/install">Install shortcuts guide</a>
+        <div class="security-note">Secure system</div>
       </div>
     </div>
+    <script>
+      const panelManager = document.getElementById('panelManager');
+      const panelKiosk = document.getElementById('panelKiosk');
+      const hintManager = document.getElementById('hintManager');
+      const hintKiosk = document.getElementById('hintKiosk');
+      const modeSubtitle = document.getElementById('modeSubtitle');
+
+      const search = new URLSearchParams(window.location.search);
+      const mode = (search.get('mode') || 'manager').toLowerCase();
+      const isKioskMode = mode === 'kiosk';
+
+      panelManager.classList.toggle('hidden', isKioskMode);
+      panelKiosk.classList.toggle('hidden', !isKioskMode);
+      modeSubtitle.textContent = isKioskMode ? 'Kiosk PIN Login' : 'Manager Login';
+
+      const showPassword = document.getElementById('showPassword');
+      const passwordInput = document.getElementById('password');
+      showPassword.addEventListener('change', () => {
+        passwordInput.type = showPassword.checked ? 'text' : 'password';
+      });
+
+      const showKioskPin = document.getElementById('showKioskPin');
+      const kioskPinInput = document.getElementById('kioskPin');
+      showKioskPin.addEventListener('change', () => {
+        kioskPinInput.type = showKioskPin.checked ? 'text' : 'password';
+      });
+
+      panelManager.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        hintManager.textContent = '';
+        const username = document.getElementById('username').value.trim();
+        const password = passwordInput.value;
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) {
+          hintManager.textContent = (data && data.message) || 'Login failed. Please check username and password.';
+          return;
+        }
+        window.location.href = data.redirect || '/manager-dashboard';
+      });
+
+      panelKiosk.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        hintKiosk.textContent = '';
+        const area = document.getElementById('kioskArea').value.trim();
+        const pin = kioskPinInput.value.trim();
+        const res = await fetch('/api/auth/login-kiosk-pin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ area, pin }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) {
+          hintKiosk.textContent = (data && data.message) || 'Login failed. Check area and PIN.';
+          return;
+        }
+        window.location.href = '/kiosk';
+      });
+    </script>
     <script src="/pwa.js"></script>
   </body>
 </html>
