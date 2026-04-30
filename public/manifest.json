@@ -1,0 +1,38 @@
+{
+  "name": "Factory Scan Clock",
+  "short_name": "Factory Scan",
+  "description": "Factory workforce scanning, manager dashboard, and kiosk clock flow.",
+  "start_url": "/login",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#eef2ff",
+  "theme_color": "#4f46e5",
+  "icons": [
+    {
+      "src": "/icons/icon-192.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/icon-512.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Manager",
+      "short_name": "Manager",
+      "description": "Open manager login/dashboard",
+      "url": "/manager-login"
+    },
+    {
+      "name": "Kiosk Scan",
+      "short_name": "Kiosk",
+      "description": "Open iPad kiosk scan flow",
+      "url": "/kiosk"
+    }
+  ]
+}

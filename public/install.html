@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Install Factory Scan Clock</title>
+    <meta name="theme-color" content="#4f46e5" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="icon" href="/icons/icon-192.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icons/icon-192.svg" />
+    <style>
+      body { margin: 0; font-family: Inter, "Segoe UI", Arial, sans-serif; background: #eef2ff; color: #0f172a; }
+      .wrap { max-width: 860px; margin: 0 auto; padding: 24px; }
+      .card { background: #fff; border: 1px solid #dbeafe; border-radius: 14px; padding: 18px; margin-bottom: 16px; }
+      h1, h2 { margin: 0 0 10px; }
+      p { margin: 8px 0; color: #334155; }
+      ol { margin: 8px 0 0 20px; color: #1e293b; }
+      li { margin: 8px 0; }
+      .links a { margin-right: 14px; font-weight: 600; color: #4338ca; text-decoration: none; }
+    </style>
+  </head>
+  <body>
+    <main class="wrap">
+      <h1>Install Factory Scan Clock</h1>
+      <p>Use these shortcuts so users can launch directly without typing the URL.</p>
+
+      <section class="card">
+        <h2>Install Manager App on Desktop (Chrome)</h2>
+        <ol>
+          <li>Open <strong>/manager-login</strong> in Chrome.</li>
+          <li>Click the install icon in the address bar (or menu > Cast, save, and share > Install page as app).</li>
+          <li>Name it <strong>Factory Scan Clock - Manager</strong> and click Install.</li>
+          <li>Pin the installed app to taskbar/start menu for one-click launch.</li>
+        </ol>
+      </section>
+
+      <section class="card">
+        <h2>Install Kiosk App on iPad (Safari)</h2>
+        <ol>
+          <li>Open <strong>/kiosk</strong> in Safari.</li>
+          <li>Tap Share, then tap <strong>Add to Home Screen</strong>.</li>
+          <li>Name it <strong>Factory Scan Kiosk</strong> and tap Add.</li>
+          <li>Launch from Home Screen; it opens in standalone mode with minimal browser UI.</li>
+        </ol>
+      </section>
+
+      <section class="card links">
+        <a href="/manager-login">Manager Launcher</a>
+        <a href="/kiosk">Kiosk Launcher</a>
+        <a href="/login">Back to Login</a>
+      </section>
+    </main>
+    <script src="/pwa.js"></script>
+  </body>
+  </html>

@@ -4,6 +4,13 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Factory Scan Clock Login</title>
+    <meta name="theme-color" content="#4f46e5" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Factory Scan" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="icon" href="/icons/icon-192.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icons/icon-192.svg" />
     <style>
       :root { color-scheme: light; }
       * { box-sizing: border-box; }
@@ -85,6 +92,8 @@
         cursor: pointer;
       }
       .hint { margin-top: 10px; min-height: 18px; color: #b91c1c; font-size: 13px; }
+      .install-links { margin-top: 14px; text-align: center; font-size: 13px; }
+      .install-links a { color: #4338ca; text-decoration: none; font-weight: 600; }
     </style>
   </head>
   <body>
@@ -129,6 +138,9 @@
         <button type="submit" class="submit">Login</button>
         <div class="hint" id="hintKiosk" role="status" aria-live="polite"></div>
       </form>
+      <div class="install-links">
+        <a href="/install">Install shortcuts guide</a>
+      </div>
     </div>
     <script>
       const tabManager = document.getElementById('tabManager');
@@ -149,6 +161,17 @@
       }
       tabManager.addEventListener('click', () => showTab('manager'));
       tabKiosk.addEventListener('click', () => showTab('kiosk'));
+      const mode = new URLSearchParams(window.location.search).get('mode');
+      const modeLc = String(mode || '').toLowerCase();
+      if (modeLc === 'kiosk') {
+        showTab('kiosk');
+        tabManager.style.display = 'none';
+      } else if (modeLc === 'manager') {
+        showTab('manager');
+        tabKiosk.style.display = 'none';
+      } else {
+        showTab('manager');
+      }
 
       const showPassword = document.getElementById('showPassword');
       const passwordInput = document.getElementById('password');
@@ -200,5 +223,6 @@
         window.location.href = data.redirect || '/scan';
       });
     </script>
+    <script src="/pwa.js"></script>
   </body>
 </html>

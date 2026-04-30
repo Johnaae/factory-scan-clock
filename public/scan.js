@@ -33,6 +33,9 @@ const debugActiveEl = document.getElementById('debugActiveEl');
 const logoutBtn = document.getElementById('logoutBtn');
 const kioskStationLabel = document.getElementById('kioskStationLabel');
 const managerQuickNav = document.getElementById('managerQuickNav');
+const routePath = String(window.location.pathname || '').toLowerCase();
+const routeMode = String(new URLSearchParams(window.location.search).get('mode') || '').toLowerCase();
+const kioskOnlyMode = routePath === '/kiosk' || routePath === '/ipad-scan' || routeMode === 'kiosk';
 
 const ACTIVITY_OPTIONS = [
   { code: 'RUN_MACHINE', label: 'Run Machine' },
@@ -481,17 +484,91 @@ async function refreshStatusList() {
 async function loadAuthUser() {
   const { res, data } = await apiJson('/api/auth/me');
   if (!res.ok || !data.ok || !data.user) {
-    window.location.href = '/login';
-    return;
+    state.authUser = null;
+    return false;
   }
   state.authUser = data.user;
   if (state.authUser.role === 'KIOSK' && state.authUser.area_name) {
     kioskStationLabel.textContent = `${state.authUser.area_name} Kiosk`;
     if (managerQuickNav) managerQuickNav.hidden = true;
+    if (logoutBtn) logoutBtn.hidden = kioskOnlyMode;
   } else if (state.authUser.role === 'MANAGER') {
     kioskStationLabel.textContent = 'Manager Scan Access';
     if (managerQuickNav) managerQuickNav.hidden = false;
+    if (logoutBtn) logoutBtn.hidden = false;
   }
+  return true;
+}
+
+function ensureKioskGate() {
+  let gate = document.getElementById('kioskPinGate');
+  if (gate) return gate;
+  gate = document.createElement('div');
+  gate.id = 'kioskPinGate';
+  gate.className = 'kiosk-pin-gate';
+  gate.innerHTML = `
+    <div class="kiosk-pin-card" role="dialog" aria-modal="true" aria-labelledby="kioskPinGateTitle">
+      <h2 id="kioskPinGateTitle">Kiosk PIN Login</h2>
+      <p>Enter area PIN to unlock this kiosk.</p>
+      <label for="kioskGateArea">Area</label>
+      <select id="kioskGateArea">
+        <option value="">Select area…</option>
+        <option value="Area A">Area A</option>
+        <option value="Area B">Area B</option>
+        <option value="Area C">Area C</option>
+      </select>
+      <label for="kioskGatePin">PIN (4–6 digits)</label>
+      <input id="kioskGatePin" type="password" inputmode="numeric" maxlength="6" autocomplete="one-time-code" />
+      <button id="kioskGateSubmit" type="button">Unlock Kiosk</button>
+      <div id="kioskGateHint" class="kiosk-pin-hint" role="status" aria-live="polite"></div>
+    </div>
+  `;
+  document.body.appendChild(gate);
+  return gate;
+}
+
+async function requireKioskPinLogin() {
+  const gate = ensureKioskGate();
+  gate.hidden = false;
+  const areaEl = document.getElementById('kioskGateArea');
+  const pinEl = document.getElementById('kioskGatePin');
+  const submitEl = document.getElementById('kioskGateSubmit');
+  const hintEl = document.getElementById('kioskGateHint');
+  if (!areaEl || !pinEl || !submitEl || !hintEl) return false;
+  return new Promise((resolve) => {
+    const attempt = async () => {
+      const area = String(areaEl.value || '').trim();
+      const pin = String(pinEl.value || '').trim();
+      if (!area || !/^\d{4,6}$/.test(pin)) {
+        hintEl.textContent = 'Select area and enter a valid 4–6 digit PIN.';
+        return;
+      }
+      submitEl.disabled = true;
+      hintEl.textContent = 'Signing in…';
+      const { res, data } = await apiJson('/api/auth/login-kiosk-pin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ area, pin }),
+      });
+      submitEl.disabled = false;
+      if (!res.ok || !data.ok) {
+        hintEl.textContent = (data && data.message) || 'PIN login failed.';
+        pinEl.value = '';
+        pinEl.focus();
+        return;
+      }
+      gate.hidden = true;
+      resolve(true);
+    };
+    submitEl.onclick = () => void attempt();
+    pinEl.onkeydown = (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        void attempt();
+      }
+    };
+    window.setTimeout(() => areaEl.focus(), 0);
+  });
 }
 
 async function saveCompletedScan(payload) {
@@ -852,9 +929,20 @@ refreshStatusBtn.addEventListener('click', () => {
   void refreshStatusList();
 });
 
-window.addEventListener('load', () => {
+window.addEventListener('load', async () => {
   resetWorkflow();
-  void loadAuthUser();
+  if (kioskOnlyMode) {
+    if (managerQuickNav) managerQuickNav.hidden = true;
+    if (logoutBtn) logoutBtn.hidden = true;
+  }
+  let hasAuth = await loadAuthUser();
+  if (!hasAuth && kioskOnlyMode) {
+    await requireKioskPinLogin();
+    hasAuth = await loadAuthUser();
+  } else if (!hasAuth) {
+    window.location.href = '/manager-login';
+    return;
+  }
   void refreshStatusList();
   if (scannerTrap) {
     scannerTrap.readOnly = true;

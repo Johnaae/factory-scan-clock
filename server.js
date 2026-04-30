@@ -1991,8 +1991,16 @@ app.post('/api/auth/logout', (req, res) => {
 
 app.use((req, res, next) => {
   const p = String(req.path || '');
-  if (p === '/login' || p.startsWith('/api/auth/')) return next();
-  if (p === '/scan' || p === '/scan/' || p === '/scan.html' || p === '/scan.js' || p === '/scan.css') {
+  if (p === '/login' || p === '/manager-login' || p === '/install' || p === '/install.html' || p.startsWith('/api/auth/')) return next();
+  if (p === '/kiosk' || p === '/ipad-scan') return next();
+  if (
+    p === '/scan' ||
+    p === '/scan/' ||
+    p === '/scan.html' ||
+    p === '/scan.js' ||
+    p === '/scan.css' ||
+    p === '/ipad-scan'
+  ) {
     return requireScanRole(req, res, next);
   }
   if (p === '/admin.html' || p === '/summary.html' || p === '/index.html') {
@@ -3330,6 +3338,18 @@ app.get('/scan/', (_req, res) => {
   res.redirect(301, '/scan');
 });
 
+app.get('/kiosk', (_req, res) => {
+  scanKioskCacheHeaders(res);
+  res.type('html');
+  res.sendFile(path.join(PUBLIC_DIR, 'scan.html'));
+});
+
+app.get('/ipad-scan', (_req, res) => {
+  scanKioskCacheHeaders(res);
+  res.type('html');
+  res.sendFile(path.join(PUBLIC_DIR, 'scan.html'));
+});
+
 app.get('/scan.css', (_req, res) => {
   scanKioskCacheHeaders(res);
   res.type('text/css');
@@ -3348,6 +3368,14 @@ app.get('/scan.html', (_req, res) => {
 
 app.get('/login', (_req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'login.html'));
+});
+
+app.get('/manager-login', (_req, res) => {
+  res.redirect(302, '/login?mode=manager');
+});
+
+app.get('/install', (_req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'install.html'));
 });
 
 app.get('/manager-dashboard', (_req, res) => {

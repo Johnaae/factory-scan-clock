@@ -390,3 +390,66 @@ button {
     grid-template-columns: 1fr;
   }
 }
+
+.kiosk-pin-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: grid;
+  place-items: center;
+  background: rgba(15, 23, 42, 0.66);
+  padding: 16px;
+}
+
+.kiosk-pin-card {
+  width: min(420px, 96vw);
+  background: #ffffff;
+  border: 1px solid #dbeafe;
+  border-radius: 16px;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.3);
+  padding: 18px;
+}
+
+.kiosk-pin-card h2 {
+  margin: 0 0 8px;
+}
+
+.kiosk-pin-card p {
+  margin: 0 0 12px;
+  color: #475569;
+}
+
+.kiosk-pin-card label {
+  display: block;
+  margin: 10px 0 6px;
+  font-weight: 700;
+}
+
+.kiosk-pin-card input,
+.kiosk-pin-card select {
+  width: 100%;
+  min-height: 44px;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 16px;
+}
+
+.kiosk-pin-card button {
+  width: 100%;
+  min-height: 46px;
+  margin-top: 14px;
+  border: 0;
+  border-radius: 10px;
+  background: #4f46e5;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.kiosk-pin-hint {
+  min-height: 18px;
+  margin-top: 10px;
+  color: #b91c1c;
+  font-size: 13px;
+}
