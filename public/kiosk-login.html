@@ -17,29 +17,172 @@
       body {
         margin: 0;
         min-height: 100vh;
-        font-family: Inter, "Segoe UI", Arial, sans-serif;
-        background: linear-gradient(180deg, #eef2ff 0%, #e2e8f0 100%);
+        font-family: Inter, "Segoe UI", "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+        background: linear-gradient(160deg, #f8fbff 0%, #eaf2ff 100%);
+        color: #0f172a;
+        position: relative;
+        overflow-x: hidden;
+      }
+      .bg-shapes {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        z-index: 0;
+      }
+      .shape-top {
+        position: absolute;
+        width: min(60vw, 860px);
+        height: min(52vw, 560px);
+        top: -210px;
+        left: -250px;
+        border-radius: 50%;
+        background: radial-gradient(circle at 65% 60%, #1e90ff 0%, #0b3a66 48%, #0f2a44 100%);
+        opacity: 0.2;
+      }
+      .shape-bottom {
+        position: absolute;
+        width: min(75vw, 980px);
+        height: min(50vw, 520px);
+        bottom: -250px;
+        left: -260px;
+        border-radius: 52% 48% 0 0;
+        background: linear-gradient(135deg, #0f2a44 0%, #0b3a66 58%, #1e90ff 100%);
+        opacity: 0.22;
+      }
+      .tank-ghost {
+        position: absolute;
+        top: 70px;
+        right: 6%;
+        width: min(46vw, 520px);
+        aspect-ratio: 1 / 1;
+        opacity: 0.16;
+        filter: blur(1px);
+        background:
+          radial-gradient(circle at 62% 30%, rgba(15, 42, 68, 0.22), rgba(15, 42, 68, 0) 60%),
+          linear-gradient(180deg, rgba(15, 42, 68, 0.24), rgba(15, 42, 68, 0.08));
+        border-radius: 44% 56% 50% 50%;
+      }
+      .tank-ghost::before,
+      .tank-ghost::after {
+        content: "";
+        position: absolute;
+        border: 2px solid rgba(15, 42, 68, 0.2);
+        border-radius: 50%;
+      }
+      .tank-ghost::before {
+        width: 64%;
+        height: 64%;
+        top: 18%;
+        left: 18%;
+      }
+      .tank-ghost::after {
+        width: 36%;
+        height: 36%;
+        top: 31%;
+        left: 31%;
+      }
+      .page {
         display: grid;
         place-items: center;
-        color: #0f172a;
+        min-height: 100vh;
+        padding: 24px 16px;
+        position: relative;
+        z-index: 1;
       }
       .card {
-        width: min(420px, 92vw);
-        background: #fff;
-        border: 1px solid #dbeafe;
-        border-radius: 18px;
-        box-shadow: 0 18px 40px rgba(30, 41, 59, 0.15);
-        padding: 24px;
+        width: min(500px, calc(100% - 32px));
+        background: rgba(255, 255, 255, 0.94);
+        border: 1px solid rgba(15, 42, 68, 0.08);
+        border-radius: 28px;
+        box-shadow: 0 30px 80px rgba(15, 42, 68, 0.18);
+        padding: 36px;
       }
-      h1 { margin: 0; font-size: 28px; }
-      p.lead { margin: 6px 0 18px; color: #475569; }
-      label { display: block; margin: 10px 0 6px; font-weight: 600; }
-      input, select {
+      .brand {
+        text-align: center;
+        margin-bottom: 22px;
+      }
+      .brand img {
+        width: 92px;
+        height: 92px;
+        border-radius: 20px;
+        box-shadow: 0 14px 34px rgba(15, 42, 68, 0.22);
+      }
+      h1 {
+        margin: 14px 0 0;
+        font-size: clamp(1.8rem, 2.8vw, 2.3rem);
+        letter-spacing: -0.02em;
+        color: #0f172a;
+      }
+      p.lead {
+        margin: 8px 0 12px;
+        color: #4f46e5;
+        font-weight: 600;
+      }
+      .divider {
+        position: relative;
+        margin: 8px auto 20px;
+        width: min(290px, 100%);
+        height: 1px;
+        background: #d9e2f0;
+      }
+      .divider::after {
+        content: "";
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: 9px;
+        height: 9px;
+        transform: translate(-50%, -50%);
+        border-radius: 50%;
+        background: #7c3aed;
+      }
+      label {
+        display: block;
+        margin: 12px 0 8px;
+        font-weight: 600;
+        color: #1e293b;
+      }
+      .input-wrap {
+        position: relative;
+      }
+      .field-icon {
+        position: absolute;
+        left: 16px;
+        top: 50%;
+        width: 18px;
+        height: 18px;
+        transform: translateY(-50%);
+        stroke: #8fa1b8;
+        pointer-events: none;
+      }
+      input,
+      select {
         width: 100%;
-        border: 1px solid #cbd5e1;
-        border-radius: 10px;
-        padding: 11px 12px;
+        height: 54px;
+        border: 1px solid #dbe3ef;
+        border-radius: 14px;
+        padding: 0 14px 0 44px;
         font-size: 15px;
+        outline: none;
+        transition: border-color 0.2s ease, box-shadow 0.2s ease;
+        background: #fff;
+      }
+      select {
+        appearance: none;
+        background-image:
+          linear-gradient(45deg, transparent 50%, #9ca3af 50%),
+          linear-gradient(135deg, #9ca3af 50%, transparent 50%);
+        background-position:
+          calc(100% - 19px) 24px,
+          calc(100% - 13px) 24px;
+        background-size: 6px 6px, 6px 6px;
+        background-repeat: no-repeat;
+        padding-right: 38px;
+      }
+      input:focus,
+      select:focus {
+        border-color: #7c3aed;
+        box-shadow: 0 0 0 4px rgba(124, 58, 237, 0.18);
       }
       .pw-toggle {
         margin-top: 8px;
@@ -51,51 +194,149 @@
         user-select: none;
       }
       .pw-toggle input {
-        width: auto;
+        width: 16px;
+        height: 16px;
         margin: 0;
+        padding: 0;
       }
       button.submit {
         width: 100%;
         margin-top: 16px;
+        height: 56px;
         border: 0;
-        border-radius: 10px;
-        padding: 11px 12px;
+        border-radius: 14px;
+        padding: 0 18px;
         font-weight: 700;
+        font-size: 15px;
+        letter-spacing: 0.01em;
         color: #fff;
         background: linear-gradient(135deg, #4f46e5, #7c3aed);
         cursor: pointer;
+        transition: filter 0.2s ease, transform 0.08s ease;
+      }
+      button.submit::after { content: " \2192"; }
+      button.submit:hover { filter: brightness(1.05); }
+      button.submit:active { transform: translateY(1px); }
+      .security {
+        text-align: center;
+        margin-top: 10px;
+        font-size: 12px;
+        color: #64748b;
       }
       .hint { margin-top: 10px; min-height: 18px; color: #b91c1c; font-size: 13px; }
-      .install-links { margin-top: 14px; text-align: center; font-size: 13px; }
-      .install-links a { color: #4338ca; text-decoration: none; font-weight: 600; }
+      .install-links {
+        margin-top: 14px;
+        text-align: center;
+        font-size: 12px;
+      }
+      .install-links a {
+        color: #4f46e5;
+        text-decoration: none;
+        font-weight: 600;
+      }
+      .install-links a::before { content: "\1F4F2  "; }
+      .trust-row {
+        margin-top: 18px;
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+      }
+      .trust-item {
+        text-align: center;
+        border: 1px solid rgba(15, 42, 68, 0.08);
+        border-radius: 12px;
+        padding: 10px 8px;
+        background: rgba(255, 255, 255, 0.82);
+      }
+      .trust-item strong {
+        display: block;
+        color: #0f2a44;
+        font-size: 12px;
+      }
+      .trust-item span {
+        display: block;
+        margin-top: 3px;
+        font-size: 11px;
+        color: #64748b;
+      }
+      @media (max-width: 720px) {
+        .card {
+          width: min(500px, calc(100% - 32px));
+          padding: 26px;
+          border-radius: 24px;
+        }
+        .brand img {
+          width: 76px;
+          height: 76px;
+          border-radius: 16px;
+        }
+        .trust-item span { display: none; }
+      }
+      @media (max-width: 520px) {
+        .shape-top,
+        .shape-bottom { opacity: 0.14; }
+        .tank-ghost {
+          right: -20%;
+          top: 90px;
+          width: 74vw;
+        }
+      }
     </style>
   </head>
   <body>
-    <div class="card">
-      <h1>Factory Scan Clock</h1>
-      <p class="lead">Kiosk PIN Login</p>
-
-      <form id="panelKiosk" autocomplete="off">
-        <label for="kioskArea">Area</label>
-        <select id="kioskArea" name="area" required>
-          <option value="">Select area...</option>
-          <option value="Area A">Area A</option>
-          <option value="Area B">Area B</option>
-          <option value="Area C">Area C</option>
-        </select>
-        <label for="kioskPin">PIN (4-6 digits)</label>
-        <input id="kioskPin" name="pin" type="password" inputmode="numeric" pattern="[0-9]{4,6}" minlength="4" maxlength="6" autocomplete="one-time-code" required />
-        <label class="pw-toggle" for="showKioskPin">
-          <input id="showKioskPin" type="checkbox" />
-          Show PIN
-        </label>
-        <button type="submit" class="submit">Login</button>
-        <div class="hint" id="hintKiosk" role="status" aria-live="polite"></div>
-      </form>
-      <div class="install-links">
-        <a href="/install">Install shortcuts guide</a>
-      </div>
+    <div class="bg-shapes" aria-hidden="true">
+      <div class="shape-top"></div>
+      <div class="shape-bottom"></div>
+      <div class="tank-ghost"></div>
     </div>
+    <main class="page">
+      <div class="card">
+        <div class="brand">
+          <img src="/icons/icon-192.png" alt="Factory Scan Clock icon" />
+          <h1>Factory Scan Clock</h1>
+          <p class="lead">Kiosk PIN Login</p>
+          <div class="divider"></div>
+        </div>
+        <form id="panelKiosk" autocomplete="off">
+          <label for="kioskArea">Area</label>
+          <div class="input-wrap">
+            <svg class="field-icon" viewBox="0 0 24 24" fill="none">
+              <path d="M12 20.5s7-6.3 7-11.2A7 7 0 1 0 5 9.3c0 4.9 7 11.2 7 11.2Z" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+              <path d="M12 12a2.4 2.4 0 1 0 0-4.8 2.4 2.4 0 0 0 0 4.8Z" stroke-width="1.8"></path>
+            </svg>
+            <select id="kioskArea" name="area" required>
+              <option value="">Select area...</option>
+              <option value="Area A">Area A</option>
+              <option value="Area B">Area B</option>
+              <option value="Area C">Area C</option>
+            </select>
+          </div>
+          <label for="kioskPin">PIN (4-6 digits)</label>
+          <div class="input-wrap">
+            <svg class="field-icon" viewBox="0 0 24 24" fill="none">
+              <path d="M7 10V8a5 5 0 0 1 10 0v2m-9 0h8a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2Z" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+            </svg>
+            <input id="kioskPin" name="pin" type="password" placeholder="Enter PIN" inputmode="numeric" pattern="[0-9]{4,6}" minlength="4" maxlength="6" autocomplete="one-time-code" required />
+          </div>
+          <label class="pw-toggle" for="showKioskPin">
+            <input id="showKioskPin" type="checkbox" />
+            Show PIN
+          </label>
+          <button type="submit" class="submit">Login</button>
+          <div class="security">Secure &amp; Confidential</div>
+          <div class="hint" id="hintKiosk" role="status" aria-live="polite"></div>
+        </form>
+        <div class="install-links">
+          <a href="/install">Install shortcuts guide</a>
+        </div>
+        <div class="trust-row" aria-label="trust highlights">
+          <div class="trust-item"><strong>Secure</strong><span>Your data is protected</span></div>
+          <div class="trust-item"><strong>Accurate</strong><span>Real-time tracking</span></div>
+          <div class="trust-item"><strong>Reliable</strong><span>Built for operations</span></div>
+          <div class="trust-item"><strong>Support</strong><span>We are here to help</span></div>
+        </div>
+      </div>
+    </main>
     <script>
       const panelKiosk = document.getElementById('panelKiosk');
       const hintKiosk = document.getElementById('hintKiosk');
@@ -124,4 +365,4 @@
     </script>
     <script src="/pwa.js"></script>
   </body>
-  </html>
+</html>
