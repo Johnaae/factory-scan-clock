@@ -509,6 +509,7 @@ async function saveCompletedScan(payload) {
   if (!res.ok || !data.ok) {
     throw new Error(data.message || 'Could not save scan');
   }
+  if (data.kiosk_message) showToast(data.kiosk_message);
   await refreshStatusList();
   return data;
 }
@@ -546,6 +547,7 @@ async function applyEmployeeAfterLookup(code, scanId) {
   state.selectedTank = null;
   state.step = data.next_status === 'IN' ? WORKFLOW_STATE.WAITING_ACTIVITY : WORKFLOW_STATE.WAITING_OUT_REASON;
   setDebug(`Employee ${data.employee.code} next ${data.next_status}`);
+  if (data.kiosk_notice) showToast(data.kiosk_notice);
   renderWorkflow();
 }
 

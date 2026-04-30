@@ -68,6 +68,9 @@ function titleCaseFlag(flag) {
     daily_overtime: 'Over 8h today',
     weekly_overtime: 'Over 40h week',
     overtime_warning: 'Overtime warning',
+    overtime_session: 'Overtime session',
+    auto_ended_at_8h: 'Auto ended at 8h',
+    active_shift: 'On shift',
   };
   if (map[flag]) return map[flag];
   return String(flag || '')
