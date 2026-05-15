@@ -1,6 +1,7 @@
 const tankNumber = document.getElementById('tankNumber');
 const tankDescription = document.getElementById('tankDescription');
 const tankSearch = document.getElementById('tankSearch');
+const btnClearTankSearch = document.getElementById('btnClearTankSearch');
 const tankStatusFilter = document.getElementById('tankStatusFilter');
 const btnAddTank = document.getElementById('btnAddTank');
 const tankHint = document.getElementById('tankHint');
@@ -135,14 +136,17 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;');
 }
 
+function clearTankSearch() {
+  if (tankSearch) tankSearch.value = '';
+  void loadTanks();
+}
+
 async function loadTanks() {
   const seq = ++tanksFetchSeq;
-  const q = String(tankSearch.value || '').trim();
+  const q = String(tankSearch && tankSearch.value ? tankSearch.value : '').trim();
   const statusFilter = getTankStatusFilter();
-  const query = new URLSearchParams({
-    search: q,
-    status: statusFilter,
-  });
+  const query = new URLSearchParams({ status: statusFilter });
+  if (q) query.set('search', q);
   const { res, data } = await apiJson(`/api/tanks?${query.toString()}`);
   if (seq !== tanksFetchSeq) return;
   if (!res.ok) {
@@ -156,7 +160,8 @@ async function loadTanks() {
   }
   tankBody.innerHTML = rows
     .map((t) => {
-      const isActive = String(t.status || '').toUpperCase() === 'ACTIVE';
+      const st = String(t.status || 'active').toLowerCase();
+      const isActive = st === 'active' || st === '';
       const statusBadge = isActive
         ? '<span class="badge badge-in">Active</span>'
         : '<span class="badge badge-muted">Archived</span>';
@@ -222,7 +227,7 @@ async function editTank(id) {
 
 async function setTankStatus(id, nextStatus) {
   if (tankActionInFlight) return;
-  const makeActive = nextStatus === 'ACTIVE';
+  const makeActive = nextStatus === 'active';
   const prompt = makeActive ? 'Restore this tank?' : 'Archive this tank?';
   if (!window.confirm(prompt)) return;
   tankActionInFlight = true;
@@ -230,14 +235,19 @@ async function setTankStatus(id, nextStatus) {
   const { res, data } = await apiJson(url, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ status: makeActive ? 'ACTIVE' : 'ARCHIVED' }),
+    body: JSON.stringify({ status: makeActive ? 'active' : 'archived' }),
   });
   tankActionInFlight = false;
   if (!res.ok) {
     tankHint.textContent = (data && data.message) || 'Tank update failed.';
     return;
   }
-  tankHint.textContent = makeActive ? 'Tank restored.' : 'Tank archived.';
+  const filter = getTankStatusFilter();
+  tankHint.textContent = makeActive
+    ? 'Tank restored.'
+    : filter === 'active'
+      ? 'Tank archived. Switch to Archived or All to see it.'
+      : 'Tank archived.';
   await loadTanks();
 }
 
@@ -446,7 +456,8 @@ async function refreshAll() {
 }
 
 btnAddTank.addEventListener('click', () => void createTank());
-tankSearch.addEventListener('input', () => void loadTanks());
+if (tankSearch) tankSearch.addEventListener('input', () => void loadTanks());
+if (btnClearTankSearch) btnClearTankSearch.addEventListener('click', () => clearTankSearch());
 if (tankStatusFilter) tankStatusFilter.addEventListener('change', () => void loadTanks());
 tankBody.addEventListener('click', (e) => {
   const btn = e.target.closest('button[data-act]');
@@ -461,8 +472,8 @@ tankBody.addEventListener('click', (e) => {
   if (!Number.isFinite(id)) return;
   if (act === 'edit') void editTank(id);
   if (act === 'report') void openTankReport(id);
-  if (act === 'archive') void setTankStatus(id, 'ARCHIVED');
-  if (act === 'restore') void setTankStatus(id, 'ACTIVE');
+  if (act === 'archive') void setTankStatus(id, 'archived');
+  if (act === 'restore') void setTankStatus(id, 'active');
 });
 
 if (btnCloseTankReport) btnCloseTankReport.addEventListener('click', closeTankReport);

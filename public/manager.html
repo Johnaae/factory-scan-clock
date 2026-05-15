@@ -56,7 +56,10 @@
             </div>
             <div class="field">
               <label for="tankSearch">Search Tanks</label>
-              <input id="tankSearch" type="search" placeholder="Search by tank number or description" autocomplete="off" />
+              <div class="toolbar" style="gap:8px;align-items:stretch">
+                <input id="tankSearch" type="search" placeholder="Search by tank number or description" autocomplete="off" />
+                <button id="btnClearTankSearch" class="btn btn-sm" type="button">Clear</button>
+              </div>
               <label for="tankStatusFilter" style="margin-top:10px">Tank Filter</label>
               <select id="tankStatusFilter">
                 <option value="active" selected>Active</option>

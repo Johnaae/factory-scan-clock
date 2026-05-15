@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS tanks (
   id BIGSERIAL PRIMARY KEY,
   tank_number TEXT UNIQUE NOT NULL,
   description TEXT,
-  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  status TEXT NOT NULL DEFAULT 'active',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -124,6 +124,7 @@ async function runPostgresSchema() {
     await client.query('BEGIN');
     await client.query(MIGRATION_SQL);
     await client.query('COMMIT');
+    await normalizeTankStatusesInDb();
     console.log('[migration] Postgres schema ready');
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
@@ -265,10 +266,35 @@ function normalizeTankNumber(raw) {
   return s.slice(0, 24);
 }
 
+/** Registry status: always lowercase `active` | `archived`. */
 function normalizeTankStatus(raw) {
-  const s = String(raw || 'ACTIVE').trim().toUpperCase();
-  if (s === 'ACTIVE' || s === 'ARCHIVED' || s === 'COMPLETED') return s;
-  return 'ACTIVE';
+  const s = String(raw == null || raw === '' ? 'active' : raw)
+    .trim()
+    .toLowerCase();
+  if (s === 'archived' || s === 'completed') return 'archived';
+  return 'active';
+}
+
+function mapTankRowForApi(row) {
+  if (!row) return row;
+  return {
+    ...row,
+    status: normalizeTankStatus(row.status),
+  };
+}
+
+/** One-time safe repair for legacy ACTIVE/ARCHIVED/null values in Neon. */
+async function normalizeTankStatusesInDb() {
+  await pool.query(`
+    UPDATE tanks SET status = 'active'
+    WHERE status IS NULL
+       OR TRIM(status) = ''
+       OR LOWER(TRIM(status)) IN ('active', 'ACTIVE');
+  `);
+  await pool.query(`
+    UPDATE tanks SET status = 'archived'
+    WHERE LOWER(TRIM(status)) IN ('archived', 'ARCHIVED', 'completed', 'COMPLETED');
+  `);
 }
 
 function formatLogNoteDisplay(row) {
@@ -933,7 +959,7 @@ async function ensureTankExists(rawTankNumber) {
   try {
     await pool.query(
       `INSERT INTO tanks (tank_number, description, status, created_at, updated_at)
-       VALUES ($1, '', 'ACTIVE', $2::timestamptz, $3::timestamptz)`,
+       VALUES ($1, '', 'active', $2::timestamptz, $3::timestamptz)`,
       [tankNumber, ts, ts]
     );
   } catch {
@@ -2703,7 +2729,7 @@ async function postScanRecord(req, res) {
   const kioskUser = auth && auth.role === ROLE.KIOSK ? auth.username || null : null;
   if (resolvedTank) {
     const tankRow = await ensureTankExists(resolvedTank);
-    if (status === 'IN' && tankRow && String(tankRow.status || '').toUpperCase() === 'ARCHIVED') {
+    if (status === 'IN' && tankRow && normalizeTankStatus(tankRow.status) === 'archived') {
       return res.status(403).json({
         ok: false,
         error: 'tank_archived',
@@ -3477,18 +3503,18 @@ app.patch('/api/employees/:id/toggle-active', async (req, res) => {
 });
 
 app.get('/api/tanks', async (req, res) => {
-  const search = String(req.query.search || '').trim().toUpperCase();
+  const search = String(req.query.search || '').trim();
   const statusFilter = String(req.query.status || 'active').trim().toLowerCase();
   const activeOnly = String(req.query.active_only || '').toLowerCase() === '1';
   let sql = `SELECT id, tank_number, description, status, created_at, updated_at FROM tanks WHERE 1=1`;
   const params = [];
   let n = 1;
   if (statusFilter === 'active') {
-    sql += ` AND status = 'ACTIVE'`;
+    sql += ` AND (LOWER(TRIM(COALESCE(status, ''))) = 'active' OR TRIM(COALESCE(status, '')) = '')`;
   } else if (statusFilter === 'archived') {
-    sql += ` AND status = 'ARCHIVED'`;
+    sql += ` AND LOWER(TRIM(status)) = 'archived'`;
   } else if (statusFilter === 'all') {
-    if (activeOnly) sql += ` AND status = 'ACTIVE'`;
+    if (activeOnly) sql += ` AND (LOWER(TRIM(COALESCE(status, ''))) = 'active' OR TRIM(COALESCE(status, '')) = '')`;
   } else {
     return res.status(400).json({
       ok: false,
@@ -3497,13 +3523,13 @@ app.get('/api/tanks', async (req, res) => {
     });
   }
   if (search) {
-    sql += ` AND (tank_number LIKE $${n} OR description LIKE $${n + 1})`;
-    params.push(`%${search}%`, `%${search}%`);
-    n += 2;
+    sql += ` AND (tank_number ILIKE $${n} OR COALESCE(description, '') ILIKE $${n})`;
+    params.push(`%${search}%`);
+    n += 1;
   }
-  sql += ` ORDER BY CASE WHEN status='ACTIVE' THEN 0 ELSE 1 END, updated_at DESC, tank_number ASC`;
-  const { rows: tanks } = await pool.query(sql, params);
-  res.json({ ok: true, tanks });
+  sql += ` ORDER BY CASE WHEN LOWER(TRIM(COALESCE(status, ''))) IN ('active', '') THEN 0 ELSE 1 END, updated_at DESC, tank_number ASC`;
+  const { rows } = await pool.query(sql, params);
+  res.json({ ok: true, tanks: rows.map(mapTankRowForApi) });
 });
 
 app.post('/api/tanks', async (req, res) => {
@@ -3515,7 +3541,7 @@ app.post('/api/tanks', async (req, res) => {
   const ts = nowIso();
   try {
     const ins = await pool.query(
-      `INSERT INTO tanks (tank_number, description, status, created_at, updated_at) VALUES ($1, $2, 'ACTIVE', $3::timestamptz, $4::timestamptz)
+      `INSERT INTO tanks (tank_number, description, status, created_at, updated_at) VALUES ($1, $2, 'active', $3::timestamptz, $4::timestamptz)
        RETURNING id`,
       [tank_number, description, ts, ts]
     );
@@ -3524,7 +3550,7 @@ app.post('/api/tanks', async (req, res) => {
       `SELECT id, tank_number, description, status, created_at, updated_at FROM tanks WHERE id = $1`,
       [tid]
     );
-    return res.status(201).json({ ok: true, tank: tankRes.rows[0] });
+    return res.status(201).json({ ok: true, tank: mapTankRowForApi(tankRes.rows[0]) });
   } catch (e) {
     if (e && e.code === '23505') {
       return res.status(409).json({ ok: false, error: 'duplicate_tank', message: 'Tank number already exists.' });
@@ -3561,7 +3587,7 @@ app.put('/api/tanks/:id', async (req, res) => {
     return res.status(500).json({ ok: false, error: 'server', message: 'Could not update tank.' });
   }
   const tankRes = await pool.query(`SELECT id, tank_number, description, status, created_at, updated_at FROM tanks WHERE id = $1`, [id]);
-  res.json({ ok: true, tank: tankRes.rows[0] });
+  res.json({ ok: true, tank: mapTankRowForApi(tankRes.rows[0]) });
 });
 
 app.patch('/api/tanks/:id/archive', async (req, res) => {
@@ -3569,11 +3595,11 @@ app.patch('/api/tanks/:id/archive', async (req, res) => {
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ ok: false, error: 'invalid_id' });
   const rowRes = await pool.query(`SELECT id FROM tanks WHERE id = $1`, [id]);
   if (!rowRes.rows.length) return res.status(404).json({ ok: false, error: 'not_found' });
-  const status = normalizeTankStatus(req.body && req.body.status ? req.body.status : 'ARCHIVED');
+  const status = normalizeTankStatus(req.body && req.body.status ? req.body.status : 'archived');
   const ts = nowIso();
   await pool.query(`UPDATE tanks SET status = $1, updated_at = $2::timestamptz WHERE id = $3`, [status, ts, id]);
   const tankRes = await pool.query(`SELECT id, tank_number, description, status, created_at, updated_at FROM tanks WHERE id = $1`, [id]);
-  res.json({ ok: true, tank: tankRes.rows[0] });
+  res.json({ ok: true, tank: mapTankRowForApi(tankRes.rows[0]) });
 });
 
 app.patch('/api/tanks/:id/restore', async (req, res) => {
@@ -3582,9 +3608,9 @@ app.patch('/api/tanks/:id/restore', async (req, res) => {
   const rowRes = await pool.query(`SELECT id FROM tanks WHERE id = $1`, [id]);
   if (!rowRes.rows.length) return res.status(404).json({ ok: false, error: 'not_found' });
   const ts = nowIso();
-  await pool.query(`UPDATE tanks SET status = 'ACTIVE', updated_at = $1::timestamptz WHERE id = $2`, [ts, id]);
+  await pool.query(`UPDATE tanks SET status = 'active', updated_at = $1::timestamptz WHERE id = $2`, [ts, id]);
   const tankRes = await pool.query(`SELECT id, tank_number, description, status, created_at, updated_at FROM tanks WHERE id = $1`, [id]);
-  res.json({ ok: true, tank: tankRes.rows[0] });
+  res.json({ ok: true, tank: mapTankRowForApi(tankRes.rows[0]) });
 });
 
 app.get('/api/tanks/:id/report', async (req, res) => {
@@ -3603,8 +3629,7 @@ app.get('/api/tanks/:id/report', async (req, res) => {
     employeesByCode.set(normalizeCode(e.code), e);
   }
   const report = computeTankLaborReport(tank.tank_number, logsAsc, employeesByCode, Date.now());
-  const registryStatus =
-    String(tank.status || '').toUpperCase() === 'ACTIVE' ? 'active' : 'archived';
+  const registryStatus = normalizeTankStatus(tank.status);
   res.json({
     ok: true,
     tank: {
