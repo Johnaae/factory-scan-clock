@@ -219,6 +219,20 @@
         </div>
       </section>
     </main>
+
+    <div id="tankReportBackdrop" class="modal-backdrop tank-report-backdrop" role="dialog" aria-modal="true" aria-hidden="true">
+      <div class="modal modal-wide" role="document">
+        <div class="modal-head">
+          <h3 class="modal-title" id="tankReportTitle">Tank Report</h3>
+          <div class="toolbar">
+            <button id="btnPrintTankReport" class="btn btn-sm" type="button">Print Report</button>
+            <button id="btnCloseTankReport" class="btn btn-sm" type="button">Close</button>
+          </div>
+        </div>
+        <div class="modal-body tank-report-body" id="tankReportBody"></div>
+      </div>
+    </div>
+
     <script src="/manager.js"></script>
     <script src="/pwa.js"></script>
   </body>

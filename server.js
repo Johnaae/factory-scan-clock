@@ -545,6 +545,190 @@ function computeTankSummaryFromLogs(logsAsc, closeMs) {
   return out.sort((a, b) => a.tank_number.localeCompare(b.tank_number, undefined, { sensitivity: 'base' }));
 }
 
+function msToHours2(ms) {
+  return Math.round((ms / 3600000) * 100) / 100;
+}
+
+/** Tank-scoped labor from scan logs (IN-row tank attribution; same pairing engine as payroll). */
+function computeTankLaborReport(tankNumber, logsAsc, employeesByCode, closeMs = Date.now()) {
+  const tankNorm = normalizeTankNumber(tankNumber);
+  if (!tankNorm) {
+    return {
+      summary: {
+        total_hours: 0,
+        regular_hours: 0,
+        overtime_hours: 0,
+        estimated_pay: 0,
+        workers_count: 0,
+        last_activity_at: null,
+      },
+      employeeBreakdown: [],
+      activityBreakdown: [],
+      sessions: [],
+    };
+  }
+
+  const groups = new Map();
+  for (const log of logsAsc) {
+    const code = log.employee_code;
+    if (!groups.has(code)) groups.set(code, []);
+    groups.get(code).push(log);
+  }
+
+  const employeeBreakdown = [];
+  const activityAgg = new Map();
+  const sessions = [];
+  let totalMs = 0;
+  let totalRegularMs = 0;
+  let totalOtMs = 0;
+  let totalPay = 0;
+  const workerCodes = new Set();
+  let lastActivityMs = null;
+
+  function logHasOutNear(logs, tMs, toleranceMs = 2500) {
+    return logs.some((r) => {
+      if (String(r.status || '').toUpperCase() !== 'OUT') return false;
+      const ot = new Date(r.scanned_at).getTime();
+      return !Number.isNaN(ot) && Math.abs(ot - tMs) <= toleranceMs;
+    });
+  }
+
+  for (const [code, logs] of groups) {
+    logs.sort((a, b) => {
+      const ta = new Date(a.scanned_at).getTime();
+      const tb = new Date(b.scanned_at).getTime();
+      if (ta !== tb) return ta - tb;
+      return (Number(a.id) || 0) - (Number(b.id) || 0);
+    });
+    const normCode = normalizeCode(code);
+    const emp = employeesByCode.get(normCode);
+    const rateRaw = emp ? Number(emp.hourly_rate) : 20;
+    const safeRate = Number.isFinite(rateRaw) && rateRaw >= 0 ? rateRaw : 20;
+    let empTotalMs = 0;
+    let empRegMs = 0;
+    let empOtMs = 0;
+    const activityMs = new Map();
+    const activitySessionCounts = new Map();
+
+    walkCumulativePairSegmentsNoWindow(
+      logs,
+      closeMs,
+      (tin, tout, inRow, isOt) => {
+        const segTank = normalizeTankNumber(inRow.tank_number || '');
+        if (segTank !== tankNorm) return;
+        const dur = tout - tin;
+        if (dur <= 0) return;
+        empTotalMs += dur;
+        if (isOt) empOtMs += dur;
+        else empRegMs += dur;
+        const label = workActivityLabelFromInRow(inRow);
+        activityMs.set(label, (activityMs.get(label) || 0) + dur);
+        activitySessionCounts.set(label, (activitySessionCounts.get(label) || 0) + 1);
+        const hadOut = logHasOutNear(logs, tout);
+        const autoEnded = !hadOut && !isOt;
+        sessions.push({
+          employee_code: code,
+          employee_name: inRow.employee_name || code,
+          activity: label,
+          area_name: inRow.area_name != null ? String(inRow.area_name) : null,
+          in_time: new Date(tin).toISOString(),
+          out_time: new Date(tout).toISOString(),
+          duration_hours: msToHours2(dur),
+          session_type: isOt ? 'OVERTIME' : 'REGULAR',
+          auto_ended: autoEnded,
+        });
+        workerCodes.add(code);
+        if (lastActivityMs === null || tout > lastActivityMs) lastActivityMs = tout;
+      },
+      true
+    );
+
+    if (empTotalMs <= 0) continue;
+    totalMs += empTotalMs;
+    totalRegularMs += empRegMs;
+    totalOtMs += empOtMs;
+    const regH = msToHours2(empRegMs);
+    const otH = msToHours2(empOtMs);
+    const totalH = msToHours2(empTotalMs);
+    const pay = roundMoney2(regH * safeRate + otH * safeRate * 1.5);
+    totalPay += pay;
+    const activities = [...activityMs.entries()]
+      .map(([name, ms]) => ({ name, hours: msToHours2(ms) }))
+      .sort((a, b) => b.hours - a.hours || a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+    employeeBreakdown.push({
+      employee_code: code,
+      employee_name: emp ? emp.name : logs[0].employee_name || code,
+      total_hours: totalH,
+      regular_hours: regH,
+      overtime_hours: otH,
+      estimated_pay: pay,
+      activities_performed: activities.map((a) => a.name),
+    });
+    for (const [name, ms] of activityMs) {
+      const prev = activityAgg.get(name) || { total_ms: 0, session_count: 0 };
+      prev.total_ms += ms;
+      prev.session_count += activitySessionCounts.get(name) || 0;
+      activityAgg.set(name, prev);
+    }
+  }
+
+  const activityBreakdown = [...activityAgg.entries()]
+    .map(([activity_name, v]) => ({
+      activity_name,
+      total_hours: msToHours2(v.total_ms),
+      session_count: v.session_count,
+    }))
+    .sort(
+      (a, b) =>
+        b.total_hours - a.total_hours ||
+        a.activity_name.localeCompare(b.activity_name, undefined, { sensitivity: 'base' })
+    );
+
+  employeeBreakdown.sort((a, b) =>
+    a.employee_name.localeCompare(b.employee_name, undefined, { sensitivity: 'base' })
+  );
+  sessions.sort((a, b) => {
+    const ta = new Date(a.in_time).getTime();
+    const tb = new Date(b.in_time).getTime();
+    return tb - ta;
+  });
+
+  return {
+    summary: {
+      total_hours: msToHours2(totalMs),
+      regular_hours: msToHours2(totalRegularMs),
+      overtime_hours: msToHours2(totalOtMs),
+      estimated_pay: roundMoney2(totalPay),
+      workers_count: workerCodes.size,
+      last_activity_at: lastActivityMs != null ? new Date(lastActivityMs).toISOString() : null,
+    },
+    employeeBreakdown,
+    activityBreakdown,
+    sessions,
+  };
+}
+
+async function fetchTankLaborLogs(tankNumber) {
+  const tankNorm = normalizeTankNumber(tankNumber);
+  if (!tankNorm) return [];
+  const codesRes = await pool.query(
+    `SELECT DISTINCT employee_code FROM scan_logs
+     WHERE UPPER(TRIM(COALESCE(tank_number, ''))) = $1`,
+    [tankNorm]
+  );
+  const codes = codesRes.rows.map((r) => r.employee_code).filter(Boolean);
+  if (!codes.length) return [];
+  const logRes = await pool.query(
+    `SELECT id, employee_id, employee_code, employee_name, status, scanned_at, note, note_category, note_value,
+            tank_number, station_name, area_name, kiosk_user
+     FROM scan_logs
+     WHERE employee_code = ANY($1::text[])
+     ORDER BY scanned_at ASC, id ASC`,
+    [codes]
+  );
+  return logRes.rows;
+}
+
 /**
  * @param {Array<Object>} logsAsc
  */
@@ -2517,7 +2701,16 @@ async function postScanRecord(req, res) {
   const stationName = auth && auth.role === ROLE.KIOSK ? auth.station_name || null : null;
   const areaName = auth && auth.role === ROLE.KIOSK ? auth.area_name || null : null;
   const kioskUser = auth && auth.role === ROLE.KIOSK ? auth.username || null : null;
-  if (resolvedTank) await ensureTankExists(resolvedTank);
+  if (resolvedTank) {
+    const tankRow = await ensureTankExists(resolvedTank);
+    if (status === 'IN' && tankRow && String(tankRow.status || '').toUpperCase() === 'ARCHIVED') {
+      return res.status(403).json({
+        ok: false,
+        error: 'tank_archived',
+        message: 'This tank is archived. Restore it in Tank Management before assigning work.',
+      });
+    }
+  }
   const scannedAt = nowIso();
 
   let kiosk_message = null;
@@ -3285,7 +3478,7 @@ app.patch('/api/employees/:id/toggle-active', async (req, res) => {
 
 app.get('/api/tanks', async (req, res) => {
   const search = String(req.query.search || '').trim().toUpperCase();
-  const statusFilter = String(req.query.status || '').trim().toLowerCase();
+  const statusFilter = String(req.query.status || 'active').trim().toLowerCase();
   const activeOnly = String(req.query.active_only || '').toLowerCase() === '1';
   let sql = `SELECT id, tank_number, description, status, created_at, updated_at FROM tanks WHERE 1=1`;
   const params = [];
@@ -3294,7 +3487,7 @@ app.get('/api/tanks', async (req, res) => {
     sql += ` AND status = 'ACTIVE'`;
   } else if (statusFilter === 'archived') {
     sql += ` AND status = 'ARCHIVED'`;
-  } else if (statusFilter === 'all' || statusFilter === '') {
+  } else if (statusFilter === 'all') {
     if (activeOnly) sql += ` AND status = 'ACTIVE'`;
   } else {
     return res.status(400).json({
@@ -3343,11 +3536,14 @@ app.post('/api/tanks', async (req, res) => {
 app.put('/api/tanks/:id', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ ok: false, error: 'invalid_id' });
-  const current = await pool.query(`SELECT id FROM tanks WHERE id = $1`, [id]);
+  const current = await pool.query(`SELECT id, status FROM tanks WHERE id = $1`, [id]);
   if (!current.rows.length) return res.status(404).json({ ok: false, error: 'not_found' });
   const tank_number = normalizeTankNumber(req.body && req.body.tank_number);
   const description = req.body && req.body.description != null ? String(req.body.description).trim().slice(0, 120) : '';
-  const status = normalizeTankStatus(req.body && req.body.status);
+  const status =
+    req.body && req.body.status != null && String(req.body.status).trim() !== ''
+      ? normalizeTankStatus(req.body.status)
+      : normalizeTankStatus(current.rows[0].status);
   if (!tank_number) return res.status(400).json({ ok: false, error: 'validation', message: 'tank_number is required.' });
   const ts = nowIso();
   try {
@@ -3378,6 +3574,51 @@ app.patch('/api/tanks/:id/archive', async (req, res) => {
   await pool.query(`UPDATE tanks SET status = $1, updated_at = $2::timestamptz WHERE id = $3`, [status, ts, id]);
   const tankRes = await pool.query(`SELECT id, tank_number, description, status, created_at, updated_at FROM tanks WHERE id = $1`, [id]);
   res.json({ ok: true, tank: tankRes.rows[0] });
+});
+
+app.patch('/api/tanks/:id/restore', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ ok: false, error: 'invalid_id' });
+  const rowRes = await pool.query(`SELECT id FROM tanks WHERE id = $1`, [id]);
+  if (!rowRes.rows.length) return res.status(404).json({ ok: false, error: 'not_found' });
+  const ts = nowIso();
+  await pool.query(`UPDATE tanks SET status = 'ACTIVE', updated_at = $1::timestamptz WHERE id = $2`, [ts, id]);
+  const tankRes = await pool.query(`SELECT id, tank_number, description, status, created_at, updated_at FROM tanks WHERE id = $1`, [id]);
+  res.json({ ok: true, tank: tankRes.rows[0] });
+});
+
+app.get('/api/tanks/:id/report', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ ok: false, error: 'invalid_id' });
+  const tankRes = await pool.query(
+    `SELECT id, tank_number, description, status, created_at, updated_at FROM tanks WHERE id = $1`,
+    [id]
+  );
+  if (!tankRes.rows.length) return res.status(404).json({ ok: false, error: 'not_found', message: 'Tank not found.' });
+  const tank = tankRes.rows[0];
+  const logsAsc = await fetchTankLaborLogs(tank.tank_number);
+  const emRes = await pool.query(`SELECT id, code, name, hourly_rate FROM employees`);
+  const employeesByCode = new Map();
+  for (const e of emRes.rows) {
+    employeesByCode.set(normalizeCode(e.code), e);
+  }
+  const report = computeTankLaborReport(tank.tank_number, logsAsc, employeesByCode, Date.now());
+  const registryStatus =
+    String(tank.status || '').toUpperCase() === 'ACTIVE' ? 'active' : 'archived';
+  res.json({
+    ok: true,
+    tank: {
+      id: tank.id,
+      tank_number: tank.tank_number,
+      description: tank.description,
+      status: registryStatus,
+      registry_status: tank.status,
+    },
+    summary: report.summary,
+    employeeBreakdown: report.employeeBreakdown,
+    activityBreakdown: report.activityBreakdown,
+    sessions: report.sessions,
+  });
 });
 
 async function managerCurrentWorkRows() {

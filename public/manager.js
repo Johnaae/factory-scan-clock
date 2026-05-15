@@ -30,8 +30,15 @@ const managerResetConfirmPassword = document.getElementById('managerResetConfirm
 const showManagerResetPassword = document.getElementById('showManagerResetPassword');
 const btnResetManagerPassword = document.getElementById('btnResetManagerPassword');
 const managerResetHint = document.getElementById('managerResetHint');
+const tankReportBackdrop = document.getElementById('tankReportBackdrop');
+const tankReportTitle = document.getElementById('tankReportTitle');
+const tankReportBody = document.getElementById('tankReportBody');
+const btnCloseTankReport = document.getElementById('btnCloseTankReport');
+const btnPrintTankReport = document.getElementById('btnPrintTankReport');
 let currentAuthUser = null;
 let currentWorkRowsCache = [];
+let tanksFetchSeq = 0;
+let tankActionInFlight = false;
 
 function setAlert(el, message, type) {
   if (!el) return;
@@ -59,6 +66,12 @@ function fmtMoney(v) {
   const n = Number(v);
   if (!Number.isFinite(n)) return '$0.00';
   return new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' }).format(n);
+}
+
+function fmtHours(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '0.00';
+  return n.toFixed(2);
 }
 
 function titleCaseFlag(flag) {
@@ -102,33 +115,70 @@ function refreshCurrentWorkElapsedCells() {
   });
 }
 
+function getTankStatusFilter() {
+  const raw = tankStatusFilter ? String(tankStatusFilter.value || '').toLowerCase() : 'active';
+  if (raw === 'archived' || raw === 'all') return raw;
+  return 'active';
+}
+
+function tankEmptyMessage(filter) {
+  if (filter === 'archived') return 'No archived tanks';
+  if (filter === 'all') return 'No tanks found';
+  return 'No active tanks';
+}
+
+function escapeHtml(s) {
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 async function loadTanks() {
+  const seq = ++tanksFetchSeq;
   const q = String(tankSearch.value || '').trim();
-  const statusFilter = (tankStatusFilter && String(tankStatusFilter.value || '').toLowerCase()) || 'active';
+  const statusFilter = getTankStatusFilter();
   const query = new URLSearchParams({
     search: q,
     status: statusFilter,
   });
   const { res, data } = await apiJson(`/api/tanks?${query.toString()}`);
-  if (!res.ok) return;
+  if (seq !== tanksFetchSeq) return;
+  if (!res.ok) {
+    if (tankHint) tankHint.textContent = (data && data.message) || 'Could not load tanks.';
+    return;
+  }
   const rows = data.tanks || [];
-  tankBody.innerHTML =
-    rows
-      .map(
-        (t) => `<tr>
-      <td><strong>${t.tank_number}</strong></td>
-      <td>${t.description || '-'}</td>
-      <td>${t.status === 'ACTIVE' ? '<span class="badge badge-in">Active</span>' : '<span class="badge badge-muted">Archived</span>'}</td>
+  if (!rows.length) {
+    tankBody.innerHTML = `<tr><td colspan="4" class="muted">${tankEmptyMessage(statusFilter)}</td></tr>`;
+    return;
+  }
+  tankBody.innerHTML = rows
+    .map((t) => {
+      const isActive = String(t.status || '').toUpperCase() === 'ACTIVE';
+      const statusBadge = isActive
+        ? '<span class="badge badge-in">Active</span>'
+        : '<span class="badge badge-muted">Archived</span>';
+      return `<tr>
+      <td><strong>${escapeHtml(t.tank_number)}</strong></td>
+      <td>${escapeHtml(t.description || '-')}</td>
+      <td>${statusBadge}</td>
       <td>
         <div class="toolbar" style="justify-content:flex-start">
+          <button class="btn btn-sm" data-act="report" data-id="${t.id}">View Report</button>
           <button class="btn btn-sm" data-act="edit" data-id="${t.id}">Edit</button>
-          <button class="btn btn-sm" data-act="print" data-tank="${t.tank_number}">Print Barcode</button>
-          <button class="btn btn-sm" data-act="archive" data-id="${t.id}">${t.status === 'ACTIVE' ? 'Archive' : 'Restore'}</button>
+          <button class="btn btn-sm" data-act="print" data-tank="${escapeHtml(t.tank_number)}">Print Barcode</button>
+          ${
+            isActive
+              ? `<button class="btn btn-sm" data-act="archive" data-id="${t.id}">Archive</button>`
+              : `<button class="btn btn-sm" data-act="restore" data-id="${t.id}">Restore</button>`
+          }
         </div>
       </td>
-    </tr>`
-      )
-      .join('') || '<tr><td colspan="4" class="muted">No tanks</td></tr>';
+    </tr>`;
+    })
+    .join('');
 }
 
 async function createTank() {
@@ -160,29 +210,151 @@ async function editTank(id) {
   const { res, data } = await apiJson(`/api/tanks/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ tank_number: n, description: d, status: 'ACTIVE' }),
+    body: JSON.stringify({ tank_number: n, description: d }),
   });
   if (!res.ok) {
     tankHint.textContent = (data && data.message) || 'Update failed.';
     return;
   }
+  tankHint.textContent = 'Tank updated.';
   await loadTanks();
 }
 
-async function archiveTank(id, makeActive) {
+async function setTankStatus(id, nextStatus) {
+  if (tankActionInFlight) return;
+  const makeActive = nextStatus === 'ACTIVE';
   const prompt = makeActive ? 'Restore this tank?' : 'Archive this tank?';
   if (!window.confirm(prompt)) return;
-  const { res, data } = await apiJson(`/api/tanks/${id}/archive`, {
+  tankActionInFlight = true;
+  const url = makeActive ? `/api/tanks/${id}/restore` : `/api/tanks/${id}/archive`;
+  const { res, data } = await apiJson(url, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ status: makeActive ? 'ACTIVE' : 'ARCHIVED' }),
   });
+  tankActionInFlight = false;
   if (!res.ok) {
     tankHint.textContent = (data && data.message) || 'Tank update failed.';
     return;
   }
   tankHint.textContent = makeActive ? 'Tank restored.' : 'Tank archived.';
   await loadTanks();
+}
+
+function closeTankReport() {
+  if (!tankReportBackdrop) return;
+  tankReportBackdrop.classList.remove('show');
+  tankReportBackdrop.setAttribute('aria-hidden', 'true');
+  if (tankReportBody) tankReportBody.innerHTML = '';
+}
+
+function renderTankReport(data) {
+  const tank = data.tank || {};
+  const summary = data.summary || {};
+  const employees = data.employeeBreakdown || [];
+  const activities = data.activityBreakdown || [];
+  const sessions = data.sessions || [];
+  const statusLabel = String(tank.status || '').toLowerCase() === 'active' ? 'Active' : 'Archived';
+
+  const summaryCards = `
+    <div class="tank-report-cards">
+      <article class="tank-report-card"><div class="tank-report-card-label">Total Hours</div><div class="tank-report-card-value">${fmtHours(summary.total_hours)}</div></article>
+      <article class="tank-report-card"><div class="tank-report-card-label">Regular</div><div class="tank-report-card-value">${fmtHours(summary.regular_hours)}</div></article>
+      <article class="tank-report-card"><div class="tank-report-card-label">Overtime</div><div class="tank-report-card-value">${fmtHours(summary.overtime_hours)}</div></article>
+      <article class="tank-report-card"><div class="tank-report-card-label">Est. Pay</div><div class="tank-report-card-value">${fmtMoney(summary.estimated_pay)}</div></article>
+    </div>
+    <p class="muted tank-report-meta">
+      Tank <strong>${escapeHtml(tank.tank_number)}</strong> · ${escapeHtml(tank.description || 'No description')}
+      · <span class="badge ${statusLabel === 'Active' ? 'badge-in' : 'badge-muted'}">${statusLabel}</span>
+      · ${summary.workers_count || 0} worker(s) · Last activity ${fmtIso(summary.last_activity_at)}
+    </p>`;
+
+  const employeeRows = employees.length
+    ? employees
+        .map(
+          (e) => `<tr>
+        <td>${escapeHtml(e.employee_name)}</td>
+        <td>${escapeHtml(e.employee_code)}</td>
+        <td>${fmtHours(e.total_hours)}</td>
+        <td>${fmtHours(e.regular_hours)}</td>
+        <td>${fmtHours(e.overtime_hours)}</td>
+        <td>${fmtMoney(e.estimated_pay)}</td>
+        <td>${escapeHtml((e.activities_performed || []).join(', ') || '-')}</td>
+      </tr>`
+        )
+        .join('')
+    : '<tr><td colspan="7" class="muted">No labor recorded for this tank.</td></tr>';
+
+  const activityRows = activities.length
+    ? activities
+        .map(
+          (a) => `<tr>
+        <td>${escapeHtml(a.activity_name)}</td>
+        <td>${fmtHours(a.total_hours)}</td>
+        <td>${a.session_count || 0}</td>
+      </tr>`
+        )
+        .join('')
+    : '<tr><td colspan="3" class="muted">No activities recorded.</td></tr>';
+
+  const sessionRows = sessions.length
+    ? sessions
+        .map(
+          (s) => `<tr>
+        <td>${escapeHtml(s.employee_name)} (${escapeHtml(s.employee_code)})</td>
+        <td>${escapeHtml(s.activity)}</td>
+        <td>${escapeHtml(s.area_name || '-')}</td>
+        <td>${fmtIso(s.in_time)}</td>
+        <td>${fmtIso(s.out_time)}</td>
+        <td>${fmtHours(s.duration_hours)}</td>
+        <td>${escapeHtml(s.session_type || '-')}</td>
+        <td>${s.auto_ended ? '<span class="badge badge-warn">Yes</span>' : '-'}</td>
+      </tr>`
+        )
+        .join('')
+    : '<tr><td colspan="8" class="muted">No scan sessions for this tank.</td></tr>';
+
+  return `
+    <div id="tankReportPrintArea" class="tank-report-print-area">
+      ${summaryCards}
+      <h4 class="tank-report-section-title">By Employee</h4>
+      <div class="table-wrap table-scroll">
+        <table class="tank-report-table">
+          <thead><tr><th>Employee</th><th>Code</th><th>Total hrs</th><th>Regular</th><th>OT</th><th>Est. pay</th><th>Activities</th></tr></thead>
+          <tbody>${employeeRows}</tbody>
+        </table>
+      </div>
+      <h4 class="tank-report-section-title">By Activity</h4>
+      <div class="table-wrap table-scroll">
+        <table class="tank-report-table">
+          <thead><tr><th>Activity</th><th>Total hrs</th><th>Sessions</th></tr></thead>
+          <tbody>${activityRows}</tbody>
+        </table>
+      </div>
+      <h4 class="tank-report-section-title">Session History</h4>
+      <div class="table-wrap table-scroll">
+        <table class="tank-report-table">
+          <thead><tr><th>Employee</th><th>Activity</th><th>Area</th><th>IN</th><th>OUT</th><th>Duration</th><th>Type</th><th>Auto-ended</th></tr></thead>
+          <tbody>${sessionRows}</tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+async function openTankReport(id) {
+  if (!tankReportBackdrop || !tankReportBody) return;
+  tankReportBody.innerHTML = '<p class="muted">Loading report…</p>';
+  tankReportBackdrop.classList.add('show');
+  tankReportBackdrop.setAttribute('aria-hidden', 'false');
+  const { res, data } = await apiJson(`/api/tanks/${id}/report`);
+  if (!res.ok) {
+    tankReportBody.innerHTML = `<p class="muted">${escapeHtml((data && data.message) || 'Could not load tank report.')}</p>`;
+    return;
+  }
+  if (tankReportTitle) {
+    tankReportTitle.textContent = `Tank Report · ${data.tank && data.tank.tank_number ? data.tank.tank_number : id}`;
+  }
+  tankReportBody.innerHTML = renderTankReport(data);
 }
 
 async function loadCurrentWork() {
@@ -265,8 +437,12 @@ async function loadOvertime() {
       .join('') || '<tr><td colspan="7" class="muted">No overtime data.</td></tr>';
 }
 
+async function refreshLivePanels() {
+  await Promise.all([loadCurrentWork(), loadTankSummary(), loadOvertime()]);
+}
+
 async function refreshAll() {
-  await Promise.all([loadTanks(), loadCurrentWork(), loadTankSummary(), loadOvertime()]);
+  await Promise.all([loadTanks(), refreshLivePanels()]);
 }
 
 btnAddTank.addEventListener('click', () => void createTank());
@@ -284,16 +460,34 @@ tankBody.addEventListener('click', (e) => {
   const id = Number(btn.getAttribute('data-id'));
   if (!Number.isFinite(id)) return;
   if (act === 'edit') void editTank(id);
-  if (act === 'archive') {
-    const makeActive = btn.textContent.trim() === 'Restore';
-    void archiveTank(id, makeActive);
-  }
+  if (act === 'report') void openTankReport(id);
+  if (act === 'archive') void setTankStatus(id, 'ARCHIVED');
+  if (act === 'restore') void setTankStatus(id, 'ACTIVE');
 });
+
+if (btnCloseTankReport) btnCloseTankReport.addEventListener('click', closeTankReport);
+if (btnPrintTankReport) {
+  btnPrintTankReport.addEventListener('click', () => {
+    const area = document.getElementById('tankReportPrintArea');
+    if (!area) {
+      window.print();
+      return;
+    }
+    document.body.classList.add('tank-report-printing');
+    window.print();
+    window.setTimeout(() => document.body.classList.remove('tank-report-printing'), 500);
+  });
+}
+if (tankReportBackdrop) {
+  tankReportBackdrop.addEventListener('click', (e) => {
+    if (e.target === tankReportBackdrop) closeTankReport();
+  });
+}
 
 window.addEventListener('load', () => {
   void refreshAll();
   void refreshAuthUi();
-  window.setInterval(() => void refreshAll(), 3500);
+  window.setInterval(() => void refreshLivePanels(), 3500);
   window.setInterval(() => refreshCurrentWorkElapsedCells(), 1000);
 });
 
