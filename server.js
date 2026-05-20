@@ -510,7 +510,7 @@ async function performKioskWorkAction(req, res) {
       return res.status(409).json({
         ok: false,
         error: 'not_working',
-        message: 'Scan activity first to clock in.',
+        message: 'Scan activity first.',
       });
     }
     const prevActivity = workActivityLabelFromInRow(activeIn);

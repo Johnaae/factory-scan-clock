@@ -91,14 +91,15 @@
           <div><span class="scan-debug-label">Active element</span> <code id="debugActiveEl">—</code></div>
         </div>
 
-        <div class="current-worker" id="currentWorkerCard" hidden>
+        <div class="employee-context-card" id="currentWorkerCard" hidden>
           <div class="current-worker-row">
-            <strong id="currentWorkerName">—</strong>
-            <button id="btnClearSelection" type="button" class="btn-secondary btn-sm">Clear Selection</button>
+            <strong id="currentWorkerName" class="employee-context-name">—</strong>
+            <button id="btnClearSelection" type="button" class="btn-secondary btn-sm">Clear</button>
           </div>
-          <span id="currentWorkerMode">—</span>
-          <span id="currentWorkerActivity" class="current-worker-detail">—</span>
-          <span id="currentWorkerTank" class="current-worker-detail">—</span>
+          <p id="currentWorkerMode" class="current-worker-status">—</p>
+          <p id="currentWorkerActivity" class="current-worker-detail">Activity: —</p>
+          <p id="currentWorkerTank" class="current-worker-detail">Tank: —</p>
+          <div id="allowedActions" class="allowed-actions" hidden></div>
         </div>
       </section>
 
@@ -144,7 +145,7 @@
       <p id="debugLine" class="debug-line" hidden>debug</p>
       <div id="scanToast" class="scan-toast" role="status" aria-live="polite" hidden></div>
     </main>
-    <script src="/scan.js?v=22"></script>
+    <script src="/scan.js?v=23"></script>
     <script src="/pwa.js"></script>
   </body>
 </html>

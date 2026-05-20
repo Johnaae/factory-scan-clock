@@ -206,18 +206,66 @@ button {
   padding: 6px 10px;
 }
 
-.current-worker {
-  margin-top: 12px;
-  padding: 10px 12px;
-  border: 1px solid #c7d2fe;
-  border-radius: 11px;
-  background: #eef2ff;
+.employee-context-card {
+  margin-top: 14px;
+  padding: 16px 18px;
+  border: 2px solid #c7d2fe;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #eef2ff 0%, #f8fafc 100%);
   display: grid;
-  gap: 3px;
+  gap: 8px;
 }
 
-.current-worker span {
-  color: #334155;
+.employee-context-name {
+  font-size: 1.25rem;
+  font-weight: 800;
+  color: #1e1b4b;
+}
+
+.current-worker-status {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 800;
+}
+
+.current-worker-status--in {
+  color: #15803d;
+}
+
+.current-worker-status--out {
+  color: #b45309;
+}
+
+.current-worker-detail {
+  margin: 0;
+  font-size: 0.95rem;
+  color: #475569;
+  font-weight: 600;
+}
+
+.allowed-actions {
+  margin-top: 8px;
+  padding-top: 10px;
+  border-top: 1px solid #c7d2fe;
+  display: grid;
+  gap: 6px;
+}
+
+.allowed-row {
+  font-size: 0.95rem;
+  font-weight: 700;
+  padding: 6px 10px;
+  border-radius: 8px;
+}
+
+.allowed-yes {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.allowed-no {
+  background: #f1f5f9;
+  color: #94a3b8;
 }
 
 .selection-panel h3,
