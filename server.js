@@ -2950,7 +2950,7 @@ async function handleKioskEmployeeLookup(req, res) {
       current_session_type = paired.pendingOvertimeSession ? 'OVERTIME' : 'REGULAR';
     }
     const current_activity =
-      activeIn && currentlyWorking ? workActivityLabelFromInRow(activeIn) : null;
+      activeIn && paired.currentlyWorking ? workActivityLabelFromInRow(activeIn) : null;
 
     console.log('[kiosk lookup] current_status:', current_status);
     console.log('[kiosk lookup] next_status:', next_status);

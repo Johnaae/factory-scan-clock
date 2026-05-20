@@ -176,8 +176,20 @@ function reasonLabel(code) {
   return REASON_LOOKUP.get(code) || String(code).replace(/_/g, ' ').slice(0, 20);
 }
 
+/** @param {object|null|undefined} data API employee lookup or ks snapshot */
+function isEmployeeCurrentlyWorking(data) {
+  if (!data) return ks.employeeStatus === 'IN';
+  if (data.currently_working === true || data.currentlyWorking === true) return true;
+  if (String(data.current_status || data.employeeStatus || '').toUpperCase() === 'IN') return true;
+  if (data.status === 'IN' || data.isWorking === true) return true;
+  return false;
+}
+
 function isEmployeeIn() {
-  return ks.employeeStatus === 'IN';
+  return isEmployeeCurrentlyWorking({
+    currently_working: ks.employeeStatus === 'IN',
+    current_status: ks.employeeStatus,
+  });
 }
 
 function getAllowed() {
@@ -516,7 +528,7 @@ async function onEmployeeScanned(code, scanId) {
   if (!data || scanId !== scanSequenceId) return;
 
   ks.employee = data.employee;
-  ks.employeeStatus = data.currently_working ? 'IN' : 'OUT';
+  ks.employeeStatus = isEmployeeCurrentlyWorking(data) ? 'IN' : 'OUT';
   ks.activity = data.current_activity || null;
   ks.tank = data.active_tank_number || null;
   ks.pendingActivity = null;
@@ -657,7 +669,11 @@ async function onReasonScanned(reason, scanId) {
     return;
   }
 
-  if (ks.step === STEP.EMPLOYEE_SELECTED_OUT || ks.step === STEP.IN_ACTIVITY_PENDING_TANK) {
+  if (ks.step === STEP.IN_ACTIVITY_PENDING_TANK) {
+    scheduleErrorReset('Finish clock-in: scan tank first.');
+    return;
+  }
+  if (ks.step === STEP.EMPLOYEE_SELECTED_OUT) {
     scheduleErrorReset('Employee already OUT. Scan activity to clock in.');
     return;
   }
@@ -775,13 +791,38 @@ async function handleBarcode(raw, meta) {
     }
   } catch (err) {
     if (myScanId !== scanSequenceId) return;
+    console.error('[kiosk scan]', err);
     if (err.errorCode === 'unknown_employee' || err.httpStatus === 404) {
       showEmployeeNotFound(code);
     } else {
-      scheduleErrorReset(err.message || 'Scan failed.');
+      scheduleErrorReset(err.message || 'Scan failed. Try again.');
     }
   } finally {
     ks.isBusy = false;
+    scanBuffer = '';
+    if (scannerTrap) scannerTrap.value = '';
+    if (manualBarcodeInput) manualBarcodeInput.value = '';
+    updateDebug({ processing: false });
+    focusScanner();
+  }
+}
+
+async function safeTankScan(tank) {
+  const myScanId = ++scanSequenceId;
+  if (errorResetTimer) window.clearTimeout(errorResetTimer);
+  errorResetTimer = null;
+  ks.isBusy = true;
+  try {
+    resetIdleTimer();
+    await onTankScanned(tank, myScanId);
+  } catch (err) {
+    if (myScanId !== scanSequenceId) return;
+    console.error('[kiosk tank]', err);
+    scheduleErrorReset(err.message || 'Tank scan failed. Try again.');
+  } finally {
+    ks.isBusy = false;
+    if (tankInput) tankInput.value = '';
+    if (scannerTrap) scannerTrap.value = '';
     updateDebug({ processing: false });
     focusScanner();
   }
@@ -831,14 +872,14 @@ if (tankInput) {
     e.preventDefault();
     const t = normalizeBarcode(tankInput.value);
     const cls = classifyBarcode(canonicalizeCode(t));
-    if (cls.type === 'TANK' && cls.tank) void onTankScanned(cls.tank, scanSequenceId);
+    if (cls.type === 'TANK' && cls.tank) void safeTankScan(cls.tank);
   });
 }
 if (tankConfirmBtn) {
   tankConfirmBtn.addEventListener('click', () => {
     const t = normalizeBarcode(tankInput && tankInput.value ? tankInput.value : '');
     const cls = classifyBarcode(canonicalizeCode(t));
-    if (cls.type === 'TANK' && cls.tank) void onTankScanned(cls.tank, scanSequenceId);
+    if (cls.type === 'TANK' && cls.tank) void safeTankScan(cls.tank);
   });
 }
 if (refreshStatusBtn) refreshStatusBtn.addEventListener('click', () => void refreshStatusList());
