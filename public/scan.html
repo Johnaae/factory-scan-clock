@@ -63,7 +63,7 @@
               id="manualBarcodeInput"
               name="barcode"
               type="text"
-              placeholder="EMP001 · RUN_MACHINE · TANK_1111"
+              placeholder="EMP001 · ACTIVITY:SANDING · TANK_1111 · REASON:LUNCH"
               autocomplete="off"
               autocapitalize="characters"
               spellcheck="false"
@@ -92,8 +92,13 @@
         </div>
 
         <div class="current-worker" id="currentWorkerCard" hidden>
-          <strong id="currentWorkerName">—</strong>
+          <div class="current-worker-row">
+            <strong id="currentWorkerName">—</strong>
+            <button id="btnClearSelection" type="button" class="btn-secondary btn-sm">Clear Selection</button>
+          </div>
           <span id="currentWorkerMode">—</span>
+          <span id="currentWorkerActivity" class="current-worker-detail">—</span>
+          <span id="currentWorkerTank" class="current-worker-detail">—</span>
         </div>
       </section>
 
@@ -139,7 +144,7 @@
       <p id="debugLine" class="debug-line" hidden>debug</p>
       <div id="scanToast" class="scan-toast" role="status" aria-live="polite" hidden></div>
     </main>
-    <script src="/scan.js?v=20"></script>
+    <script src="/scan.js?v=22"></script>
     <script src="/pwa.js"></script>
   </body>
 </html>

@@ -185,6 +185,27 @@ button {
   padding: 9px 13px;
 }
 
+.current-worker-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.current-worker-detail {
+  display: block;
+  font-size: 13px;
+  color: #475569;
+  font-weight: 600;
+  margin-top: 4px;
+}
+
+.btn-sm {
+  font-size: 12px;
+  padding: 6px 10px;
+}
+
 .current-worker {
   margin-top: 12px;
   padding: 10px 12px;

@@ -84,6 +84,23 @@
 
       <section class="card manager-card">
         <div class="card-header">
+          <div class="card-header-main">
+            <h2 class="card-title">Kiosk Barcodes</h2>
+            <p class="card-kicker">Print activity and reason sheets for the scan station.</p>
+          </div>
+        </div>
+        <div class="card-body">
+          <p class="muted" style="margin-top:0"><strong>Page 1 — Activities:</strong> Scan Employee → Activity → Tank</p>
+          <p class="muted"><strong>Page 2 — Reasons:</strong> Scan Employee → Reason to clock out</p>
+          <div class="toolbar" style="flex-wrap:wrap;margin-top:12px">
+            <a class="btn btn-primary btn-sm" href="/manager/command-print?type=activities" target="_blank" rel="noopener">Print Activities (Page 1)</a>
+            <a class="btn btn-primary btn-sm" href="/manager/command-print?type=reasons" target="_blank" rel="noopener">Print Reasons (Page 2)</a>
+          </div>
+        </div>
+      </section>
+
+      <section class="card manager-card">
+        <div class="card-header">
           <h2 class="card-title">Currently Working</h2>
           <div class="toolbar">
             <label for="areaFilter" class="muted">Area</label>

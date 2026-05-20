@@ -9,6 +9,9 @@ const workflowSub = document.getElementById('workflowSub');
 const currentWorkerCard = document.getElementById('currentWorkerCard');
 const currentWorkerName = document.getElementById('currentWorkerName');
 const currentWorkerMode = document.getElementById('currentWorkerMode');
+const currentWorkerActivity = document.getElementById('currentWorkerActivity');
+const currentWorkerTank = document.getElementById('currentWorkerTank');
+const btnClearSelection = document.getElementById('btnClearSelection');
 const selectionPanel = document.getElementById('selectionPanel');
 const selectionTitle = document.getElementById('selectionTitle');
 const selectionButtons = document.getElementById('selectionButtons');
@@ -39,6 +42,7 @@ const ACTIVITY_OPTIONS = [
   { code: 'ASSEMBLE', label: 'Assemble' },
   { code: 'QUALITY', label: 'Quality Check' },
   { code: 'SURFACE_SANDING', label: 'Surface Sanding' },
+  { code: 'PAINTING', label: 'Painting' },
   { code: 'CUTTING', label: 'Cutting' },
   { code: 'WELDING', label: 'Welding' },
   { code: 'MATERIAL_HANDLING', label: 'Material Handling' },
@@ -63,19 +67,18 @@ const KNOWN_ACTIVITY_CODES = new Set(ACTIVITY_OPTIONS.map((o) => o.code));
 const KNOWN_REASON_CODES = new Set(REASON_OPTIONS.map((o) => o.code));
 
 const WORKFLOW_STATE = {
-  WAITING_EMPLOYEE: 'WAITING_EMPLOYEE',
-  WAITING_ACTIVITY: 'WAITING_ACTIVITY',
-  WAITING_TANK: 'WAITING_TANK',
-  WAITING_OUT_REASON: 'WAITING_OUT_REASON',
+  IDLE: 'IDLE',
+  EMPLOYEE_SELECTED_OUT: 'EMPLOYEE_SELECTED_OUT',
+  EMPLOYEE_SELECTED_IN: 'EMPLOYEE_SELECTED_IN',
+  WAITING_FOR_TANK: 'WAITING_FOR_TANK',
 };
+
+const SELECTION_IDLE_MS = 60000;
 
 let scanBuffer = '';
 let lastKeyTime = 0;
 let scanTimer = null;
-
 const SCAN_TIMEOUT = 50;
-
-/** Monotonic id: new scan in `handleBarcode` supersedes in-flight async work. */
 let scanSequenceId = 0;
 
 let errorMessage = '';
@@ -85,15 +88,16 @@ let lastErrorCode = '';
 let lastSuccessCode = '';
 
 const state = {
-  step: WORKFLOW_STATE.WAITING_EMPLOYEE,
+  step: WORKFLOW_STATE.IDLE,
   currentEmployee: null,
-  nextStatus: null,
-  selectedActivity: null,
-  selectedReason: null,
-  selectedTank: null,
-  activeTankNumber: null,
+  currentlyWorking: false,
+  currentActivity: null,
+  currentTank: null,
+  pendingActivity: null,
+  pendingTank: null,
   statusRefreshTimer: null,
   focusTimer: null,
+  selectionIdleTimer: null,
   isBusy: false,
   lastAction: '',
   authUser: null,
@@ -114,44 +118,13 @@ function normalizeCode(raw) {
     .toUpperCase()
     .replace(/['"]/g, '')
     .replace(/\s+/g, '_')
-    .replace(/[^A-Z0-9_-]/g, '');
+    .replace(/[^A-Z0-9_:-]/g, '');
 }
 
-const WORK_ACTIVITY_CODES = [
-  'RUN_MACHINE',
-  'ASSEMBLE',
-  'QUALITY',
-  'QUALITY_CHECK',
-  'SURFACE_SANDING',
-  'SANDING',
-  'CUTTING',
-  'WELDING',
-  'MATERIAL_HANDLING',
-  'OTHER',
-];
-
-const OUT_REASON_CODES = [
-  'BREAK',
-  'LUNCH',
-  'BATHROOM',
-  'END_SHIFT',
-  'MACHINE_ISSUE',
-  'WAITING_MATERIAL',
-  'MAINTENANCE',
-  'SETUP_CHANGE',
-  'OTHER',
-];
-
 const CODE_ALIASES = new Map([
-  ['RUN_MACHINE', 'RUN_MACHINE'],
   ['QUALITY_CHECK', 'QUALITY'],
-  ['SURFACE_SANDING', 'SURFACE_SANDING'],
   ['SANDING', 'SURFACE_SANDING'],
-  ['MATERIAL_HANDLING', 'MATERIAL_HANDLING'],
-  ['END_SHIFT', 'END_SHIFT'],
-  ['MACHINE_ISSUE', 'MACHINE_ISSUE'],
-  ['WAITING_MATERIAL', 'WAITING_MATERIAL'],
-  ['SETUP_CHANGE', 'SETUP_CHANGE'],
+  ['ASSEMBLY', 'ASSEMBLE'],
 ]);
 
 function canonicalizeCode(raw) {
@@ -159,31 +132,94 @@ function canonicalizeCode(raw) {
   return CODE_ALIASES.get(normalized) || normalized;
 }
 
-function classifyCode(code) {
-  if (/^EMP\d{3}$/.test(code)) return 'EMPLOYEE';
-  if (/^TANK_[A-Z0-9-]+$/.test(code)) return 'TANK';
-  if (WORK_ACTIVITY_CODES.includes(code)) return 'WORK_ACTIVITY';
-  if (OUT_REASON_CODES.includes(code)) return 'OUT_REASON';
-  return 'UNKNOWN';
+function isCommandIn(code) {
+  const n = String(code || '').toUpperCase();
+  return n === 'CMD:IN' || n === 'CMD_IN' || n === 'COMMAND_IN';
+}
+
+function isCommandOut(code) {
+  const n = String(code || '').toUpperCase();
+  return n === 'CMD:OUT' || n === 'CMD_OUT' || n === 'COMMAND_OUT';
+}
+
+function parsePrefixedCode(code, prefix) {
+  const n = String(code || '').toUpperCase();
+  if (n.startsWith(`${prefix}:`)) return n.slice(prefix.length + 1);
+  if (n.startsWith(`${prefix}_`)) return n.slice(prefix.length + 1);
+  return null;
 }
 
 function classifyBarcode(normalizedCode) {
   const n = normalizedCode;
-  if (/^EMP\d{3}$/.test(n)) return { kind: 'EMPLOYEE', label: 'EMPLOYEE', value: n };
-  if (/^TANK_[A-Z0-9-]+$/.test(n)) return { kind: 'TANK_BARCODE', label: 'TANK', value: n };
-  if (KNOWN_ACTIVITY_CODES.has(n)) return { kind: 'ACTIVITY', label: 'ACTIVITY', value: n };
-  if (KNOWN_REASON_CODES.has(n)) return { kind: 'REASON', label: 'REASON', value: n };
-  return { kind: 'UNKNOWN', label: 'UNKNOWN', value: n };
+  if (/^EMP\d{3}$/.test(n)) return { kind: 'EMPLOYEE', value: n };
+  if (isCommandIn(n)) return { kind: 'LEGACY_CMD', value: 'IN' };
+  if (isCommandOut(n)) return { kind: 'LEGACY_CMD', value: 'OUT' };
+  const actPref = parsePrefixedCode(n, 'ACTIVITY');
+  if (actPref) return { kind: 'ACTIVITY', value: CODE_ALIASES.get(actPref) || actPref };
+  const reasonPref = parsePrefixedCode(n, 'REASON');
+  if (reasonPref) return { kind: 'OUT_REASON', value: reasonPref };
+  if (/^TANK_[A-Z0-9-]+$/.test(n)) return { kind: 'TANK', value: n };
+  if (KNOWN_ACTIVITY_CODES.has(n)) return { kind: 'ACTIVITY', value: n };
+  if (KNOWN_REASON_CODES.has(n)) return { kind: 'OUT_REASON', value: n };
+  const tank = normalizeTank(n);
+  if (tank) return { kind: 'TANK', value: n };
+  return { kind: 'UNKNOWN', value: n };
 }
 
-/** Parsed tank id from normalized barcode only (never reads DOM). */
 function normalizeTank(normalizedCode) {
   const v = normalizedCode;
   if (!v) return null;
   if (/^EMP\d{3}$/.test(v)) return null;
+  if (isCommandIn(v) || isCommandOut(v)) return null;
+  if (v.startsWith('ACTIVITY:') || v.startsWith('ACTIVITY_')) return null;
+  if (v.startsWith('REASON:') || v.startsWith('REASON_')) return null;
+  if (KNOWN_ACTIVITY_CODES.has(v)) return null;
+  if (KNOWN_REASON_CODES.has(v)) return null;
   if (v.startsWith('TANK_')) return v.slice(5) || null;
   if (/^[A-Z0-9][A-Z0-9-]*$/i.test(v)) return v;
   return null;
+}
+
+function activityLabelFromScan(cls) {
+  if (cls.kind !== 'ACTIVITY') return null;
+  if (cls.value === 'OTHER') return null;
+  return ACTIVITY_LOOKUP.get(cls.value) || cls.value.replace(/_/g, ' ');
+}
+
+function reasonLabelFromScan(cls) {
+  if (cls.kind !== 'OUT_REASON') return null;
+  if (cls.value === 'OTHER') return null;
+  return REASON_LOOKUP.get(cls.value) || cls.value.replace(/_/g, ' ');
+}
+
+function resetSelectionIdleTimer() {
+  if (state.selectionIdleTimer) window.clearTimeout(state.selectionIdleTimer);
+  if (state.step === WORKFLOW_STATE.IDLE) return;
+  state.selectionIdleTimer = window.setTimeout(() => {
+    showToast('Selection cleared (timeout).');
+    clearSelectionOnly();
+  }, SELECTION_IDLE_MS);
+}
+
+function clearSelectionOnly() {
+  state.step = WORKFLOW_STATE.IDLE;
+  state.currentEmployee = null;
+  state.currentlyWorking = false;
+  state.currentActivity = null;
+  state.currentTank = null;
+  state.pendingActivity = null;
+  state.pendingTank = null;
+  tankInput.value = '';
+  if (scannerTrap) scannerTrap.value = '';
+  if (manualBarcodeInput) manualBarcodeInput.value = '';
+  renderWorkflow();
+  focusScannerTrapSoon();
+}
+
+function resetWorkflow() {
+  if (state.selectionIdleTimer) window.clearTimeout(state.selectionIdleTimer);
+  state.selectionIdleTimer = null;
+  clearSelectionOnly();
 }
 
 function activeElementDebugLabel() {
@@ -221,22 +257,13 @@ function dismissToastNow() {
   }
 }
 
-/**
- * Clears all error UI and error tracking. Does not clear lastSuccessCode.
- * Call on new scan start and after successful save.
- */
 function clearScanError() {
   errorMessage = '';
   rescanBadge = false;
   unknownEmployeeCode = '';
   lastErrorCode = '';
-
   window.clearTimeout(showScanWarning._t);
-  window.clearTimeout(showEmployeeNotFound._warnT);
-  window.clearTimeout(showEmployeeNotFound._bannerT);
-
   dismissToastNow();
-
   if (rescanBadgeBanner) rescanBadgeBanner.hidden = true;
   if (scanWarning) {
     scanWarning.textContent = '';
@@ -245,22 +272,13 @@ function clearScanError() {
   updateBarcodeDebugPanel({});
 }
 
-function setLastActionFromSave(status, employeeCode) {
-  state.lastAction = `Saved ${status} for ${employeeCode}`;
-  if (debugLine) debugLine.textContent = state.lastAction;
-  if (debugLastAction) debugLastAction.textContent = state.lastAction;
-  updateBarcodeDebugPanel({});
-}
-
 function setScanError({ code, message, showRescanBadge = false }) {
   unknownEmployeeCode = code || '';
   errorMessage = message || '';
   rescanBadge = showRescanBadge;
   lastErrorCode = code || (message ? '—' : '');
-
   if (showRescanBadge && rescanBadgeBanner) rescanBadgeBanner.hidden = false;
   else if (rescanBadgeBanner) rescanBadgeBanner.hidden = true;
-
   if (scanWarning) {
     scanWarning.textContent = message || '';
     scanWarning.hidden = !message;
@@ -299,65 +317,35 @@ function showToast(message, variant) {
   showToast._t = window.setTimeout(() => {
     scanToast.classList.remove('scan-toast--visible', 'scan-toast--error');
     scanToast.hidden = true;
-  }, variant === 'error' ? 4500 : 3000);
+  }, variant === 'error' ? 4500 : 3500);
 }
 
 function showScanWarning(message, errCode = '') {
   setScanError({ code: errCode, message, showRescanBadge: false });
-  window.clearTimeout(showScanWarning._t);
-  showScanWarning._t = window.setTimeout(() => {
-    if (scanWarning) scanWarning.hidden = true;
-  }, 5500);
   showToast(message, 'error');
   playErrorBeep();
 }
 
-/** Unknown employee (valid EMP### shape, not in DB). Does not alter workflow state. */
 function showEmployeeNotFound(code) {
   const msg = `Unknown employee ${code} — rescan badge`;
   setScanError({ code, message: msg, showRescanBadge: true });
-  window.clearTimeout(showEmployeeNotFound._warnT);
-  showEmployeeNotFound._warnT = window.setTimeout(() => {
-    if (scanWarning) scanWarning.hidden = true;
-  }, 6500);
-  window.clearTimeout(showEmployeeNotFound._bannerT);
-  showEmployeeNotFound._bannerT = window.setTimeout(() => {
-    if (rescanBadgeBanner) rescanBadgeBanner.hidden = true;
-    rescanBadge = false;
-  }, 6500);
   showToast(msg, 'error');
   playErrorBeep();
-  focusScannerTrapSoon();
 }
 
 function focusScannerTrapSoon() {
   window.setTimeout(() => {
     const active = document.activeElement;
     const manual = document.getElementById('manualBarcodeInput');
-    const trap = document.getElementById('scannerTrap');
-
     if (active === manual) return;
-
-    if (state.step === WORKFLOW_STATE.WAITING_TANK && active === tankInput) return;
-
-    if (state.step === WORKFLOW_STATE.WAITING_TANK && tankInput) {
+    if (state.step === WORKFLOW_STATE.WAITING_FOR_TANK && active === tankInput) return;
+    if (state.step === WORKFLOW_STATE.WAITING_FOR_TANK && tankInput) {
       tankInput.focus({ preventScroll: true });
-    } else if (trap) {
-      trap.focus({ preventScroll: true });
+    } else if (scannerTrap) {
+      scannerTrap.focus({ preventScroll: true });
     }
     updateBarcodeDebugPanel({});
   }, 50);
-}
-
-/** Focus scanner trap or tank field (never steals manual typing). */
-function focusPrimaryScannerOrTank() {
-  if (!scannerTrap || !tankInput) return;
-  if (state.step === WORKFLOW_STATE.WAITING_TANK) {
-    tankInput.focus({ preventScroll: true });
-  } else {
-    scannerTrap.focus({ preventScroll: true });
-  }
-  updateBarcodeDebugPanel({});
 }
 
 function setDebug(text) {
@@ -366,29 +354,47 @@ function setDebug(text) {
   if (debugLastAction) debugLastAction.textContent = state.lastAction || '—';
 }
 
+function isOutFlow() {
+  return (
+    state.step === WORKFLOW_STATE.EMPLOYEE_SELECTED_OUT ||
+    state.step === WORKFLOW_STATE.WAITING_FOR_TANK
+  );
+}
+
+function isInFlow() {
+  return state.step === WORKFLOW_STATE.EMPLOYEE_SELECTED_IN;
+}
 
 function renderCurrentWorker() {
   if (!state.currentEmployee) {
     currentWorkerCard.hidden = true;
-    currentWorkerName.textContent = '—';
-    currentWorkerMode.textContent = '—';
     return;
   }
   currentWorkerCard.hidden = false;
-  currentWorkerName.textContent = state.currentEmployee.name;
-  currentWorkerMode.textContent = state.nextStatus === 'IN' ? 'Check IN' : 'Check OUT';
+  currentWorkerName.textContent = `${state.currentEmployee.name} (${state.currentEmployee.code})`;
+  const status = state.currentlyWorking ? 'IN' : 'OUT';
+  currentWorkerMode.textContent = `Status: ${status}`;
+  if (currentWorkerActivity) {
+    currentWorkerActivity.textContent = state.currentActivity ? `Activity: ${state.currentActivity}` : 'Activity: —';
+  }
+  if (currentWorkerTank) {
+    currentWorkerTank.textContent = state.currentTank ? `Tank: ${state.currentTank}` : 'Tank: —';
+  }
 }
 
 function renderSelectionPanel() {
-  if (state.step !== WORKFLOW_STATE.WAITING_ACTIVITY && state.step !== WORKFLOW_STATE.WAITING_OUT_REASON) {
+  const show = isOutFlow() || isInFlow();
+  if (!show) {
     selectionPanel.hidden = true;
     selectionButtons.innerHTML = '';
     return;
   }
   selectionPanel.hidden = false;
-  const isIn = state.step === WORKFLOW_STATE.WAITING_ACTIVITY;
-  const options = isIn ? ACTIVITY_OPTIONS : REASON_OPTIONS;
-  selectionTitle.textContent = isIn ? 'Select Activity' : 'Select Out Reason';
+  const isActivity = isOutFlow();
+  const options = isActivity ? ACTIVITY_OPTIONS : REASON_OPTIONS;
+  selectionTitle.textContent = isActivity
+    ? 'Select Activity (clocks IN)'
+    : 'Select Reason (clocks OUT)';
   selectionButtons.innerHTML = '';
   for (const opt of options) {
     const btn = document.createElement('button');
@@ -397,54 +403,33 @@ function renderSelectionPanel() {
     btn.textContent = opt.label;
     btn.dataset.code = opt.code;
     btn.addEventListener('click', () => {
-      void handleBarcode(opt.code, { source: 'button' });
+      void handleBarcode(isActivity ? `ACTIVITY:${opt.code}` : `REASON:${opt.code}`, { source: 'button' });
     });
     selectionButtons.appendChild(btn);
   }
 }
 
 function renderTankPanel() {
-  tankPanel.hidden = state.step !== WORKFLOW_STATE.WAITING_TANK;
-  if (!tankPanel.hidden) {
-    window.setTimeout(() => focusPrimaryScannerOrTank(), 0);
-  }
+  tankPanel.hidden = state.step !== WORKFLOW_STATE.WAITING_FOR_TANK;
 }
 
 function renderWorkflow() {
-  if (!state.currentEmployee) {
+  if (state.step === WORKFLOW_STATE.IDLE) {
     workflowTitle.textContent = 'Scan employee badge';
-    workflowSub.textContent = 'Scan or type employee code — field clears after each read (Enter from scanner).';
-  } else if (state.step === WORKFLOW_STATE.WAITING_ACTIVITY) {
-    workflowTitle.textContent = `${state.currentEmployee.name} — Check IN`;
-    workflowSub.textContent = 'Tap an activity or scan/type the activity code, then Enter.';
-  } else if (state.step === WORKFLOW_STATE.WAITING_TANK) {
-    workflowTitle.textContent = `${state.currentEmployee.name} — Tank Number`;
-    workflowSub.textContent = 'Scan tank in the scanner field or type here — Enter to confirm.';
-  } else if (state.step === WORKFLOW_STATE.WAITING_OUT_REASON) {
-    workflowTitle.textContent = `${state.currentEmployee.name} — Check OUT`;
-    workflowSub.textContent = 'Tap a reason or scan/type the reason code, then Enter.';
-  } else {
-    workflowTitle.textContent = 'Scan employee badge';
-    workflowSub.textContent = 'Scan or type employee code — field clears after each read.';
+    workflowSub.textContent = 'Clock in: Employee → Activity → Tank. Clock out: Employee → Reason.';
+  } else if (isOutFlow()) {
+    workflowTitle.textContent = `${state.currentEmployee.name} — OUT`;
+    workflowSub.textContent =
+      state.step === WORKFLOW_STATE.WAITING_FOR_TANK
+        ? `Activity: ${state.pendingActivity || state.currentActivity || '—'}. Scan tank barcode.`
+        : 'Scan activity to clock in.';
+  } else if (isInFlow()) {
+    workflowTitle.textContent = `${state.currentEmployee.name} — IN`;
+    workflowSub.textContent = 'Scan activity, tank, or reason.';
   }
   renderCurrentWorker();
   renderSelectionPanel();
   renderTankPanel();
-}
-
-function resetWorkflow() {
-  state.step = WORKFLOW_STATE.WAITING_EMPLOYEE;
-  state.currentEmployee = null;
-  state.nextStatus = null;
-  state.selectedActivity = null;
-  state.selectedReason = null;
-  state.selectedTank = null;
-  state.activeTankNumber = null;
-  tankInput.value = '';
-  if (scannerTrap) scannerTrap.value = '';
-  if (manualBarcodeInput) manualBarcodeInput.value = '';
-  renderWorkflow();
-  focusScannerTrapSoon();
 }
 
 async function apiJson(url, options) {
@@ -453,14 +438,29 @@ async function apiJson(url, options) {
   return { res, data };
 }
 
+async function workAction(body) {
+  const { res, data } = await apiJson('/api/kiosk/work-action', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok || !data.ok) {
+    const err = new Error(data.message || 'Action failed');
+    err.errorCode = data.error || '';
+    err.httpStatus = res.status;
+    throw err;
+  }
+  return data;
+}
+
 async function refreshStatusList() {
   const { res, data } = await apiJson('/api/kiosk/status');
   if (!res.ok || !data.ok || !Array.isArray(data.rows)) {
     statusTableBody.innerHTML = '<tr><td colspan="5" class="status-empty">Failed to load status.</td></tr>';
     return;
   }
-  const currentArea = data.kiosk_area || state.kioskArea || (state.authUser && state.authUser.area_name) || '';
-  if (data.rows.length === 0) {
+  const currentArea = data.kiosk_area || state.kioskArea || '';
+  if (!data.rows.length) {
     const areaLabel = currentArea ? ` in ${currentArea}` : '';
     statusTableBody.innerHTML = `<tr><td colspan="5" class="status-empty">No employees have scanned${areaLabel} yet.</td></tr>`;
     return;
@@ -500,20 +500,6 @@ async function loadAuthUser() {
   }
 }
 
-async function saveCompletedScan(payload) {
-  const { res, data } = await apiJson('/api/kiosk/complete-scan', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok || !data.ok) {
-    throw new Error(data.message || 'Could not save scan');
-  }
-  if (data.kiosk_message) showToast(data.kiosk_message);
-  await refreshStatusList();
-  return data;
-}
-
 async function lookupEmployee(code) {
   const { res, data } = await apiJson(`/api/kiosk/employee/${encodeURIComponent(code)}`, { cache: 'no-store' });
   if (!res.ok || !data.ok) {
@@ -525,29 +511,132 @@ async function lookupEmployee(code) {
   return data;
 }
 
-function requireResetForOtherEmployee(nextCode) {
-  if (!state.currentEmployee) return true;
-  if (state.currentEmployee.code === nextCode) return true;
-  const ok = window.confirm(
-    `Incomplete workflow for ${state.currentEmployee.code}. Reset and switch to ${nextCode}?`
-  );
-  if (!ok) return false;
-  resetWorkflow();
-  return true;
-}
-
-async function applyEmployeeAfterLookup(code, scanId) {
+async function selectEmployee(code, scanId) {
   const data = await lookupEmployee(code);
   if (scanId !== scanSequenceId) return;
   state.currentEmployee = data.employee;
-  state.nextStatus = data.next_status;
-  state.activeTankNumber = data.active_tank_number || null;
-  state.selectedActivity = null;
-  state.selectedReason = null;
-  state.selectedTank = null;
-  state.step = data.next_status === 'IN' ? WORKFLOW_STATE.WAITING_ACTIVITY : WORKFLOW_STATE.WAITING_OUT_REASON;
-  setDebug(`Employee ${data.employee.code} next ${data.next_status}`);
+  state.currentlyWorking = !!data.currently_working;
+  state.currentActivity = data.current_activity || null;
+  state.currentTank = data.active_tank_number || null;
+  state.pendingActivity = null;
+  state.pendingTank = null;
+  state.step = state.currentlyWorking
+    ? WORKFLOW_STATE.EMPLOYEE_SELECTED_IN
+    : WORKFLOW_STATE.EMPLOYEE_SELECTED_OUT;
+  setDebug(`Employee ${data.employee.code} selected`);
   if (data.kiosk_notice) showToast(data.kiosk_notice);
+  showToast(
+    state.currentlyWorking
+      ? 'Scan activity, tank, or reason.'
+      : 'Scan activity to clock in.'
+  );
+  resetSelectionIdleTimer();
+  renderWorkflow();
+}
+
+async function beginClockInActivity(activity, scanId) {
+  const data = await workAction({
+    employee_code: state.currentEmployee.code,
+    action: 'clock_in_activity',
+    activity,
+  });
+  if (scanId !== scanSequenceId) return;
+  if (data.noop) {
+    showToast(data.message || 'Already clocked in.');
+    return;
+  }
+  state.currentlyWorking = true;
+  state.currentActivity = data.activity || activity;
+  state.pendingActivity = state.currentActivity;
+  state.currentTank = null;
+  state.step = WORKFLOW_STATE.WAITING_FOR_TANK;
+  clearScanError();
+  lastSuccessCode = state.currentEmployee.code;
+  const ot = data.session_type === 'OVERTIME' ? ' (OT)' : '';
+  showToast(`Clocked IN${ot}. Scan tank.`);
+  if (data.kiosk_message) showToast(data.kiosk_message);
+  setDebug(`Clock in activity ${state.currentEmployee.code}`);
+  await refreshStatusList();
+  renderWorkflow();
+}
+
+async function assignTank(tank, scanId) {
+  const data = await workAction({
+    employee_code: state.currentEmployee.code,
+    action: 'assign_tank',
+    tank_number: tank,
+  });
+  if (scanId !== scanSequenceId) return;
+  if (data.noop) {
+    showToast(data.message || 'Already on this tank.');
+    return;
+  }
+  state.currentTank = data.tank_number || tank;
+  state.currentActivity = data.activity || state.currentActivity;
+  state.pendingActivity = null;
+  state.pendingTank = null;
+  tankInput.value = '';
+  clearScanError();
+  showToast(`Tank ${state.currentTank} assigned.`);
+  setDebug(`Tank assigned ${state.currentEmployee.code}`);
+  await refreshStatusList();
+  clearSelectionOnly();
+}
+
+async function completeClockOut(reason, scanId) {
+  const data = await workAction({
+    employee_code: state.currentEmployee.code,
+    action: 'clock_out',
+    reason,
+  });
+  if (scanId !== scanSequenceId) return;
+  clearScanError();
+  showToast(`Clocked out: ${reason}`);
+  if (data.kiosk_message) showToast(data.kiosk_message);
+  setDebug(`Clocked OUT ${state.currentEmployee.code}`);
+  await refreshStatusList();
+  clearSelectionOnly();
+}
+
+async function switchActivity(activity, scanId) {
+  const data = await workAction({
+    employee_code: state.currentEmployee.code,
+    action: 'switch_activity',
+    activity,
+  });
+  if (scanId !== scanSequenceId) return;
+  if (data.noop) {
+    showToast(data.message || 'Already on this activity.');
+    return;
+  }
+  state.currentActivity = data.activity;
+  state.currentTank = data.tank_number || state.currentTank;
+  const prev = data.previous_activity || '—';
+  showToast(`Activity switched from ${prev} to ${data.activity}`);
+  setDebug(`Switch activity ${state.currentEmployee.code}`);
+  await refreshStatusList();
+  resetSelectionIdleTimer();
+  renderWorkflow();
+}
+
+async function switchTank(tank, scanId) {
+  const data = await workAction({
+    employee_code: state.currentEmployee.code,
+    action: 'switch_tank',
+    tank_number: tank,
+  });
+  if (scanId !== scanSequenceId) return;
+  if (data.noop) {
+    showToast(data.message || 'Already on this tank.');
+    return;
+  }
+  state.currentTank = data.tank_number;
+  state.currentActivity = data.activity || state.currentActivity;
+  const prev = data.previous_tank || '—';
+  showToast(`Tank switched from ${prev} to ${data.tank_number}`);
+  setDebug(`Switch tank ${state.currentEmployee.code}`);
+  await refreshStatusList();
+  resetSelectionIdleTimer();
   renderWorkflow();
 }
 
@@ -557,214 +646,115 @@ function promptOtherText(kind) {
   return clean ? clean.slice(0, 20) : null;
 }
 
-function handleActivityChoice(code) {
-  if (state.step !== WORKFLOW_STATE.WAITING_ACTIVITY) return;
-  clearScanError();
-  if (code === 'OTHER') {
-    const v = promptOtherText('activity');
-    if (!v) return;
-    state.selectedActivity = v;
-  } else {
-    state.selectedActivity = ACTIVITY_LOOKUP.get(code) || null;
-  }
-  if (!state.selectedActivity) return;
-  state.step = WORKFLOW_STATE.WAITING_TANK;
-  setDebug(`Activity selected: ${state.selectedActivity}`);
-  renderWorkflow();
-}
-
-async function confirmTankAndSave(scanIdOpt) {
-  if (state.step !== WORKFLOW_STATE.WAITING_TANK) return;
-  if (scanIdOpt === undefined) clearScanError();
-  const parsed = normalizeTank(normalizeBarcode(tankInput.value));
-  if (!parsed) {
-    showToast('Enter or scan tank number');
-    focusScannerTrapSoon();
-    return;
-  }
-  state.selectedTank = parsed;
-  try {
-    const payload = {
-      employee_code: state.currentEmployee.code,
-      status: 'IN',
-      note_category: 'WORK',
-      note_value: state.selectedActivity,
-      tank_number: state.selectedTank,
-    };
-    const data = await saveCompletedScan(payload);
-    if (scanIdOpt !== undefined && scanIdOpt !== scanSequenceId) return;
-    clearScanError();
-    lastSuccessCode = data.employee.code;
-    updateBarcodeDebugPanel({});
-    showToast(`${data.employee.name} checked IN`);
-    setLastActionFromSave('IN', data.employee.code);
-    resetWorkflow();
-  } catch (err) {
-    if (scanIdOpt !== undefined && scanIdOpt !== scanSequenceId) return;
-    showToast(err.message || 'Failed to save IN', 'error');
-    focusScannerTrapSoon();
-  }
-}
-
-async function handleReasonChoice(code, scanIdOpt) {
-  if (state.step !== WORKFLOW_STATE.WAITING_OUT_REASON) return;
-  if (scanIdOpt === undefined) clearScanError();
-  let reason = null;
-  if (code === 'OTHER') reason = promptOtherText('reason');
-  else reason = REASON_LOOKUP.get(code) || null;
-  if (!reason) return;
-  state.selectedReason = reason;
-  try {
-    const payload = {
-      employee_code: state.currentEmployee.code,
-      status: 'OUT',
-      note_category: 'REASON',
-      note_value: state.selectedReason,
-    };
-    const data = await saveCompletedScan(payload);
-    if (scanIdOpt !== undefined && scanIdOpt !== scanSequenceId) return;
-    clearScanError();
-    lastSuccessCode = data.employee.code;
-    updateBarcodeDebugPanel({});
-    showToast(`${data.employee.name} checked OUT`);
-    setLastActionFromSave('OUT', data.employee.code);
-    resetWorkflow();
-  } catch (err) {
-    if (scanIdOpt !== undefined && scanIdOpt !== scanSequenceId) return;
-    showToast(err.message || 'Failed to save OUT', 'error');
-    focusScannerTrapSoon();
-  }
-}
-
-async function processManualInput() {
-  if (!manualBarcodeInput) return;
-  if (state.isBusy) {
-    focusScannerTrapSoon();
-    return;
-  }
-
-  const raw = manualBarcodeInput.value;
-  manualBarcodeInput.value = '';
-
-  const code = canonicalizeCode(raw);
-  updateBarcodeDebugPanel({ raw, normalized: code, source: 'manual' });
-
-  if (!code) {
-    focusScannerTrapSoon();
-    return;
-  }
-
-  try {
-    await handleBarcode(code, { source: 'manual' });
-  } finally {
-    focusScannerTrapSoon();
-  }
-}
-
-/**
- * Routes normalized barcode only — never reads trap/manual DOM.
- */
 async function handleBarcode(code, meta = {}) {
   const myScanId = ++scanSequenceId;
   clearScanError();
-
-  const source = meta.source === 'manual' ? 'manual' : 'scanner';
   const normalizedCode = canonicalizeCode(code);
-  const cls = classifyCode(normalizedCode);
-
+  const cls = classifyBarcode(normalizedCode);
   state.isBusy = true;
-  updateBarcodeDebugPanel({ normalized: normalizedCode, source, processing: true });
+  updateBarcodeDebugPanel({
+    normalized: normalizedCode,
+    source: meta.source === 'manual' ? 'manual' : 'scanner',
+    processing: true,
+  });
 
   try {
-    if (!normalizedCode || normalizedCode.length < 2) {
+    if (!normalizedCode || normalizedCode.length < 2) return;
+
+    if (cls.kind === 'EMPLOYEE') {
+      await selectEmployee(normalizedCode, myScanId);
+      if (myScanId !== scanSequenceId) return;
       return;
     }
 
-    if (state.step === WORKFLOW_STATE.WAITING_EMPLOYEE) {
-      if (cls !== 'EMPLOYEE') {
-        showScanWarning('Scan employee badge first', normalizedCode);
-        focusScannerTrapSoon();
-        return;
-      }
-      if (!requireResetForOtherEmployee(normalizedCode)) {
-        focusScannerTrapSoon();
-        return;
-      }
-      try {
-        await applyEmployeeAfterLookup(normalizedCode, myScanId);
-        if (myScanId !== scanSequenceId) return;
-      } catch (err) {
-        if (myScanId !== scanSequenceId) return;
-        const ec = err && err.errorCode;
-        if (ec === 'unknown_employee' || err.httpStatus === 404 || /not found/i.test(String(err.message || ''))) {
-          showEmployeeNotFound(normalizedCode);
-          return;
-        }
-        if (ec === 'inactive_employee') {
-          showScanWarning('Unknown employee', normalizedCode);
-          focusScannerTrapSoon();
-          return;
-        }
-        showToast(err.message || 'Scan failed', 'error');
-        focusScannerTrapSoon();
-      }
+    if (state.step === WORKFLOW_STATE.IDLE) {
+      showScanWarning('Scan employee first', normalizedCode);
       return;
     }
 
-    if (state.step === WORKFLOW_STATE.WAITING_ACTIVITY) {
-      if (cls === 'WORK_ACTIVITY') {
-        handleActivityChoice(normalizedCode === 'QUALITY_CHECK' ? 'QUALITY' : normalizedCode);
-        return;
-      }
-      if (cls !== 'UNKNOWN') {
-        showScanWarning('Scan work activity', normalizedCode);
-        focusScannerTrapSoon();
-        return;
-      }
-      showScanWarning('Unknown activity', normalizedCode);
-      focusScannerTrapSoon();
+    resetSelectionIdleTimer();
+
+    if (cls.kind === 'LEGACY_CMD') {
+      showToast('Use Activity to clock in, or Reason to clock out.');
       return;
     }
 
-    if (state.step === WORKFLOW_STATE.WAITING_OUT_REASON) {
-      if (cls === 'OUT_REASON') {
-        await handleReasonChoice(normalizedCode, myScanId);
-        if (myScanId !== scanSequenceId) return;
+    if (cls.kind === 'ACTIVITY') {
+      let label = activityLabelFromScan(cls);
+      if (!label && cls.value === 'OTHER') label = promptOtherText('activity');
+      if (!label) {
+        showScanWarning('Unknown activity', normalizedCode);
         return;
       }
-      if (cls !== 'UNKNOWN') {
-        showScanWarning('Scan out reason', normalizedCode);
-        focusScannerTrapSoon();
+      if (state.step === WORKFLOW_STATE.WAITING_FOR_TANK) {
+        await switchActivity(label, myScanId);
+        state.pendingActivity = label;
         return;
       }
-      showScanWarning('Unknown out reason', normalizedCode);
-      focusScannerTrapSoon();
+      if (state.step === WORKFLOW_STATE.EMPLOYEE_SELECTED_OUT) {
+        await beginClockInActivity(label, myScanId);
+        return;
+      }
+      if (isInFlow()) {
+        await switchActivity(label, myScanId);
+        return;
+      }
+      showScanWarning('Scan employee first');
       return;
     }
 
-    if (state.step === WORKFLOW_STATE.WAITING_TANK) {
-      if (cls === 'TANK') {
-        const parsed = normalizeTank(normalizedCode);
-        if (parsed) {
-          tankInput.value = parsed;
-          await confirmTankAndSave(myScanId);
-          if (myScanId !== scanSequenceId) return;
-          return;
-        }
-      }
-      if (cls !== 'UNKNOWN') {
-        showScanWarning('Scan tank barcode', normalizedCode);
-        focusScannerTrapSoon();
+    if (cls.kind === 'TANK') {
+      const tank = normalizeTank(normalizedCode);
+      if (!tank) {
+        showScanWarning('Unknown tank', normalizedCode);
         return;
       }
-      showScanWarning('Unknown tank', normalizedCode);
-      focusScannerTrapSoon();
+      if (state.step === WORKFLOW_STATE.WAITING_FOR_TANK) {
+        tankInput.value = tank;
+        await assignTank(tank, myScanId);
+        return;
+      }
+      if (state.step === WORKFLOW_STATE.EMPLOYEE_SELECTED_OUT) {
+        showScanWarning('Scan activity first to clock in.');
+        return;
+      }
+      if (isInFlow()) {
+        await switchTank(tank, myScanId);
+        return;
+      }
+      showScanWarning('Scan employee first');
       return;
     }
+
+    if (cls.kind === 'OUT_REASON') {
+      let reason = reasonLabelFromScan(cls);
+      if (!reason && cls.value === 'OTHER') reason = promptOtherText('reason');
+      if (!reason) {
+        showScanWarning('Unknown reason', normalizedCode);
+        return;
+      }
+      if (isOutFlow()) {
+        showScanWarning('Employee is already out. Scan activity to clock in.');
+        return;
+      }
+      if (isInFlow()) {
+        await completeClockOut(reason, myScanId);
+        return;
+      }
+      showScanWarning('Scan employee first');
+      return;
+    }
+
+    showScanWarning('Unknown barcode', normalizedCode);
   } catch (err) {
     if (myScanId !== scanSequenceId) return;
-    showToast(err.message || 'Scan failed', 'error');
-    focusScannerTrapSoon();
+    const ec = err && err.errorCode;
+    if (ec === 'unknown_employee' || err.httpStatus === 404) {
+      showEmployeeNotFound(normalizedCode);
+    } else {
+      showToast(err.message || 'Scan failed', 'error');
+      playErrorBeep();
+    }
   } finally {
     state.isBusy = false;
     updateBarcodeDebugPanel({ processing: false });
@@ -772,35 +762,29 @@ async function handleBarcode(code, meta = {}) {
   }
 }
 
+async function processManualInput() {
+  if (!manualBarcodeInput || state.isBusy) return;
+  const raw = manualBarcodeInput.value;
+  manualBarcodeInput.value = '';
+  const code = canonicalizeCode(raw);
+  updateBarcodeDebugPanel({ raw, normalized: code, source: 'manual' });
+  if (!code) return;
+  await handleBarcode(code, { source: 'manual' });
+}
+
 function processScan(raw) {
   const code = canonicalizeCode(raw);
-
-  console.log('[SCAN RAW BUFFERED]', JSON.stringify(raw));
-  console.log('[SCAN NORMALIZED]', code);
   updateBarcodeDebugPanel({ raw, normalized: code, source: 'scanner' });
-
-  if (!code) {
-    return;
-  }
-
-  console.log('SCAN ROUTED:', code, classifyCode(code));
+  if (!code) return;
   void handleBarcode(code, { source: 'scanner' });
 }
 
 window.addEventListener('keydown', (e) => {
   const active = document.activeElement;
-  if (active === manualBarcodeInput || active === tankInput) {
-    return;
-  }
-
+  if (active === manualBarcodeInput || active === tankInput) return;
   const now = Date.now();
-
-  if (now - lastKeyTime > SCAN_TIMEOUT) {
-    scanBuffer = '';
-  }
-
+  if (now - lastKeyTime > SCAN_TIMEOUT) scanBuffer = '';
   lastKeyTime = now;
-
   if (e.key === 'Enter') {
     processScan(scanBuffer);
     scanBuffer = '';
@@ -808,11 +792,7 @@ window.addEventListener('keydown', (e) => {
     focusScannerTrapSoon();
     return;
   }
-
-  if (e.key.length === 1) {
-    scanBuffer += e.key;
-  }
-
+  if (e.key.length === 1) scanBuffer += e.key;
   clearTimeout(scanTimer);
   scanTimer = setTimeout(() => {
     if (scanBuffer.length > 0) {
@@ -823,42 +803,25 @@ window.addEventListener('keydown', (e) => {
   }, SCAN_TIMEOUT);
 });
 
-if (scanButton) {
-  scanButton.addEventListener('click', () => void processManualInput());
-}
-
+if (scanButton) scanButton.addEventListener('click', () => void processManualInput());
 scanForm.addEventListener('submit', (e) => {
   e.preventDefault();
   void processManualInput();
 });
-
-const kioskMain = document.querySelector('.kiosk-page');
-if (kioskMain) {
-  kioskMain.addEventListener(
-    'click',
-    (e) => {
-      const el = e.target;
-      if (!(el instanceof Element)) return;
-      if (el.closest('button, a, input, textarea, select, label')) return;
-      focusScannerTrapSoon();
-    },
-    true
-  );
-}
-
+if (btnClearSelection) btnClearSelection.addEventListener('click', () => clearSelectionOnly());
 tankInput.addEventListener('keydown', (e) => {
   if (e.key !== 'Enter') return;
   e.preventDefault();
-  void confirmTankAndSave();
+  const tank = normalizeTank(normalizeBarcode(tankInput.value));
+  if (!tank) return;
+  state.pendingTank = tank;
+  void assignTank(tank, scanSequenceId);
 });
-
 tankConfirmBtn.addEventListener('click', () => {
-  void confirmTankAndSave();
+  const tank = normalizeTank(normalizeBarcode(tankInput.value));
+  if (tank) void assignTank(tank, scanSequenceId);
 });
-
-refreshStatusBtn.addEventListener('click', () => {
-  void refreshStatusList();
-});
+refreshStatusBtn.addEventListener('click', () => void refreshStatusList());
 
 window.addEventListener('load', () => {
   resetWorkflow();
@@ -868,19 +831,13 @@ window.addEventListener('load', () => {
     scannerTrap.readOnly = true;
     scannerTrap.focus({ preventScroll: true });
   }
-  updateBarcodeDebugPanel({});
-  if (state.statusRefreshTimer) window.clearInterval(state.statusRefreshTimer);
-  state.statusRefreshTimer = window.setInterval(() => {
-    void refreshStatusList();
-  }, 5000);
-  if (state.focusTimer) window.clearInterval(state.focusTimer);
+  state.statusRefreshTimer = window.setInterval(() => void refreshStatusList(), 5000);
   state.focusTimer = window.setInterval(() => {
     const ae = document.activeElement;
-    const manual = document.getElementById('manualBarcodeInput');
-    if (ae === manual) return;
-    if (state.step === WORKFLOW_STATE.WAITING_TANK && ae === tankInput) return;
-    focusPrimaryScannerOrTank();
-    updateBarcodeDebugPanel({});
+    if (ae === manualBarcodeInput) return;
+    if (state.step === WORKFLOW_STATE.WAITING_FOR_TANK && ae === tankInput) return;
+    if (state.step === WORKFLOW_STATE.WAITING_FOR_TANK) tankInput.focus({ preventScroll: true });
+    else if (scannerTrap) scannerTrap.focus({ preventScroll: true });
   }, 500);
 });
 

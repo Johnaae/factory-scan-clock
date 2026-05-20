@@ -251,12 +251,365 @@ function normalizeNoteValue(raw) {
   return s.slice(0, 20);
 }
 
-/** WORK (clock-in activity) or REASON (clock-out). */
+/** WORK (clock-in activity), REASON (clock-out), SWITCH (internal segment change). */
 function normalizeNoteCategory(raw) {
   if (raw === undefined || raw === null) return null;
   const u = String(raw).trim().toUpperCase();
-  if (u === 'WORK' || u === 'REASON') return u;
+  if (u === 'WORK' || u === 'REASON' || u === 'SWITCH') return u;
   return null;
+}
+
+const KIOSK_ACTIVITY_LABELS = {
+  RUN_MACHINE: 'Run Machine',
+  ASSEMBLE: 'Assemble',
+  ASSEMBLY: 'Assemble',
+  QUALITY: 'Quality Check',
+  QUALITY_CHECK: 'Quality Check',
+  SURFACE_SANDING: 'Surface Sanding',
+  SANDING: 'Surface Sanding',
+  PAINTING: 'Painting',
+  CUTTING: 'Cutting',
+  WELDING: 'Welding',
+  MATERIAL_HANDLING: 'Material Handling',
+  OTHER: 'Other',
+};
+
+const KIOSK_REASON_LABELS = {
+  BREAK: 'Break',
+  LUNCH: 'Lunch',
+  BATHROOM: 'Bathroom',
+  END_SHIFT: 'End Shift',
+  MACHINE_ISSUE: 'Machine Issue',
+  WAITING_MATERIAL: 'Waiting Material',
+  MAINTENANCE: 'Maintenance',
+  SETUP_CHANGE: 'Setup Change',
+  OTHER: 'Other',
+};
+
+function kioskActivityLabel(raw) {
+  const code = String(raw || '')
+    .trim()
+    .toUpperCase()
+    .replace(/^ACTIVITY[:_]/, '');
+  if (!code) return null;
+  return KIOSK_ACTIVITY_LABELS[code] || code.replace(/_/g, ' ').slice(0, 20);
+}
+
+function kioskReasonLabel(raw) {
+  const code = String(raw || '')
+    .trim()
+    .toUpperCase()
+    .replace(/^REASON[:_]/, '');
+  if (!code) return null;
+  return KIOSK_REASON_LABELS[code] || code.replace(/_/g, ' ').slice(0, 20);
+}
+
+function isCommandInBarcode(normalized) {
+  const n = String(normalized || '').toUpperCase();
+  return n === 'CMD:IN' || n === 'CMD_IN' || n === 'COMMAND_IN' || n === 'IN_CMD';
+}
+
+function isCommandOutBarcode(normalized) {
+  const n = String(normalized || '').toUpperCase();
+  return n === 'CMD:OUT' || n === 'CMD_OUT' || n === 'COMMAND_OUT' || n === 'OUT_CMD';
+}
+
+async function insertScanLogForEmployee({
+  employee,
+  code,
+  status,
+  noteCategory,
+  noteValue,
+  tankNumber,
+  auth,
+  scannedAtIso,
+}) {
+  const stationName = auth && auth.role === ROLE.KIOSK ? auth.station_name || null : null;
+  const areaName = auth && auth.role === ROLE.KIOSK ? auth.area_name || null : null;
+  const kioskUser = auth && auth.role === ROLE.KIOSK ? auth.username || null : null;
+  const scannedAt = scannedAtIso || nowIso();
+  const ins = await pool.query(
+    `INSERT INTO scan_logs (employee_code, employee_name, employee_id, status, scanned_at, note, note_category, note_value, tank_number, station_name, area_name, kiosk_user)
+     VALUES ($1, $2, $3, $4, $5::timestamptz, $6, $7, $8, $9, $10, $11, $12)
+     RETURNING id, scanned_at`,
+    [
+      code,
+      employee.name,
+      employee.id,
+      status,
+      scannedAt,
+      noteValue,
+      noteCategory,
+      noteValue,
+      tankNumber,
+      stationName,
+      areaName,
+      kioskUser,
+    ]
+  );
+  return ins.rows[0];
+}
+
+async function performKioskWorkAction(req, res) {
+  const auth = req.auth || currentKioskFromSession(req) || currentAuthFromSession(req) || null;
+  const code = normalizeCode(req.body && req.body.employee_code);
+  const action = String(req.body && req.body.action ? req.body.action : '')
+    .trim()
+    .toLowerCase();
+  if (!code) return res.status(400).json({ ok: false, error: 'validation', message: 'employee_code is required.' });
+  const employee = await getEmployeeByCode(code);
+  if (!employee) return res.status(404).json({ ok: false, error: 'unknown_employee', message: 'Unknown employee.' });
+  if (!employee.is_active) return res.status(403).json({ ok: false, error: 'inactive_employee', message: 'Employee is inactive.' });
+
+  const latestAny = await getLatestLogForEmployeeCode(code);
+  if (recentDuplicateScan(latestAny)) {
+    return res.status(429).json({
+      ok: false,
+      error: 'duplicate_scan',
+      message: 'Duplicate scan ignored. Please wait a moment before scanning again.',
+    });
+  }
+
+  const pairedBefore = await getTodayPairingStateForEmployeeCode(code);
+  const activeIn = await getCurrentActiveInSessionByCode(code);
+  const currentlyWorking = !!pairedBefore.currentlyWorking;
+
+  const activityRaw = req.body && (req.body.activity != null ? req.body.activity : req.body.note_value);
+  const reasonRaw = req.body && (req.body.reason != null ? req.body.reason : req.body.note_value);
+  const tankRaw = normalizeTankNumber(req.body && req.body.tank_number);
+
+  if (action === 'clock_in_activity') {
+    if (currentlyWorking) {
+      return res.status(409).json({
+        ok: false,
+        error: 'already_in',
+        message: 'Employee is already clocked in.',
+      });
+    }
+    const activity = kioskActivityLabel(activityRaw);
+    if (!activity) {
+      return res.status(400).json({ ok: false, error: 'validation', message: 'Activity is required.' });
+    }
+    const row = await insertScanLogForEmployee({
+      employee,
+      code,
+      status: 'IN',
+      noteCategory: 'WORK',
+      noteValue: activity,
+      tankNumber: null,
+      auth,
+    });
+    let kiosk_message = null;
+    if (pairedBefore.regularAutoEnded && !pairedBefore.pendingOvertimeSession) {
+      kiosk_message = 'Overtime session started.';
+    }
+    return res.json({
+      ok: true,
+      action: 'clock_in_activity',
+      log_id: row.id,
+      employee: { id: employee.id, code: employee.code, name: employee.name },
+      status: 'IN',
+      activity,
+      tank_number: null,
+      awaiting_tank: true,
+      session_type: pairedBefore.regularAutoEnded ? 'OVERTIME' : 'REGULAR',
+      scanned_at: row.scanned_at,
+      kiosk_message,
+    });
+  }
+
+  if (action === 'clock_in') {
+    if (currentlyWorking) {
+      return res.json({
+        ok: true,
+        noop: true,
+        message: 'Employee is already clocked in.',
+        employee: { id: employee.id, code: employee.code, name: employee.name },
+        current_status: 'IN',
+      });
+    }
+    const activity = kioskActivityLabel(activityRaw);
+    if (!activity) {
+      return res.status(400).json({ ok: false, error: 'validation', message: 'Activity is required to clock in.' });
+    }
+    if (!tankRaw) {
+      return res.status(400).json({ ok: false, error: 'validation', message: 'Tank is required to clock in.' });
+    }
+    const tankRow = await ensureTankExists(tankRaw);
+    if (tankRow && normalizeTankStatus(tankRow.status) === 'archived') {
+      return res.status(403).json({
+        ok: false,
+        error: 'tank_archived',
+        message: 'This tank is archived. Restore it in Tank Management before assigning work.',
+      });
+    }
+    const row = await insertScanLogForEmployee({
+      employee,
+      code,
+      status: 'IN',
+      noteCategory: 'WORK',
+      noteValue: activity,
+      tankNumber: tankRaw,
+      auth,
+    });
+    let kiosk_message = null;
+    if (pairedBefore.regularAutoEnded && !pairedBefore.pendingOvertimeSession) {
+      kiosk_message = 'Overtime session started.';
+    }
+    return res.json({
+      ok: true,
+      action: 'clock_in',
+      log_id: row.id,
+      employee: { id: employee.id, code: employee.code, name: employee.name },
+      status: 'IN',
+      activity,
+      tank_number: tankRaw,
+      session_type: pairedBefore.regularAutoEnded ? 'OVERTIME' : 'REGULAR',
+      scanned_at: row.scanned_at,
+      kiosk_message,
+    });
+  }
+
+  if (action === 'clock_out') {
+    if (!currentlyWorking) {
+      return res.status(409).json({ ok: false, error: 'not_working', message: 'Employee is not clocked in.' });
+    }
+    const reason = kioskReasonLabel(reasonRaw);
+    if (!reason) {
+      return res.status(400).json({ ok: false, error: 'validation', message: 'OUT reason is required.' });
+    }
+    const resolvedTank =
+      tankRaw ||
+      (activeIn && activeIn.tank_number ? normalizeTankNumber(activeIn.tank_number) : null);
+    const row = await insertScanLogForEmployee({
+      employee,
+      code,
+      status: 'OUT',
+      noteCategory: 'REASON',
+      noteValue: reason,
+      tankNumber: resolvedTank,
+      auth,
+    });
+    let kiosk_message = null;
+    if (pairedBefore.pendingOvertimeSession) kiosk_message = 'Overtime ended.';
+    return res.json({
+      ok: true,
+      action: 'clock_out',
+      log_id: row.id,
+      employee: { id: employee.id, code: employee.code, name: employee.name },
+      status: 'OUT',
+      reason,
+      tank_number: resolvedTank,
+      scanned_at: row.scanned_at,
+      kiosk_message,
+    });
+  }
+
+  if (action === 'switch_activity' || action === 'switch_tank' || action === 'switch_work' || action === 'assign_tank') {
+    if (!currentlyWorking || !activeIn) {
+      return res.status(409).json({
+        ok: false,
+        error: 'not_working',
+        message: 'Scan activity first to clock in.',
+      });
+    }
+    const prevActivity = workActivityLabelFromInRow(activeIn);
+    const prevTank = normalizeTankNumber(activeIn.tank_number || '') || null;
+    let nextActivity = prevActivity;
+    let nextTank = prevTank;
+    let endedBy = 'SWITCH_WORK';
+    const effectiveAction = action === 'assign_tank' ? 'switch_tank' : action;
+    if (effectiveAction === 'switch_activity') {
+      const act = kioskActivityLabel(activityRaw);
+      if (!act) return res.status(400).json({ ok: false, error: 'validation', message: 'Activity is required.' });
+      if (act === prevActivity) {
+        return res.json({
+          ok: true,
+          noop: true,
+          message: 'Already on this activity.',
+          activity: act,
+          tank_number: prevTank,
+        });
+      }
+      nextActivity = act;
+      endedBy = 'SWITCH_ACTIVITY';
+    } else if (effectiveAction === 'switch_tank') {
+      if (!tankRaw) return res.status(400).json({ ok: false, error: 'validation', message: 'Tank is required.' });
+      const tankRow = await ensureTankExists(tankRaw);
+      if (tankRow && normalizeTankStatus(tankRow.status) === 'archived') {
+        return res.status(403).json({
+          ok: false,
+          error: 'tank_archived',
+          message: 'This tank is archived. Restore it in Tank Management before assigning work.',
+        });
+      }
+      if (prevTank && prevTank === tankRaw) {
+        return res.json({
+          ok: true,
+          noop: true,
+          message: 'Already on this tank.',
+          activity: prevActivity,
+          tank_number: prevTank,
+        });
+      }
+      nextTank = tankRaw;
+      endedBy = 'SWITCH_TANK';
+    } else {
+      const act = kioskActivityLabel(activityRaw);
+      if (!act) return res.status(400).json({ ok: false, error: 'validation', message: 'Activity is required.' });
+      if (!tankRaw) return res.status(400).json({ ok: false, error: 'validation', message: 'Tank is required.' });
+      const tankRow = await ensureTankExists(tankRaw);
+      if (tankRow && normalizeTankStatus(tankRow.status) === 'archived') {
+        return res.status(403).json({
+          ok: false,
+          error: 'tank_archived',
+          message: 'This tank is archived. Restore it in Tank Management before assigning work.',
+        });
+      }
+      nextActivity = act;
+      nextTank = tankRaw;
+      endedBy = 'SWITCH_WORK';
+    }
+    const baseMs = Date.now();
+    const outIso = new Date(baseMs).toISOString();
+    const inIso = new Date(baseMs + 15).toISOString();
+    const outRow = await insertScanLogForEmployee({
+      employee,
+      code,
+      status: 'OUT',
+      noteCategory: 'SWITCH',
+      noteValue: endedBy,
+      tankNumber: prevTank,
+      auth,
+      scannedAtIso: outIso,
+    });
+    const inRow = await insertScanLogForEmployee({
+      employee,
+      code,
+      status: 'IN',
+      noteCategory: 'WORK',
+      noteValue: nextActivity,
+      tankNumber: nextTank,
+      auth,
+      scannedAtIso: inIso,
+    });
+    return res.json({
+      ok: true,
+      action,
+      ended_by: endedBy,
+      employee: { id: employee.id, code: employee.code, name: employee.name },
+      status: 'IN',
+      previous_activity: prevActivity,
+      previous_tank: prevTank,
+      activity: nextActivity,
+      tank_number: nextTank,
+      out_log_id: outRow.id,
+      in_log_id: inRow.id,
+      scanned_at: inRow.scanned_at,
+    });
+  }
+
+  return res.status(400).json({ ok: false, error: 'validation', message: 'Unknown kiosk action.' });
 }
 
 function normalizeTankNumber(raw) {
@@ -2491,7 +2844,14 @@ app.use((req, res, next) => {
   if (p === '/admin.html' || p === '/summary.html' || p === '/index.html') {
     return requireManager(req, res, next);
   }
-  if (p === '/manager-dashboard' || p === '/manager' || p === '/manager/tank-print' || p === '/dashboard' || p === '/') {
+  if (
+    p === '/manager-dashboard' ||
+    p === '/manager' ||
+    p === '/manager/tank-print' ||
+    p === '/manager/command-print' ||
+    p === '/dashboard' ||
+    p === '/'
+  ) {
     return requireManager(req, res, next);
   }
   if (p.startsWith('/api/kiosk/')) {
@@ -2589,6 +2949,8 @@ async function handleKioskEmployeeLookup(req, res) {
     if (paired.currentlyWorking) {
       current_session_type = paired.pendingOvertimeSession ? 'OVERTIME' : 'REGULAR';
     }
+    const current_activity =
+      activeIn && currentlyWorking ? workActivityLabelFromInRow(activeIn) : null;
 
     console.log('[kiosk lookup] current_status:', current_status);
     console.log('[kiosk lookup] next_status:', next_status);
@@ -2602,7 +2964,9 @@ async function handleKioskEmployeeLookup(req, res) {
       },
       current_status,
       next_status,
+      currently_working: paired.currentlyWorking,
       active_tank_number,
+      current_activity,
       current_session_type,
       kiosk_notice,
     });
@@ -2782,6 +3146,15 @@ async function postScanRecord(req, res) {
 app.post('/api/scan/record', postScanRecord);
 /** Kiosk multi-step flow: same body as /api/scan/record (single INSERT when all fields collected). */
 app.post('/api/kiosk/complete-scan', postScanRecord);
+
+app.post('/api/kiosk/work-action', async (req, res) => {
+  try {
+    await performKioskWorkAction(req, res);
+  } catch (err) {
+    console.error('[kiosk work-action]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not process scan action.' });
+  }
+});
 
 /**
  * Adjust kiosk status rows so DB "IN" that is auto-ended after 8h shows as OUT (no extra DB writes).
@@ -4105,6 +4478,126 @@ app.get('/dashboard', (_req, res) => {
 
 app.get('/', (_req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
+});
+
+function renderMultiBarcodePrintPage(pageTitle, instruction, items) {
+  const safeTitle = String(pageTitle || 'Barcodes').replace(/</g, '&lt;');
+  const safeInstr = String(instruction || '').replace(/</g, '&lt;');
+  const scripts = [];
+  const cards = items
+    .map((item, i) => {
+      const label = String(item.title || '').replace(/</g, '&lt;');
+      const sub = String(item.sub || '').replace(/</g, '&lt;');
+      const val = String(item.barcode || '').replace(/</g, '&lt;');
+      const esc = String(item.barcode || '').replace(/'/g, "\\'");
+      scripts.push(`JsBarcode('#bc${i}','${esc}',{format:'CODE128',displayValue:false,height:90,margin:6,width:2});`);
+      return `<div class="card"><p class="label">${label}</p><p class="sub">${sub}</p><svg id="bc${i}"></svg><p class="value">${val}</p></div>`;
+    })
+    .join('');
+  return `<!doctype html>
+<html><head><meta charset="utf-8" />
+<title>${safeTitle}</title>
+<style>
+body{font-family:Arial,sans-serif;margin:20px;color:#0f172a}
+h1{font-size:28px;margin:0 0 8px}
+.instr{font-size:16px;color:#334155;margin:0 0 20px;font-weight:600}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px}
+.card{border:2px solid #cbd5e1;border-radius:12px;padding:16px;text-align:center;break-inside:avoid}
+.label{font-size:18px;font-weight:800;margin:0}
+.sub{font-size:13px;color:#64748b;margin:4px 0 10px}
+.value{font-size:14px;font-family:monospace;margin-top:6px}
+@media print{body{margin:8px}.card{border:1px solid #94a3b8}}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
+</head><body>
+<h1>${safeTitle}</h1>
+<p class="instr">${safeInstr}</p>
+<div class="grid">${cards}</div>
+<script>${scripts.join('')}window.setTimeout(()=>window.print(),400);</script>
+</body></html>`;
+}
+
+function renderCommandBarcodePrintPage(title, barcodeValue, subtitle) {
+  const safeTitle = String(title || 'Barcode').replace(/</g, '&lt;');
+  const safeSub = String(subtitle || '').replace(/</g, '&lt;');
+  const safeVal = String(barcodeValue || '').replace(/'/g, "\\'");
+  return `<!doctype html>
+<html><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Print ${safeTitle}</title>
+<style>
+body{font-family:Arial,sans-serif;margin:24px;color:#0f172a}
+.card{border:2px solid #cbd5e1;border-radius:14px;padding:24px;max-width:760px;margin:0 auto;text-align:center}
+.title{font-size:36px;font-weight:800;margin:0 0 8px}
+.sub{font-size:20px;margin:0 0 16px;color:#334155}
+svg{max-width:100%;height:120px}
+.value{font-size:20px;letter-spacing:0.06em;margin-top:8px;font-family:monospace}
+.hint{font-size:14px;color:#64748b;margin-top:12px}
+@media print{body{margin:8px}.card{border:1px solid #94a3b8}}
+</style>
+</head><body>
+<div class="card">
+  <p class="title">${safeTitle}</p>
+  <p class="sub">${safeSub}</p>
+  <svg id="barcode"></svg>
+  <p class="value">${String(barcodeValue || '').replace(/</g, '&lt;')}</p>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
+<script>JsBarcode('#barcode','${safeVal}',{format:'CODE128',displayValue:false,height:110,margin:8,width:2});window.setTimeout(()=>window.print(),300);</script>
+</body></html>`;
+}
+
+app.get('/manager/command-print', (req, res) => {
+  const type = String(req.query.type || '').toLowerCase();
+  if (type === 'activities') {
+    return res.type('html').send(
+      renderMultiBarcodePrintPage(
+        'Activity Barcodes',
+        'Scan Employee → Activity → Tank',
+        [
+          { title: 'Run Machine', barcode: 'ACTIVITY:RUN_MACHINE', sub: 'Work activity' },
+          { title: 'Assemble', barcode: 'ACTIVITY:ASSEMBLY', sub: 'Work activity' },
+          { title: 'Quality Check', barcode: 'ACTIVITY:QUALITY', sub: 'Work activity' },
+          { title: 'Surface Sanding', barcode: 'ACTIVITY:SANDING', sub: 'Work activity' },
+          { title: 'Painting', barcode: 'ACTIVITY:PAINTING', sub: 'Work activity' },
+          { title: 'Cutting', barcode: 'ACTIVITY:CUTTING', sub: 'Work activity' },
+          { title: 'Welding', barcode: 'ACTIVITY:WELDING', sub: 'Work activity' },
+          { title: 'Material Handling', barcode: 'ACTIVITY:MATERIAL_HANDLING', sub: 'Work activity' },
+          { title: 'Other', barcode: 'ACTIVITY:OTHER', sub: 'Work activity' },
+        ]
+      )
+    );
+  }
+  if (type === 'reasons') {
+    return res.type('html').send(
+      renderMultiBarcodePrintPage(
+        'Reason Barcodes (Clock OUT)',
+        'Scan Employee → Reason to clock out',
+        [
+          { title: 'Lunch', barcode: 'REASON:LUNCH', sub: 'Clock out' },
+          { title: 'Break', barcode: 'REASON:BREAK', sub: 'Clock out' },
+          { title: 'Bathroom', barcode: 'REASON:BATHROOM', sub: 'Clock out' },
+          { title: 'End Shift', barcode: 'REASON:END_SHIFT', sub: 'Clock out' },
+          { title: 'Machine Issue', barcode: 'REASON:MACHINE_ISSUE', sub: 'Clock out' },
+          { title: 'Waiting Material', barcode: 'REASON:WAITING_MATERIAL', sub: 'Clock out' },
+          { title: 'Maintenance', barcode: 'REASON:MAINTENANCE', sub: 'Clock out' },
+          { title: 'Setup Change', barcode: 'REASON:SETUP_CHANGE', sub: 'Clock out' },
+          { title: 'Other', barcode: 'REASON:OTHER', sub: 'Clock out' },
+        ]
+      )
+    );
+  }
+  const map = {
+    lunch: { title: 'Lunch Reason', barcode: 'REASON:LUNCH', sub: 'Clock-out reason' },
+    break: { title: 'Break Reason', barcode: 'REASON:BREAK', sub: 'Clock-out reason' },
+    end_shift: { title: 'End Shift', barcode: 'REASON:END_SHIFT', sub: 'Clock-out reason' },
+    sanding: { title: 'Activity — Sanding', barcode: 'ACTIVITY:SANDING', sub: 'Work activity' },
+    painting: { title: 'Activity — Painting', barcode: 'ACTIVITY:PAINTING', sub: 'Work activity' },
+    assembly: { title: 'Activity — Assembly', barcode: 'ACTIVITY:ASSEMBLY', sub: 'Work activity' },
+  };
+  const item = map[type];
+  if (!item) return res.status(400).send('Unknown command type');
+  res.type('html').send(renderCommandBarcodePrintPage(item.title, item.barcode, item.sub));
 });
 
 app.get('/manager/tank-print', (req, res) => {
