@@ -1,30 +1,33 @@
 'use strict';
 
-require('dotenv').config();
-
 const { Pool } = require('pg');
+const {
+  createPoolOptions,
+  logDatabaseBootInfo,
+  formatDbError,
+  withDbRetry,
+} = require('./db-config');
 
-if (!process.env.DATABASE_URL) {
-  console.error('❌ DATABASE_URL missing');
-  process.exit(1);
-}
+logDatabaseBootInfo();
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined,
+const pool = new Pool(createPoolOptions());
+
+pool.on('error', (err) => {
+  console.error('[db] pool error:', formatDbError(err));
 });
 
-if (String(process.env.NODE_ENV || '').toLowerCase() !== 'production') {
-  console.log('DB connected:', `${String(process.env.DATABASE_URL || '').slice(0, 30)}...`);
-}
-
 async function withClient(fn) {
-  const client = await pool.connect();
-  try {
-    return await fn(client);
-  } finally {
-    client.release();
-  }
+  return withDbRetry(
+    async () => {
+      const client = await pool.connect();
+      try {
+        return await fn(client);
+      } finally {
+        client.release();
+      }
+    },
+    { label: 'script', maxAttempts: 3, delayMs: 1500 }
+  );
 }
 
 async function closePool() {
@@ -35,4 +38,5 @@ module.exports = {
   pool,
   withClient,
   closePool,
+  withDbRetry,
 };
