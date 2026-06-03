@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex,nofollow" />
+    <title>QA Summary Report — QA/QC Kiosk</title>
+    <meta name="theme-color" content="#1f4f7a" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <link rel="icon" href="/icons/icon-192.png" type="image/png" />
+    <link rel="stylesheet" href="/qa-qc.css" />
+  </head>
+  <body class="qa-qc-page">
+    <div class="qa-shell">
+      <header class="qa-topbar">
+        <button id="btnExitKiosk" type="button" class="qa-btn-exit">Exit</button>
+        <div class="qa-header-content">
+          <div class="qa-topbar-block qa-topbar-block--left">
+            <span class="qa-topbar-label">Project No.</span>
+            <strong id="hdrProjectNo" class="qa-topbar-value">—</strong>
+          </div>
+          <div class="qa-topbar-block qa-topbar-block--right">
+            <span class="qa-topbar-label qa-topbar-label--title">QA Summary Report</span>
+            <strong id="hdrReportId" class="qa-topbar-value qa-topbar-value--report">—</strong>
+          </div>
+        </div>
+      </header>
+
+      <div class="qa-frame">
+      <nav class="qa-tabs" aria-label="QA report sections">
+        <button type="button" class="qa-tab is-active" data-tab="project">
+          <span class="qa-tab-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+              <line x1="8" y1="13" x2="16" y2="13" />
+              <line x1="8" y1="17" x2="13" y2="17" />
+            </svg>
+          </span>
+          <span class="qa-tab-label">Project</span>
+        </button>
+        <button type="button" class="qa-tab" data-tab="domes">
+          <span class="qa-tab-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="4" y1="18" x2="20" y2="18" />
+              <path d="M6 18a6 6 0 0 1 12 0" />
+            </svg>
+          </span>
+          <span class="qa-tab-label">Domes</span>
+        </button>
+        <button type="button" class="qa-tab" data-tab="shells">
+          <span class="qa-tab-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="8" width="18" height="12" rx="1" />
+              <path d="M8 8V6a4 4 0 0 1 8 0v2" />
+              <line x1="3" y1="13" x2="21" y2="13" />
+            </svg>
+          </span>
+          <span class="qa-tab-label">Shells</span>
+        </button>
+        <button type="button" class="qa-tab" data-tab="summary">
+          <span class="qa-tab-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 17 7 11 10 14 13 7 17 11 21 9" />
+              <line x1="3" y1="20" x2="21" y2="20" />
+            </svg>
+          </span>
+          <span class="qa-tab-label">Summary</span>
+        </button>
+        <button type="button" class="qa-tab" data-tab="lists">
+          <span class="qa-tab-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
+              <path d="M8.5 8.5a5 5 0 0 0 0 7" />
+              <path d="M15.5 8.5a5 5 0 0 1 0 7" />
+              <path d="M5 5a9 9 0 0 0 0 14" />
+              <path d="M19 5a9 9 0 0 1 0 14" />
+            </svg>
+          </span>
+          <span class="qa-tab-label">Lists</span>
+        </button>
+      </nav>
+
+      <section id="panel-project" class="qa-panel is-active" data-panel="project">
+        <div class="qa-section-block">
+          <h2 class="qa-section-title">Project Details</h2>
+          <div class="qa-section-body">
+            <div class="qa-scan-panel">
+              <label for="qaManualScan">Scan Tank / Work Order</label>
+              <input
+                id="qaScannerTrap"
+                type="text"
+                class="qa-scanner-trap"
+                tabindex="0"
+                inputmode="none"
+                autocomplete="off"
+                autocorrect="off"
+                autocapitalize="off"
+                spellcheck="false"
+                readonly
+                aria-label="Barcode scanner input"
+              />
+              <div class="qa-scan-row">
+                <input
+                  id="qaManualScan"
+                  type="text"
+                  autocomplete="off"
+                  placeholder="TANK_1006, 1006, WORKORDER:2026-700-, PROJECT:…"
+                />
+                <button id="qaScanBtn" type="button" class="qa-scan-btn">Scan</button>
+              </div>
+              <p id="qaLastScan" class="qa-last-scan">Last scan: —</p>
+              <input type="hidden" id="scannedBarcode" name="scannedBarcode" value="" />
+              <input type="hidden" id="scannedTank" name="scannedTank" value="" />
+            </div>
+            <div class="qa-grid qa-grid--project">
+              <div class="qa-field qa-field--full">
+                <label for="projectName">Project Name</label>
+                <input id="projectName" name="projectName" type="text" autocomplete="off" />
+              </div>
+              <div class="qa-field">
+                <label for="projectNo">Project No.</label>
+                <input id="projectNo" name="projectNo" type="text" autocomplete="off" />
+              </div>
+              <div class="qa-field">
+                <label for="reportId">Report ID</label>
+                <input id="reportId" name="reportId" type="text" autocomplete="off" class="qa-input-readonly" />
+              </div>
+              <div class="qa-field qa-field--half">
+                <label for="diameter">Diameter</label>
+                <input id="diameter" name="diameter" type="text" autocomplete="off" />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="qa-section-block qa-section">
+          <h2 class="qa-section-title">Sign Off</h2>
+          <div class="qa-section-body">
+            <div class="qa-grid qa-grid--pair">
+              <div class="qa-field">
+                <label for="signedBy">Signed By</label>
+                <input id="signedBy" name="signedBy" type="text" autocomplete="off" />
+              </div>
+              <div class="qa-field">
+                <label for="signDate">Date</label>
+                <input id="signDate" name="signDate" type="date" />
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="panel-domes" class="qa-panel" data-panel="domes">
+        <div class="qa-section-block">
+          <h2 class="qa-section-title">Domes Inspection</h2>
+          <div class="qa-section-body">
+            <p class="qa-placeholder">Local draft notes for dome inspections (not saved to database yet).</p>
+            <div class="qa-field qa-field-spaced">
+              <label for="domesNotes">Dome Notes</label>
+              <textarea id="domesNotes" name="domesNotes" placeholder="Enter dome inspection notes…"></textarea>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="panel-shells" class="qa-panel" data-panel="shells">
+        <div class="qa-section-block">
+          <h2 class="qa-section-title">Shells Inspection</h2>
+          <div class="qa-section-body">
+            <p class="qa-placeholder">Local draft notes for shell inspections (not saved to database yet).</p>
+            <div class="qa-field qa-field-spaced">
+              <label for="shellsNotes">Shell Notes</label>
+              <textarea id="shellsNotes" name="shellsNotes" placeholder="Enter shell inspection notes…"></textarea>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="panel-summary" class="qa-panel" data-panel="summary">
+        <div class="qa-section-block">
+          <h2 class="qa-section-title">Summary</h2>
+          <div class="qa-section-body">
+            <div class="qa-field">
+              <label for="summaryNotes">Summary Notes</label>
+              <textarea id="summaryNotes" name="summaryNotes" placeholder="Overall QA/QC summary…"></textarea>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="panel-lists" class="qa-panel" data-panel="lists">
+        <div class="qa-section-block">
+          <h2 class="qa-section-title">Lists</h2>
+          <div class="qa-section-body">
+            <div class="qa-field">
+              <label for="listsNotes">Checklist / List Items</label>
+              <textarea id="listsNotes" name="listsNotes" placeholder="One item per line…"></textarea>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <footer class="qa-actions">
+        <button id="btnNew" type="button" class="qa-action-btn qa-action-btn--new">New</button>
+        <button id="btnCsv" type="button" class="qa-action-btn qa-action-btn--csv">CSV</button>
+        <button id="btnPrint" type="button" class="qa-action-btn qa-action-btn--print">Print/PDF</button>
+      </footer>
+      </div>
+    </div>
+
+    <div id="qaToast" class="qa-toast" role="status" aria-live="polite"></div>
+    <script src="/qa-qc.js"></script>
+  </body>
+</html>

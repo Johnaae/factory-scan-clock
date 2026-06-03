@@ -4,12 +4,13 @@
   "description": "Lightweight barcode employee IN/OUT clock for small factory offices",
   "main": "server.js",
   "scripts": {
-    "dev": "node -r dotenv/config server.js",
+    "dev": "node server.js",
     "start": "node server.js",
-    "migrate": "node -r dotenv/config scripts/migrate.js",
-    "seed": "node -r dotenv/config scripts/seed.js",
-    "backup": "node -r dotenv/config scripts/backup.js",
-    "backup:daily": "node -r dotenv/config scripts/backup.js --daily"
+    "migrate": "node scripts/migrate.js",
+    "seed": "node scripts/seed.js",
+    "backup": "node scripts/backup.js",
+    "backup:daily": "node scripts/backup.js --daily",
+    "test:finish-workflow": "node scripts/test-finish-workflow.js"
   },
   "keywords": [
     "barcode",

@@ -1,7 +1,5 @@
 'use strict';
 
-require('dotenv').config();
-
 const { withClient, closePool } = require('./db');
 
 const MIGRATION_SQL = `
@@ -42,7 +40,7 @@ CREATE TABLE IF NOT EXISTS scan_logs (
   employee_id BIGINT REFERENCES employees(id) ON DELETE SET NULL,
   employee_code TEXT NOT NULL,
   employee_name TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('IN','OUT')),
+  status TEXT NOT NULL CHECK (status IN ('IN','OUT','STOP')),
   note TEXT,
   note_category TEXT,
   note_value TEXT,
@@ -59,6 +57,32 @@ CREATE INDEX IF NOT EXISTS idx_tanks_tank_number ON tanks(tank_number);
 CREATE INDEX IF NOT EXISTS idx_scan_logs_employee_code ON scan_logs(employee_code);
 CREATE INDEX IF NOT EXISTS idx_scan_logs_scanned_at ON scan_logs(scanned_at);
 CREATE INDEX IF NOT EXISTS idx_scan_logs_tank_number ON scan_logs(tank_number);
+
+CREATE TABLE IF NOT EXISTS job_finish_events (
+  id BIGSERIAL PRIMARY KEY,
+  event_type TEXT NOT NULL DEFAULT 'FINISH_JOB',
+  employee_id BIGINT REFERENCES employees(id) ON DELETE SET NULL,
+  employee_code TEXT NOT NULL,
+  employee_name TEXT NOT NULL,
+  tank_id BIGINT REFERENCES tanks(id) ON DELETE SET NULL,
+  tank_number TEXT NOT NULL,
+  activity_code TEXT,
+  activity_name TEXT NOT NULL,
+  area_name TEXT,
+  started_at TIMESTAMPTZ NOT NULL,
+  finished_at TIMESTAMPTZ NOT NULL,
+  duration_minutes INTEGER NOT NULL DEFAULT 0,
+  kiosk_user TEXT,
+  scan_source TEXT,
+  finish_out_log_id BIGINT UNIQUE,
+  finish_in_log_id BIGINT,
+  job_in_log_id BIGINT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_finish_events_employee_code ON job_finish_events(employee_code);
+CREATE INDEX IF NOT EXISTS idx_job_finish_events_tank_number ON job_finish_events(tank_number);
+CREATE INDEX IF NOT EXISTS idx_job_finish_events_finished_at ON job_finish_events(finished_at DESC);
 `;
 
 async function run() {

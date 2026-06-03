@@ -14,6 +14,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/status-styles.css" />
   </head>
   <body>
     <header class="topbar">
@@ -293,7 +294,7 @@
           <div class="payroll-section-head-main">
             <h2 class="card-title">Daily Work &amp; Payroll</h2>
             <p class="card-kicker">
-              Paid time from <strong>IN→OUT</strong> scan pairs today (server date). Incomplete pairs excluded. Hours rounded to whole hours;
+              Paid time from <strong>IN→OUT</strong> scan pairs today (STOP pauses paid time). Incomplete pairs excluded. Hours rounded to whole hours;
               wage = hours × hourly rate.
             </p>
           </div>
@@ -373,6 +374,35 @@
         <section class="card">
           <div class="card-header card-header-rows">
             <div class="card-header-main">
+              <h2 class="card-title">Recent Finished Jobs</h2>
+              <p class="card-kicker">Completed jobs from kiosk Finish Job scans — today by default</p>
+            </div>
+            <div class="card-header-tools card-header-tools-stack retain-focus">
+              <label for="mainFinishedJobsAreaFilter" class="sr-only">Filter by area</label>
+              <select id="mainFinishedJobsAreaFilter" class="input-filter">
+                <option value="ALL" selected>All areas</option>
+                <option value="Fabrication">Fabrication</option>
+                <option value="Assembly">Assembly</option>
+                <option value="QA/QC">QA/QC</option>
+                <option value="Shipping & Handling">Shipping & Handling</option>
+              </select>
+              <label class="manager-inline-check">
+                <input id="mainFinishedJobsTodayOnly" type="checkbox" checked />
+                Today only
+              </label>
+              <button id="mainRefreshFinishedJobsBtn" class="btn btn-sm" type="button">Refresh</button>
+            </div>
+          </div>
+          <div class="card-body">
+            <div id="mainFinishedJobsBody" class="manager-finish-jobs-list">
+              <p class="muted">Loading finished jobs…</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-header card-header-rows">
+            <div class="card-header-main">
               <h2 class="card-title">Recent scan logs</h2>
               <p class="card-kicker">Newest first — latest scan highlighted briefly</p>
             </div>
@@ -381,6 +411,7 @@
                 <button type="button" class="chip chip-active" data-log-filter="all" id="logChipAll">All</button>
                 <button type="button" class="chip" data-log-filter="IN" id="logChipIn">IN</button>
                 <button type="button" class="chip" data-log-filter="OUT" id="logChipOut">OUT</button>
+                <button type="button" class="chip" data-log-filter="STOP" id="logChipStop">STOP</button>
               </div>
               <label class="sr-only" for="logsFilter">Search logs</label>
               <input type="search" id="logsFilter" class="input-filter" placeholder="Search name, code…" autocomplete="off" />
@@ -408,6 +439,8 @@
       </div>
     </main>
 
+    <script src="/status-styles.js"></script>
+    <script src="/finished-jobs-dashboard.js?v=6"></script>
     <script src="/app.js"></script>
     <script src="/pwa.js"></script>
   </body>

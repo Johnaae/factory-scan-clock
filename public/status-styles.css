@@ -1,0 +1,119 @@
+/**
+ * Shared scan status colors — IN green, OUT gray, STOP orange/yellow, ERROR red.
+ * Include after page stylesheets on dashboard, manager, summary, and kiosk.
+ */
+:root {
+  --status-in-fg: #15803d;
+  --status-in-bg: #dcfce7;
+  --status-in-border: rgba(34, 197, 94, 0.28);
+
+  --status-out-fg: #475569;
+  --status-out-bg: #f1f5f9;
+  --status-out-border: rgba(100, 116, 139, 0.28);
+
+  --status-stop-fg: #92400e;
+  --status-stop-bg: #fef3c7;
+  --status-stop-border: rgba(217, 119, 6, 0.32);
+
+  --status-err-fg: #b91c1c;
+  --status-err-bg: #fee2e2;
+  --status-err-border: rgba(239, 68, 68, 0.32);
+}
+
+.badge-in,
+.status-badge.in {
+  border-color: var(--status-in-border);
+  color: var(--status-in-fg);
+  background: linear-gradient(180deg, var(--success-soft, #ecfdf5), var(--status-in-bg));
+}
+
+.badge-out,
+.status-badge.out {
+  border-color: var(--status-out-border);
+  color: var(--status-out-fg);
+  background: linear-gradient(180deg, #f8fafc, var(--status-out-bg));
+}
+
+.badge-stop,
+.status-badge.stop {
+  border-color: var(--status-stop-border);
+  color: var(--status-stop-fg);
+  background: linear-gradient(180deg, #fffbeb, var(--status-stop-bg));
+}
+
+.badge-err {
+  border-color: var(--status-err-border);
+  color: var(--status-err-fg);
+  background: linear-gradient(180deg, var(--danger-soft, #fef2f2), var(--status-err-bg));
+}
+
+.result-pill.pill-in {
+  background: linear-gradient(180deg, var(--success-soft, #ecfdf5) 0%, var(--status-in-bg) 100%);
+  border-color: var(--status-in-border);
+  color: var(--status-in-fg);
+}
+
+.result-pill.pill-out {
+  background: linear-gradient(180deg, #f8fafc 0%, var(--status-out-bg) 100%);
+  border-color: var(--status-out-border);
+  color: var(--status-out-fg);
+  box-shadow: 0 8px 24px rgba(100, 116, 139, 0.12);
+}
+
+.result-pill.pill-stop {
+  background: linear-gradient(180deg, #fffbeb 0%, var(--status-stop-bg) 100%);
+  border-color: var(--status-stop-border);
+  color: var(--status-stop-fg);
+  box-shadow: 0 8px 24px rgba(217, 119, 6, 0.15);
+}
+
+.result-pill.pill-err {
+  background: linear-gradient(180deg, var(--danger-soft, #fef2f2) 0%, var(--status-err-bg) 100%);
+  border-color: var(--status-err-border);
+  color: var(--status-err-fg);
+  box-shadow: 0 8px 24px rgba(239, 68, 68, 0.2);
+}
+
+.last-scan-avatar.is-in {
+  background: linear-gradient(145deg, #2dd4bf 0%, var(--success, #16a34a) 45%, #134e4a 100%);
+  box-shadow: 0 16px 40px rgba(13, 148, 136, 0.26), var(--shadow-inset, inset 0 1px 0 rgba(255, 255, 255, 0.35));
+}
+
+.last-scan-avatar.is-out {
+  background: linear-gradient(145deg, #94a3b8 0%, #64748b 45%, #334155 100%);
+  box-shadow: 0 16px 40px rgba(100, 116, 139, 0.22), var(--shadow-inset, inset 0 1px 0 rgba(255, 255, 255, 0.35));
+}
+
+.last-scan-avatar.is-stop {
+  background: linear-gradient(145deg, #fcd34d 0%, #d97706 45%, #92400e 100%);
+  box-shadow: 0 16px 40px rgba(217, 119, 6, 0.24), var(--shadow-inset, inset 0 1px 0 rgba(255, 255, 255, 0.35));
+}
+
+.scan-note-badge.is-in {
+  background: rgba(22, 163, 74, 0.18);
+  color: var(--status-in-fg);
+  border: 1px solid rgba(22, 163, 74, 0.35);
+}
+
+.scan-note-badge.is-out {
+  background: rgba(100, 116, 139, 0.14);
+  color: var(--status-out-fg);
+  border: 1px solid rgba(100, 116, 139, 0.32);
+}
+
+.current-worker-status--in {
+  color: var(--status-in-fg);
+}
+
+.current-worker-status--out {
+  color: var(--status-out-fg);
+}
+
+.current-worker-status--stop {
+  color: var(--status-stop-fg);
+}
+
+.current-worker-stop {
+  color: #b45309;
+  font-weight: 700;
+}

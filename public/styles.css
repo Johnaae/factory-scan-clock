@@ -693,13 +693,18 @@ a:hover {
 }
 
 #scanRoot.state-out .scan-hero-glow {
-  background: radial-gradient(circle at 50% 40%, rgba(252, 165, 165, 0.58) 0%, rgba(239, 68, 68, 0.4) 45%, transparent 74%);
+  background: radial-gradient(circle at 50% 40%, rgba(148, 163, 184, 0.5) 0%, rgba(100, 116, 139, 0.35) 45%, transparent 74%);
   animation: scanGlowOut 1.8s ease-in-out infinite;
 }
 
-#scanRoot.state-err .scan-hero-glow {
-  background: radial-gradient(circle at 50% 40%, rgba(251, 191, 36, 0.5) 0%, rgba(234, 88, 12, 0.35) 45%, transparent 74%);
+#scanRoot.state-stop .scan-hero-glow {
+  background: radial-gradient(circle at 50% 40%, rgba(251, 191, 36, 0.52) 0%, rgba(217, 119, 6, 0.38) 45%, transparent 74%);
   animation: scanGlowErr 2s ease-in-out infinite;
+}
+
+#scanRoot.state-err .scan-hero-glow {
+  background: radial-gradient(circle at 50% 40%, rgba(252, 165, 165, 0.55) 0%, rgba(239, 68, 68, 0.38) 45%, transparent 74%);
+  animation: scanGlowOut 1.8s ease-in-out infinite;
 }
 
 @keyframes scanGlowIdle {
@@ -788,7 +793,7 @@ a:hover {
   height: min-content;
 }
 
-#scanRoot:not(.state-in):not(.state-out):not(.state-err) .scan-wait-title {
+#scanRoot:not(.state-in):not(.state-out):not(.state-stop):not(.state-err) .scan-wait-title {
   animation: scanTitlePulse 2.8s ease-in-out infinite;
 }
 
@@ -898,21 +903,30 @@ a:hover {
 }
 
 .state-out .feedback-card {
-  box-shadow: 0 28px 70px rgba(239, 68, 68, 0.22), 0 0 0 1px rgba(255, 255, 255, 0.75) inset;
-  border-color: rgba(252, 165, 165, 0.42);
+  box-shadow: 0 28px 70px rgba(100, 116, 139, 0.18), 0 0 0 1px rgba(255, 255, 255, 0.75) inset;
+  border-color: rgba(148, 163, 184, 0.38);
 }
 
 .state-out .feedback-card::before {
-  background: linear-gradient(90deg, transparent, rgba(252, 165, 165, 0.55), transparent);
+  background: linear-gradient(90deg, transparent, rgba(148, 163, 184, 0.5), transparent);
+}
+
+.state-stop .feedback-card {
+  box-shadow: 0 28px 70px rgba(217, 119, 6, 0.18), 0 0 0 1px rgba(255, 255, 255, 0.75) inset;
+  border-color: rgba(251, 191, 36, 0.42);
+}
+
+.state-stop .feedback-card::before {
+  background: linear-gradient(90deg, transparent, rgba(251, 191, 36, 0.55), transparent);
 }
 
 .state-err .feedback-card {
-  box-shadow: 0 28px 70px rgba(234, 88, 12, 0.18), 0 0 0 1px rgba(255, 255, 255, 0.75) inset;
-  border-color: rgba(251, 191, 36, 0.4);
+  box-shadow: 0 28px 70px rgba(239, 68, 68, 0.2), 0 0 0 1px rgba(255, 255, 255, 0.75) inset;
+  border-color: rgba(252, 165, 165, 0.42);
 }
 
 .state-err .feedback-card::before {
-  background: linear-gradient(90deg, transparent, rgba(251, 191, 36, 0.55), transparent);
+  background: linear-gradient(90deg, transparent, rgba(252, 165, 165, 0.55), transparent);
 }
 
 .result-pill {
@@ -939,17 +953,17 @@ a:hover {
 }
 
 .result-pill.pill-out {
+  background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+  border-color: rgba(100, 116, 139, 0.32);
+  color: #475569;
+  box-shadow: 0 8px 24px rgba(100, 116, 139, 0.12);
+}
+
+.result-pill.pill-err {
   background: linear-gradient(180deg, var(--danger-soft) 0%, #fee2e2 100%);
   border-color: rgba(239, 68, 68, 0.32);
   color: var(--danger-2);
   box-shadow: 0 8px 24px rgba(239, 68, 68, 0.2);
-}
-
-.result-pill.pill-err {
-  background: linear-gradient(180deg, #fff7ed 0%, #ffedd5 100%);
-  border-color: rgba(234, 88, 12, 0.32);
-  color: #c2410c;
-  box-shadow: 0 8px 24px rgba(234, 88, 12, 0.15);
 }
 
 .result-name {
@@ -991,15 +1005,21 @@ a:hover {
 }
 
 .state-out .scan-stage {
-  border-color: rgba(252, 165, 165, 0.42);
-  background: linear-gradient(168deg, rgba(254, 242, 242, 0.96) 0%, rgba(254, 226, 226, 0.8) 42%, rgba(248, 250, 252, 0.95) 100%);
-  box-shadow: var(--shadow-inset), 0 0 0 1px rgba(239, 68, 68, 0.1);
+  border-color: rgba(148, 163, 184, 0.42);
+  background: linear-gradient(168deg, rgba(248, 250, 252, 0.96) 0%, rgba(241, 245, 249, 0.82) 42%, rgba(248, 250, 252, 0.95) 100%);
+  box-shadow: var(--shadow-inset), 0 0 0 1px rgba(100, 116, 139, 0.1);
+}
+
+.state-stop .scan-stage {
+  border-color: rgba(251, 191, 36, 0.42);
+  background: linear-gradient(168deg, rgba(255, 251, 235, 0.96) 0%, rgba(254, 243, 199, 0.78) 42%, rgba(248, 250, 252, 0.95) 100%);
+  box-shadow: var(--shadow-inset), 0 0 0 1px rgba(217, 119, 6, 0.12);
 }
 
 .state-err .scan-stage {
-  border-color: rgba(251, 191, 36, 0.42);
-  background: linear-gradient(168deg, rgba(255, 247, 237, 0.96) 0%, rgba(254, 243, 199, 0.65) 40%, rgba(248, 250, 252, 0.95) 100%);
-  box-shadow: var(--shadow-inset), 0 0 0 1px rgba(234, 88, 12, 0.1);
+  border-color: rgba(252, 165, 165, 0.42);
+  background: linear-gradient(168deg, rgba(254, 242, 242, 0.96) 0%, rgba(254, 226, 226, 0.8) 42%, rgba(248, 250, 252, 0.95) 100%);
+  box-shadow: var(--shadow-inset), 0 0 0 1px rgba(239, 68, 68, 0.1);
 }
 
 .footer-note {
@@ -1143,8 +1163,13 @@ a:hover {
 }
 
 .last-scan-avatar.is-out {
-  background: linear-gradient(145deg, #fb7185 0%, var(--danger) 45%, #881337 100%);
-  box-shadow: 0 16px 40px rgba(225, 29, 72, 0.26), var(--shadow-inset);
+  background: linear-gradient(145deg, #94a3b8 0%, #64748b 45%, #334155 100%);
+  box-shadow: 0 16px 40px rgba(100, 116, 139, 0.22), var(--shadow-inset);
+}
+
+.last-scan-avatar.is-stop {
+  background: linear-gradient(145deg, #fcd34d 0%, #d97706 45%, #92400e 100%);
+  box-shadow: 0 16px 40px rgba(217, 119, 6, 0.24), var(--shadow-inset);
 }
 
 .last-scan-avatar.is-in {
@@ -1487,9 +1512,9 @@ tbody tr:last-child td {
 }
 
 .badge-out {
-  border-color: rgba(239, 68, 68, 0.28);
-  color: var(--danger-2);
-  background: linear-gradient(180deg, var(--danger-soft), #fee2e2);
+  border-color: rgba(100, 116, 139, 0.28);
+  color: #475569;
+  background: linear-gradient(180deg, #f8fafc, #f1f5f9);
 }
 
 .badge-muted {
@@ -2191,9 +2216,9 @@ textarea {
 }
 
 .scan-note-badge.is-out {
-  background: rgba(220, 38, 38, 0.14);
-  color: #b91c1c;
-  border: 1px solid rgba(220, 38, 38, 0.32);
+  background: rgba(100, 116, 139, 0.14);
+  color: #475569;
+  border: 1px solid rgba(100, 116, 139, 0.32);
 }
 
 .scan-note-hint {
@@ -2801,4 +2826,132 @@ textarea:focus-visible,
     max-height: none !important;
     overflow: visible !important;
   }
+}
+
+.manager-inline-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted, #64748b);
+  white-space: nowrap;
+}
+
+.manager-finish-jobs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.fj-compact-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.fj-row {
+  margin: 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.fj-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  background: #f8fafc;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  font-size: 0.875rem;
+  line-height: 1.35;
+  color: #0f172a;
+}
+
+.fj-row-head:hover {
+  background: #f1f5f9;
+}
+
+.fj-row-summary {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+
+.fj-row-chevron {
+  flex-shrink: 0;
+  font-size: 0.65rem;
+  color: #64748b;
+  transition: transform 0.15s ease;
+}
+
+.fj-row-chevron.is-open {
+  transform: rotate(180deg);
+}
+
+.fj-row-details {
+  padding: 6px 10px 8px;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  color: #334155;
+  border-top: 1px solid #e2e8f0;
+  background: #fff;
+}
+
+.fj-row-details p {
+  margin: 0 0 2px;
+}
+
+.fj-detail-label {
+  font-weight: 700;
+  color: #64748b;
+}
+
+.fj-show-more-wrap {
+  margin-top: 4px;
+  text-align: center;
+}
+
+.manager-finish-card {
+  margin: 0;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid #bbf7d0;
+  background: linear-gradient(180deg, #f0fdf4 0%, #ffffff 100%);
+}
+
+.manager-finish-card__title {
+  margin: 0 0 10px;
+  font-size: 1rem;
+  font-weight: 800;
+  line-height: 1.35;
+  color: #14532d;
+}
+
+.manager-finish-card__line {
+  margin: 0 0 4px;
+  font-size: 0.92rem;
+  color: #334155;
+}
+
+.manager-finish-jobs-error {
+  color: #b91c1c;
+  font-weight: 700;
+}
+
+.manager-finish-card__label {
+  display: inline-block;
+  min-width: 4.5rem;
+  font-weight: 700;
+  color: #64748b;
 }

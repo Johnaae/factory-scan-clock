@@ -209,9 +209,13 @@ function render(rows, payroll) {
     .map((r) => {
       const active = r.is_active ? '<span class="badge badge-in">Yes</span>' : '<span class="badge badge-muted">No</span>';
       const st =
-        r.current_status === 'IN'
-          ? '<span class="badge badge-in">IN</span>'
-          : '<span class="badge badge-out">OUT</span>';
+        typeof FactoryStatus !== 'undefined'
+          ? FactoryStatus.statusBadgeHtml(r.current_status)
+          : r.current_status === 'IN'
+            ? '<span class="badge badge-in">IN</span>'
+            : r.current_status === 'STOP'
+              ? '<span class="badge badge-stop">STOP</span>'
+              : '<span class="badge badge-out">OUT</span>';
       const pr = payMap.get(r.employee_code);
       const w = pr ? Number(pr.wage) || 0 : 0;
       const hi = maxWage > 0 && w >= maxWage * 0.85 && w > 0 ? ' row-wage-high' : '';

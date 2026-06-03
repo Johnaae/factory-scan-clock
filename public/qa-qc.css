@@ -1,0 +1,545 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body.qa-qc-page {
+  margin: 0;
+  min-height: 100vh;
+  background: #eef2f7;
+  color: #1f2937;
+  font-family: "Segoe UI", Tahoma, Arial, sans-serif;
+  font-size: 13px;
+  line-height: 1.35;
+  overflow-x: hidden;
+}
+
+.qa-shell {
+  max-width: 680px;
+  margin: 0 auto;
+  padding: 6px 6px 10px;
+}
+
+/* ── Header: 2-column grid row ── */
+.qa-topbar {
+  position: relative;
+  background: #1f4f7a;
+  color: #fff;
+  padding: 20px 8px 8px 8px;
+  border: 1px solid #173d60;
+  border-radius: 4px 4px 0 0;
+  overflow: visible;
+}
+
+.qa-header-content {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: end;
+  width: 100%;
+  column-gap: 6px;
+}
+
+.qa-topbar-block {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.qa-topbar-block--left {
+  text-align: left;
+  align-items: flex-start;
+}
+
+.qa-topbar-block--right {
+  text-align: right;
+  align-items: flex-end;
+}
+
+.qa-topbar-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #9ec4e0;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+
+.qa-topbar-label--title {
+  text-transform: none;
+  letter-spacing: 0.01em;
+  font-size: 11px;
+  font-weight: 500;
+  color: #b8d4ea;
+}
+
+.qa-topbar-value {
+  font-size: clamp(14px, 4vw, 22px);
+  font-weight: 700;
+  color: #fff;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+.qa-topbar-value--report {
+  color: #6eb8e8;
+  font-size: clamp(11px, 3.2vw, 20px);
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.qa-btn-exit {
+  position: absolute;
+  top: 4px;
+  right: 5px;
+  z-index: 2;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  background: rgba(0, 0, 0, 0.12);
+  color: #fff;
+  border-radius: 3px;
+  padding: 2px 7px;
+  font-size: 9px;
+  font-weight: 600;
+  cursor: pointer;
+  line-height: 1.2;
+}
+
+.qa-btn-exit:hover {
+  background: rgba(0, 0, 0, 0.22);
+}
+
+/* ── Unified frame ── */
+.qa-frame {
+  border: 1px solid #c5ced8;
+  border-top: none;
+  border-radius: 0 0 4px 4px;
+  background: #f7f9fb;
+  overflow: hidden;
+}
+
+/* ── Tab bar ── */
+.qa-tabs {
+  display: flex;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  background: #1e5280;
+  border-bottom: 1px solid #173d60;
+}
+
+.qa-tab {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  border: none;
+  border-right: 1px solid rgba(0, 0, 0, 0.18);
+  background: #1e5280;
+  color: #8eb8d8;
+  border-radius: 0;
+  padding: 3px 2px 2px;
+  font-size: 10px;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: center;
+  min-height: 44px;
+  line-height: 1.1;
+}
+
+.qa-tab:last-child {
+  border-right: none;
+}
+
+.qa-tab-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  color: inherit;
+}
+
+.qa-tab-icon svg {
+  display: block;
+  width: 20px;
+  height: 20px;
+}
+
+.qa-tab-label {
+  display: block;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.qa-tab:hover {
+  background: #245b8a;
+  color: #c5dff0;
+}
+
+.qa-tab.is-active {
+  background: #4f9ccc;
+  color: #fff;
+}
+
+.qa-tab.is-active .qa-tab-icon {
+  color: #fff;
+}
+
+/* ── Form panels ── */
+.qa-panel {
+  display: none;
+  background: #f7f9fb;
+  border: none;
+  padding: 0;
+}
+
+.qa-panel.is-active {
+  display: block;
+}
+
+.qa-section-block {
+  border-bottom: 1px solid #d5dde6;
+}
+
+.qa-section-block:last-child {
+  border-bottom: none;
+}
+
+.qa-section-title {
+  margin: 0;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  background: #2d6698;
+  border-bottom: 1px solid #245b8a;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  text-align: center;
+}
+
+.qa-section-body {
+  padding: 10px 12px 12px;
+  background: #f7f9fb;
+}
+
+/* ── QA barcode scan (QA/QC page only) ── */
+.qa-scan-panel {
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #d5dde6;
+}
+
+.qa-scan-panel > label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #5a7a96;
+}
+
+.qa-scanner-trap {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.qa-scan-row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.qa-scan-row input {
+  flex: 1;
+  min-width: 0;
+  min-height: 32px;
+  border: 1px solid #b8c4cf;
+  border-radius: 4px;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 13px;
+  background: #fff;
+  color: #1f2937;
+}
+
+.qa-scan-row input:focus {
+  outline: none;
+  border-color: #4f9ccc;
+}
+
+.qa-scan-btn {
+  flex-shrink: 0;
+  min-width: 56px;
+  border: 1px solid #1a4568;
+  border-radius: 4px;
+  background: #245b8a;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0 10px;
+}
+
+.qa-scan-btn:hover {
+  background: #1f4f7a;
+}
+
+.qa-last-scan {
+  margin: 6px 0 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: #245b8a;
+}
+
+.qa-section + .qa-section {
+  margin-top: 0;
+}
+
+/* Project Details: name full | no+id row | diameter left */
+.qa-grid--project {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 12px;
+}
+
+.qa-field--full {
+  grid-column: 1 / -1;
+}
+
+.qa-field--half {
+  grid-column: 1 / 2;
+}
+
+.qa-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.qa-grid--pair {
+  grid-template-columns: 1.4fr 1fr;
+  gap: 10px 12px;
+}
+
+.qa-field {
+  margin: 0;
+}
+
+.qa-field label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #5a7a96;
+}
+
+.qa-field input,
+.qa-field textarea,
+.qa-field select {
+  width: 100%;
+  min-height: 32px;
+  border: 1px solid #b8c4cf;
+  border-radius: 4px;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 13px;
+  background: #fff;
+  color: #1f2937;
+}
+
+.qa-input-readonly {
+  background: #e4e9ef !important;
+  color: #4a5568;
+}
+
+.qa-field input:focus,
+.qa-field textarea:focus,
+.qa-field select:focus {
+  outline: none;
+  border-color: #4f9ccc;
+}
+
+.qa-field textarea {
+  min-height: 72px;
+  padding-top: 7px;
+  resize: vertical;
+}
+
+.qa-placeholder {
+  margin: 0 0 6px;
+  padding: 0;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.qa-field-spaced {
+  margin-top: 0;
+}
+
+/* ── Action buttons ── */
+.qa-actions {
+  display: flex;
+  width: 100%;
+  gap: 8px;
+  padding: 10px 12px 12px;
+  background: #eef2f7;
+  border-top: 1px solid #d5dde6;
+}
+
+.qa-action-btn {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 36px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: center;
+  line-height: 1;
+}
+
+.qa-action-btn--new {
+  background: #d8dde3;
+  border-color: #b8c4cf;
+  color: #1f2937;
+}
+
+.qa-action-btn--new:hover {
+  background: #cdd3da;
+}
+
+.qa-action-btn--csv {
+  background: #245b8a;
+  border-color: #1a4568;
+  color: #fff;
+}
+
+.qa-action-btn--csv:hover {
+  background: #1f4f7a;
+}
+
+.qa-action-btn--print {
+  background: #3d8b40;
+  border-color: #2f6b32;
+  color: #fff;
+}
+
+.qa-action-btn--print:hover {
+  background: #357a38;
+}
+
+.qa-toast {
+  position: fixed;
+  top: 8px;
+  right: 8px;
+  background: #245b8a;
+  color: #fff;
+  padding: 6px 10px;
+  border-radius: 3px;
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+  z-index: 20;
+  border: 1px solid #1a4568;
+}
+
+.qa-toast.show {
+  opacity: 1;
+}
+
+@media (min-width: 480px) {
+  .qa-tab-label {
+    font-size: 11px;
+  }
+
+  .qa-tab-icon,
+  .qa-tab-icon svg {
+    width: 22px;
+    height: 22px;
+  }
+
+  .qa-tab {
+    min-height: 46px;
+  }
+}
+
+@media (max-width: 320px) {
+  .qa-header-content {
+    grid-template-columns: 1fr 1fr;
+    column-gap: 4px;
+  }
+
+  .qa-topbar-value {
+    font-size: 13px;
+  }
+
+  .qa-topbar-value--report {
+    font-size: 10px;
+  }
+
+  .qa-topbar-label,
+  .qa-topbar-label--title {
+    font-size: 9px;
+  }
+}
+
+@media print {
+  body.qa-qc-page {
+    background: #fff;
+    font-size: 11px;
+  }
+
+  .qa-shell {
+    max-width: none;
+    padding: 0;
+  }
+
+  .qa-tabs,
+  .qa-actions,
+  .qa-btn-exit,
+  .qa-toast {
+    display: none !important;
+  }
+
+  .qa-topbar,
+  .qa-frame {
+    border-radius: 0;
+  }
+
+  .qa-topbar,
+  .qa-section-title {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .qa-panel {
+    display: block !important;
+    page-break-inside: avoid;
+  }
+
+  .qa-panel:not(.is-active) {
+    display: block !important;
+    margin-top: 10px;
+  }
+}

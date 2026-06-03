@@ -218,19 +218,21 @@ function playError() {
   playWebBeep(196, 'error');
 }
 
-btnSound.addEventListener('click', () => {
-  soundEnabled = true;
-  void primeWebAudio().then(() => {
-    playWebBeep(523.25, 'success');
+if (btnSound) {
+  btnSound.addEventListener('click', () => {
+    soundEnabled = true;
+    void primeWebAudio().then(() => {
+      playWebBeep(523.25, 'success');
+    });
+    btnSound.textContent = 'Sound on';
+    btnSound.classList.add('is-on');
+    btnSound.disabled = true;
+    focusScanSoon();
   });
-  btnSound.textContent = 'Sound on';
-  btnSound.classList.add('is-on');
-  btnSound.disabled = true;
-  focusScanSoon();
-});
+}
 
 function setScanState(kind) {
-  scanRoot.classList.remove('state-in', 'state-out', 'state-err');
+  scanRoot.classList.remove('state-in', 'state-out', 'state-stop', 'state-err');
   if (kind) scanRoot.classList.add(kind);
 }
 
@@ -246,7 +248,7 @@ function showWaiting() {
   scanWait.classList.remove('is-hidden');
   scanWait.setAttribute('aria-hidden', 'false');
   scanPill.textContent = '';
-  scanPill.classList.remove('pill-in', 'pill-out', 'pill-err');
+  scanPill.classList.remove('pill-in', 'pill-out', 'pill-stop', 'pill-err');
   scanName.textContent = '';
   scanCode.textContent = '';
   scanTime.textContent = '';
@@ -254,7 +256,7 @@ function showWaiting() {
 
 function showResult({ pillText, pillClass, name, codeLine, timeLine, state }) {
   scanPill.textContent = pillText;
-  scanPill.classList.remove('pill-in', 'pill-out', 'pill-err');
+  scanPill.classList.remove('pill-in', 'pill-out', 'pill-stop', 'pill-err');
   if (pillClass) scanPill.classList.add(pillClass);
   scanName.textContent = name;
   scanCode.textContent = codeLine || '';
@@ -535,13 +537,22 @@ function escapeHtml(s) {
     .replaceAll("'", '&#039;');
 }
 
+function statusBadgeFor(value, options) {
+  if (typeof FactoryStatus !== 'undefined') return FactoryStatus.statusBadgeHtml(value, options);
+  const st = String(value || '').toUpperCase();
+  const cls = st === 'IN' ? 'badge-in' : st === 'STOP' ? 'badge-stop' : st === 'ERROR' ? 'badge-err' : 'badge-out';
+  const lg = options && options.large ? ' badge-lg' : '';
+  return `<span class="badge${lg} ${cls}">${st || 'OUT'}</span>`;
+}
+
 function renderLastScan(log) {
   if (!log) {
     lastScanCard.innerHTML = '<div class="muted" style="font-weight:700">No scans yet.</div>';
     return;
   }
-  const badgeClass = log.status === 'IN' ? 'badge-in' : 'badge-out';
-  const avClass = log.status === 'IN' ? 'is-in' : 'is-out';
+  const meta = typeof FactoryStatus !== 'undefined' ? FactoryStatus.statusMeta(log.status) : null;
+  const badgeClass = meta ? meta.badgeClass : log.status === 'IN' ? 'badge-in' : 'badge-out';
+  const avClass = meta ? meta.avatarClass : log.status === 'IN' ? 'is-in' : 'is-out';
   const ini = initialsFromName(log.employee_name);
   const nd = formatNoteDisplay(log);
   const noteLine = nd ? `<div class="last-scan-note">${escapeHtml(nd)}</div>` : '';
@@ -582,13 +593,14 @@ function renderStatusTable() {
   const rows = employees
     .map((e) => {
       const active = e.is_active ? '<span class="badge badge-in">Active</span>' : '<span class="badge badge-muted">Inactive</span>';
-      const st = e.is_active
-        ? e.current_status === 'IN'
-          ? '<span class="badge badge-in">IN</span>'
-          : '<span class="badge badge-out">OUT</span>'
-        : '<span class="badge badge-muted">—</span>';
+      const st = e.is_active ? statusBadgeFor(e.current_status) : '<span class="badge badge-muted">—</span>';
       const daily = Number.isFinite(Number(e.daily_hours)) ? Number(e.daily_hours).toFixed(2) : '0.00';
-      const elapsed = e.currently_working && e.current_session_start ? formatElapsed(e.elapsed_seconds || 0) : '—';
+      const elapsed =
+        e.current_status === 'STOP' && e.elapsed_paused
+          ? `${formatElapsed(e.elapsed_seconds || 0)} (paused)`
+          : e.currently_working && e.current_session_start
+            ? formatElapsed(e.elapsed_seconds || 0)
+            : '—';
       const last = e.is_active ? formatDisplayDateTime(e.last_scan_at) : '—';
       const rowHi = highlightEmployeeCode && e.code === highlightEmployeeCode ? ' row-employee-updated' : '';
       return `<tr class="${rowHi}">
@@ -624,7 +636,8 @@ function renderLogsTable() {
 
   const body = logs
     .map((l) => {
-      const badge = l.status === 'IN' ? 'badge-in' : 'badge-out';
+      const badgeMeta = typeof FactoryStatus !== 'undefined' ? FactoryStatus.statusMeta(l.status) : null;
+      const badge = badgeMeta ? badgeMeta.badgeClass : l.status === 'IN' ? 'badge-in' : 'badge-out';
       const hi = lastLogId && l.id === lastLogId ? ' row-highlight' : '';
       const nd = formatNoteDisplay(l);
       const noteCell = nd ? `<span class="log-note-pill">${escapeHtml(nd)}</span>` : '<span class="muted">—</span>';
@@ -682,7 +695,14 @@ function renderPayrollFromData(p) {
 }
 
 async function refreshDashboard() {
-  const [status, logs] = await Promise.all([getJson('/api/status'), getJson('/api/logs?limit=80')]);
+  let status;
+  let logs;
+  try {
+    [status, logs] = await Promise.all([getJson('/api/status'), getJson('/api/logs?limit=80')]);
+  } catch (err) {
+    console.error('[dashboard] refresh status/logs failed', err);
+    return;
+  }
 
   let payroll = null;
   try {
@@ -889,11 +909,11 @@ function tickClock() {
   if (clockDateEl) clockDateEl.textContent = formatClockDate(now);
   clockEl.textContent = formatTime(now);
   for (const e of lastEmployees) {
-    if (e && e.currently_working && e.current_session_start) {
+    if (e && e.currently_working && e.current_session_start && !e.elapsed_paused) {
       const ms = Date.now() - new Date(e.current_session_start).getTime();
       e.elapsed_seconds = Math.max(0, Math.floor(ms / 1000));
-    } else if (e) {
-      e.elapsed_seconds = 0;
+    } else if (e && !e.elapsed_paused) {
+      e.elapsed_seconds = e.elapsed_seconds || 0;
     }
   }
   renderStatusTable();
@@ -905,14 +925,16 @@ function triggerScanFromCode(rawValue) {
   void handleScan(code);
 }
 
-scanInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
-    e.preventDefault();
-    const code = scanInput.value;
-    scanInput.value = '';
-    triggerScanFromCode(code);
-  }
-});
+if (scanInput) {
+  scanInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const code = scanInput.value;
+      scanInput.value = '';
+      triggerScanFromCode(code);
+    }
+  });
+}
 
 if (statusFilter) {
   statusFilter.addEventListener('input', () => renderStatusTable());
@@ -935,7 +957,7 @@ if (logsChips) {
     const btn = e.target.closest('[data-log-filter]');
     if (!btn) return;
     const v = btn.getAttribute('data-log-filter');
-    if (v === 'all' || v === 'IN' || v === 'OUT') {
+    if (v === 'all' || v === 'IN' || v === 'OUT' || v === 'STOP') {
       logsStatusFilter = v;
       syncLogFilterChips();
       renderLogsTable();
@@ -952,6 +974,7 @@ async function handleScan(code) {
       lastLogId = data.log_id || null;
       const st = data.status;
       const emp = data.employee;
+      const scanMeta = typeof FactoryStatus !== 'undefined' ? FactoryStatus.statusMeta(st) : null;
       highlightEmployeeCode = emp.code;
       window.clearTimeout(highlightTimer);
       highlightTimer = window.setTimeout(() => {
@@ -960,11 +983,11 @@ async function handleScan(code) {
       }, 12000);
       showResult({
         pillText: st,
-        pillClass: st === 'IN' ? 'pill-in' : 'pill-out',
+        pillClass: scanMeta ? scanMeta.pillClass : st === 'IN' ? 'pill-in' : 'pill-out',
         name: emp.name,
         codeLine: `Badge ${emp.code}`,
         timeLine: formatDisplayDateTime(data.scanned_at),
-        state: st === 'IN' ? 'state-in' : 'state-out',
+        state: typeof FactoryStatus !== 'undefined' ? FactoryStatus.scanStateClass(st) : st === 'IN' ? 'state-in' : 'state-out',
       });
       playSuccess();
       const lid = Number(data.log_id);
@@ -983,6 +1006,7 @@ async function handleScan(code) {
       const msg =
         (data && data.error === 'unknown_employee' && 'Unknown barcode.') ||
         (data && data.error === 'inactive_employee' && 'Employee is inactive.') ||
+        (data && data.error === 'employee_stopped' && 'Employee is on STOP. Use the kiosk to resume or clock out.') ||
         (data && data.message) ||
         'Invalid scan.';
       showResult({

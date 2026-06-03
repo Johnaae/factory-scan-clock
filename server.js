@@ -1,6 +1,6 @@
 'use strict';
 
-require('dotenv').config();
+require('./scripts/load-env');
 
 const path = require('path');
 const crypto = require('crypto');
@@ -9,27 +9,28 @@ const session = require('express-session');
 const pg = require('pg');
 const PgSession = require('connect-pg-simple')(session);
 const PDFDocument = require('pdfkit');
+const {
+  createPoolOptions,
+  logDatabaseBootInfo,
+  withDbRetry,
+  formatDbError,
+} = require('./scripts/db-config');
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const app = express();
 
 app.set('trust proxy', 1);
 
-if (!process.env.DATABASE_URL) {
-  console.error('❌ DATABASE_URL missing');
-  process.exit(1);
-}
+logDatabaseBootInfo();
+
 if (!process.env.SESSION_SECRET) {
   console.error('❌ SESSION_SECRET missing');
   process.exit(1);
 }
 
-const pool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-});
+const pool = new pg.Pool(createPoolOptions());
 pool.on('error', (err) => {
-  console.error('[session-store] pool error:', err && err.message ? err.message : err);
+  console.error('[db] pool error:', formatDbError(err));
 });
 
 const pgSessionStore = new PgSession({
@@ -40,8 +41,7 @@ const pgSessionStore = new PgSession({
 
 console.log('Session store: Postgres');
 console.log('[boot] session-store:', pgSessionStore && pgSessionStore.constructor ? pgSessionStore.constructor.name : 'missing');
-console.log('NODE_ENV:', process.env.NODE_ENV);
-console.log('Has DB:', Boolean(process.env.DATABASE_URL));
+console.log('NODE_ENV:', process.env.NODE_ENV || 'development');
 
 app.use(express.json({ limit: '32kb' }));
 app.use(
@@ -99,7 +99,7 @@ CREATE TABLE IF NOT EXISTS scan_logs (
   employee_id BIGINT REFERENCES employees(id) ON DELETE SET NULL,
   employee_code TEXT NOT NULL,
   employee_name TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('IN','OUT')),
+  status TEXT NOT NULL CHECK (status IN ('IN','OUT','STOP')),
   note TEXT,
   note_category TEXT,
   note_value TEXT,
@@ -116,22 +116,56 @@ CREATE INDEX IF NOT EXISTS idx_tanks_tank_number ON tanks(tank_number);
 CREATE INDEX IF NOT EXISTS idx_scan_logs_employee_code ON scan_logs(employee_code);
 CREATE INDEX IF NOT EXISTS idx_scan_logs_scanned_at ON scan_logs(scanned_at);
 CREATE INDEX IF NOT EXISTS idx_scan_logs_tank_number ON scan_logs(tank_number);
+
+CREATE TABLE IF NOT EXISTS job_finish_events (
+  id BIGSERIAL PRIMARY KEY,
+  event_type TEXT NOT NULL DEFAULT 'FINISH_JOB',
+  employee_id BIGINT REFERENCES employees(id) ON DELETE SET NULL,
+  employee_code TEXT NOT NULL,
+  employee_name TEXT NOT NULL,
+  tank_id BIGINT REFERENCES tanks(id) ON DELETE SET NULL,
+  tank_number TEXT NOT NULL,
+  activity_code TEXT,
+  activity_name TEXT NOT NULL,
+  area_name TEXT,
+  started_at TIMESTAMPTZ NOT NULL,
+  finished_at TIMESTAMPTZ NOT NULL,
+  duration_minutes INTEGER NOT NULL DEFAULT 0,
+  kiosk_user TEXT,
+  scan_source TEXT,
+  finish_out_log_id BIGINT UNIQUE,
+  finish_in_log_id BIGINT,
+  job_in_log_id BIGINT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_finish_events_employee_code ON job_finish_events(employee_code);
+CREATE INDEX IF NOT EXISTS idx_job_finish_events_tank_number ON job_finish_events(tank_number);
+CREATE INDEX IF NOT EXISTS idx_job_finish_events_finished_at ON job_finish_events(finished_at DESC);
+CREATE INDEX IF NOT EXISTS idx_job_finish_events_area ON job_finish_events(area_name);
 `;
 
 async function runPostgresSchema() {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    await client.query(MIGRATION_SQL);
-    await client.query('COMMIT');
-    await normalizeTankStatusesInDb();
-    console.log('[migration] Postgres schema ready');
-  } catch (e) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw e;
-  } finally {
-    client.release();
-  }
+  await withDbRetry(
+    async () => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(MIGRATION_SQL);
+        await client.query('COMMIT');
+        await normalizeTankStatusesInDb();
+        await migrateStopStatusConstraint();
+        await backfillFinishJobEventsFromScanLogs();
+        console.log('[migration] Postgres schema ready');
+      } catch (e) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw e;
+      } finally {
+        client.release();
+      }
+    },
+    { label: 'schema', maxAttempts: 5, delayMs: 2000 }
+  );
 }
 
 const ROLE = {
@@ -145,6 +179,7 @@ const DEFAULT_USER_PASSWORDS = {
   kiosk_area_a: process.env.DEFAULT_KIOSK_PASSWORD_A || 'kioskA123',
   kiosk_area_b: process.env.DEFAULT_KIOSK_PASSWORD_B || 'kioskB123',
   kiosk_area_c: process.env.DEFAULT_KIOSK_PASSWORD_C || 'kioskC123',
+  kiosk_area_d: process.env.DEFAULT_KIOSK_PASSWORD_D || 'kioskD123',
 };
 
 /** Default kiosk PINs (hashed in DB). */
@@ -152,14 +187,87 @@ const DEFAULT_KIOSK_PINS = {
   kiosk_area_a: '1111',
   kiosk_area_b: '2222',
   kiosk_area_c: '3333',
+  kiosk_area_d: '4444',
 };
 
-/** Maps UI area label → users.username for KIOSK accounts. */
-const KIOSK_AREA_TO_USERNAME = {
-  'Area A': 'kiosk_area_a',
-  'Area B': 'kiosk_area_b',
-  'Area C': 'kiosk_area_c',
+/** Production kiosk areas (display names). */
+const KIOSK_PRODUCTION_AREAS = ['Fabrication', 'Assembly', 'QA/QC', 'Shipping & Handling'];
+
+/** Legacy area labels → current production area (logs / filters). */
+const LEGACY_KIOSK_AREA_NAMES = {
+  'Area A': 'Fabrication',
+  'Area B': 'Assembly',
+  'Area C': 'QA/QC',
 };
+
+/** Kiosk user profiles (username stable for existing DBs; area_name is display label). */
+const KIOSK_AREA_PROFILES = [
+  {
+    username: 'kiosk_area_a',
+    passwordKey: 'kiosk_area_a',
+    pinKey: 'kiosk_area_a',
+    area_name: 'Fabrication',
+    station_name: 'Fabrication Kiosk',
+    pinField: 'area_a_pin',
+  },
+  {
+    username: 'kiosk_area_b',
+    passwordKey: 'kiosk_area_b',
+    pinKey: 'kiosk_area_b',
+    area_name: 'Assembly',
+    station_name: 'Assembly Kiosk',
+    pinField: 'area_b_pin',
+  },
+  {
+    username: 'kiosk_area_c',
+    passwordKey: 'kiosk_area_c',
+    pinKey: 'kiosk_area_c',
+    area_name: 'QA/QC',
+    station_name: 'QA/QC Kiosk',
+    pinField: 'area_c_pin',
+  },
+  {
+    username: 'kiosk_area_d',
+    passwordKey: 'kiosk_area_d',
+    pinKey: 'kiosk_area_d',
+    area_name: 'Shipping & Handling',
+    station_name: 'Shipping & Handling Kiosk',
+    pinField: 'area_d_pin',
+  },
+];
+
+/** Maps UI area label → users.username for KIOSK PIN login. */
+const KIOSK_AREA_TO_USERNAME = Object.fromEntries(
+  KIOSK_AREA_PROFILES.map((p) => [p.area_name, p.username])
+);
+for (const [legacy, current] of Object.entries(LEGACY_KIOSK_AREA_NAMES)) {
+  const username = KIOSK_AREA_TO_USERNAME[current];
+  if (username) KIOSK_AREA_TO_USERNAME[legacy] = username;
+}
+
+function normalizeKioskAreaName(area) {
+  const s = String(area || '').trim();
+  return LEGACY_KIOSK_AREA_NAMES[s] || s;
+}
+
+function displayKioskAreaName(area) {
+  return normalizeKioskAreaName(area) || area || '-';
+}
+
+function isQaQcKioskArea(area) {
+  return normalizeKioskAreaName(area) === 'QA/QC';
+}
+
+function kioskLandingPathForUser(kioskUser) {
+  if (kioskUser && isQaQcKioskArea(kioskUser.area_name)) return '/qa-qc';
+  return '/kiosk';
+}
+
+function areaMatchesFilter(rowArea, filter) {
+  if (!filter || filter === 'ALL') return true;
+  const normalized = normalizeKioskAreaName(rowArea);
+  return normalized === filter || String(rowArea || '').trim() === filter;
+}
 
 const PIN_FAIL_WINDOW_MS = 60 * 1000;
 const PIN_FAIL_MAX = 5;
@@ -251,47 +359,221 @@ function normalizeNoteValue(raw) {
   return s.slice(0, 20);
 }
 
-/** WORK (clock-in activity), REASON (clock-out), SWITCH (internal segment change). */
+/** WORK (production), REASON (clock-out), STOP (downtime), SWITCH (segment change), AVAILABLE (clocked in, no job). */
 function normalizeNoteCategory(raw) {
   if (raw === undefined || raw === null) return null;
   const u = String(raw).trim().toUpperCase();
-  if (u === 'WORK' || u === 'REASON' || u === 'SWITCH') return u;
+  if (u === 'WORK' || u === 'REASON' || u === 'SWITCH' || u === 'STOP' || u === 'AVAILABLE') return u;
   return null;
 }
 
+const KIOSK_ACTIVITIES_BY_AREA = {
+  Fabrication: [
+    { code: 'WINDING', label: 'Winding', barcode: 'ACTIVITY:WINDING' },
+    { code: 'SHELL_CREATION', label: 'Shell Creation', barcode: 'ACTIVITY:SHELL_CREATION' },
+  ],
+  Assembly: [
+    { code: 'INSTALLING_FITTINGS', label: 'Installing Fittings', barcode: 'ACTIVITY:INSTALLING_FITTINGS' },
+    { code: 'BAFFLES', label: 'Baffles', barcode: 'ACTIVITY:BAFFLES' },
+    { code: 'BOTTOMS', label: 'Bottoms', barcode: 'ACTIVITY:BOTTOMS' },
+    { code: 'ATTACHING_SHELL_SECTION', label: 'Attaching Shell Section', barcode: 'ACTIVITY:ATTACHING_SHELL_SECTION' },
+    { code: 'SECONDARY_COMPONENTS', label: 'Secondary Components', barcode: 'ACTIVITY:SECONDARY_COMPONENTS' },
+  ],
+  'QA/QC': [{ code: 'QAQC', label: 'QA/QC', barcode: 'ACTIVITY:QAQC' }],
+  'Shipping & Handling': [
+    { code: 'SHIPPING', label: 'Shipping', barcode: 'ACTIVITY:SHIPPING' },
+    { code: 'HANDLING', label: 'Handling', barcode: 'ACTIVITY:HANDLING' },
+  ],
+};
+
 const KIOSK_ACTIVITY_LABELS = {
-  RUN_MACHINE: 'Run Machine',
-  ASSEMBLE: 'Assemble',
-  ASSEMBLY: 'Assemble',
-  QUALITY: 'Quality Check',
-  QUALITY_CHECK: 'Quality Check',
-  SURFACE_SANDING: 'Surface Sanding',
-  SANDING: 'Surface Sanding',
-  PAINTING: 'Painting',
-  CUTTING: 'Cutting',
-  WELDING: 'Welding',
-  MATERIAL_HANDLING: 'Material Handling',
-  OTHER: 'Other',
+  WINDING: 'Winding',
+  SHELL_CREATION: 'Shell Creation',
+  INSTALLING_FITTINGS: 'Installing Fittings',
+  BAFFLES: 'Baffles',
+  BOTTOMS: 'Bottoms',
+  ATTACHING_SHELL_SECTION: 'Attaching Shell Section',
+  SECONDARY_COMPONENTS: 'Secondary Components',
+  QAQC: 'QA/QC',
+  SHIPPING: 'Shipping',
+  HANDLING: 'Handling',
+  /** Legacy activity codes (old scan logs). */
+  FABRICATING: 'Fabrication',
+  ASSEMBLY: 'Assembly',
+  ASSEMBLE: 'Assembly',
+  QA_QC: 'QA/QC',
+  QUALITY: 'QA/QC',
+  QUALITY_CHECK: 'QA/QC',
+  SHIPPING_HANDLING: 'Shipping & Handling',
+  KIT_UP: 'Kit Up',
+  /** Legacy activity code (now a STOP reason). */
+  CLEAN_UP: 'Clean Up',
 };
 
-const KIOSK_REASON_LABELS = {
-  BREAK: 'Break',
-  LUNCH: 'Lunch',
-  BATHROOM: 'Bathroom',
-  END_SHIFT: 'End Shift',
-  MACHINE_ISSUE: 'Machine Issue',
-  WAITING_MATERIAL: 'Waiting Material',
-  MAINTENANCE: 'Maintenance',
-  SETUP_CHANGE: 'Setup Change',
-  OTHER: 'Other',
+const KIOSK_ACTIVITY_CODE_ALIASES = {
+  QA_QC: 'QAQC',
+  QUALITY: 'QAQC',
+  QUALITY_CHECK: 'QAQC',
 };
 
-function kioskActivityLabel(raw) {
+/** Build label → code map from area activity definitions (single source of truth). */
+const KIOSK_ACTIVITY_LABEL_TO_CODE = Object.create(null);
+for (const areaActs of Object.values(KIOSK_ACTIVITIES_BY_AREA)) {
+  for (const a of areaActs) {
+    KIOSK_ACTIVITY_LABEL_TO_CODE[a.code] = a.code;
+    KIOSK_ACTIVITY_LABEL_TO_CODE[a.label.toUpperCase()] = a.code;
+    KIOSK_ACTIVITY_LABEL_TO_CODE[a.label.toUpperCase().replace(/\//g, '')] = a.code;
+  }
+}
+
+function normalizeActivityCode(raw) {
   const code = String(raw || '')
     .trim()
     .toUpperCase()
-    .replace(/^ACTIVITY[:_]/, '');
-  if (!code) return null;
+    .replace(/^ACTIVITY[:_]/, '')
+    .replace(/\//g, '')
+    .replace(/\s+/g, '_');
+  if (!code) return '';
+  return KIOSK_ACTIVITY_CODE_ALIASES[code] || code;
+}
+
+/** Resolve scanned value (code, label, or barcode payload) to canonical activity code for an area. */
+function resolveActivityCodeForArea(areaName, activityRaw) {
+  const area = normalizeKioskAreaName(areaName);
+  const allowed = getKioskActivitiesForArea(area);
+  if (!allowed.length) return normalizeActivityCode(activityRaw);
+
+  const fromCode = normalizeActivityCode(activityRaw);
+  if (allowed.some((a) => a.code === fromCode)) return fromCode;
+
+  const labelKey = String(activityRaw || '')
+    .trim()
+    .toUpperCase();
+  const fromLabel = KIOSK_ACTIVITY_LABEL_TO_CODE[labelKey];
+  if (fromLabel && allowed.some((a) => a.code === fromLabel)) return fromLabel;
+
+  const labelNoSlash = labelKey.replace(/\//g, '');
+  const fromLabelNoSlash = KIOSK_ACTIVITY_LABEL_TO_CODE[labelNoSlash];
+  if (fromLabelNoSlash && allowed.some((a) => a.code === fromLabelNoSlash)) return fromLabelNoSlash;
+
+  return fromCode;
+}
+
+function getKioskActivitiesForArea(areaName) {
+  const area = normalizeKioskAreaName(areaName);
+  if (!area || area === 'Office') {
+    return KIOSK_PRODUCTION_AREAS.flatMap((a) => KIOSK_ACTIVITIES_BY_AREA[a] || []);
+  }
+  return KIOSK_ACTIVITIES_BY_AREA[area] ? [...KIOSK_ACTIVITIES_BY_AREA[area]] : [];
+}
+
+function activityAllowedInArea(areaName, activityRaw) {
+  const area = normalizeKioskAreaName(areaName);
+  if (!area || area === 'Office') return true;
+  const allowed = KIOSK_ACTIVITIES_BY_AREA[area];
+  if (!allowed) return true;
+  const code = resolveActivityCodeForArea(area, activityRaw);
+  return allowed.some((a) => a.code === code);
+}
+
+function validateKioskActivityForAuth(auth, activityRaw) {
+  if (!auth || String(auth.role || '').toUpperCase() !== ROLE.KIOSK) return { ok: true };
+  const area = auth.area_name;
+  const allowedCodes = getKioskActivitiesForArea(area).map((a) => a.code);
+  const resolvedCode = resolveActivityCodeForArea(area, activityRaw);
+  if (!activityRaw) {
+    console.log('[kiosk-activity] Area:', displayKioskAreaName(area));
+    console.log('[kiosk-activity] Scanned activity:', activityRaw);
+    console.log('[kiosk-activity] Allowed activities:', allowedCodes.join(', '));
+    console.log('[kiosk-activity] Validation result: FAIL (missing activity)');
+    return { ok: false, message: 'Activity is required.' };
+  }
+  const ok = activityAllowedInArea(area, activityRaw);
+  console.log('[kiosk-activity] Area:', displayKioskAreaName(area));
+  console.log('[kiosk-activity] Scanned activity:', activityRaw);
+  console.log('[kiosk-activity] Allowed activities:', allowedCodes.join(', '));
+  console.log(
+    '[kiosk-activity] Validation result:',
+    ok ? 'PASS' : 'FAIL',
+    `(resolved: ${resolvedCode || 'none'})`
+  );
+  if (!ok) {
+    return {
+      ok: false,
+      message: `Activity not allowed at ${displayKioskAreaName(area)} kiosk.`,
+    };
+  }
+  return { ok: true };
+}
+
+const KIOSK_STOP_LABELS = {
+  CLEAN_UP: 'Clean Up',
+  LUNCH: 'Lunch',
+  BREAK: 'Break',
+  MAINTENANCE_DOWNTIME: 'Maintenance/Downtime',
+  MAINTENANCE: 'Maintenance/Downtime',
+  MATERIAL: 'Material',
+};
+
+const KIOSK_STOP_CODE_ALIASES = {
+  CLEANUP: 'CLEAN_UP',
+};
+
+/** UI / PDF colors: IN green, OUT gray, STOP orange, ERROR red. */
+const SCAN_STATUS_COLORS = {
+  IN: '#15803d',
+  OUT: '#64748b',
+  STOP: '#d97706',
+  ERROR: '#b91c1c',
+};
+
+function pdfStatusColor(status) {
+  const s = String(status || '').toUpperCase();
+  return SCAN_STATUS_COLORS[s] || SCAN_STATUS_COLORS.OUT;
+}
+
+/**
+ * Production IN start time for the session ending at `stopRow` (exclusive of STOP duration).
+ * @param {Array<{status:string, scanned_at:string, id?: number}>} logsAsc
+ * @param {{ status: string, scanned_at: string, id?: number }} stopRow
+ * @returns {number | null}
+ */
+function activeSessionStartMsBeforeStop(logsAsc, stopRow) {
+  const stopMs = new Date(stopRow.scanned_at).getTime();
+  if (Number.isNaN(stopMs)) return null;
+  const stopId = stopRow.id != null ? Number(stopRow.id) : null;
+  let sessionStart = null;
+  for (const row of logsAsc) {
+    const t = new Date(row.scanned_at).getTime();
+    if (Number.isNaN(t)) continue;
+    const sameStop =
+      t === stopMs &&
+      (stopId == null || row.id == null || Number(row.id) === stopId || row === stopRow);
+    if (sameStop) return sessionStart;
+    const st = String(row.status || '').toUpperCase();
+    if (st === 'IN' && isProductionInRow(row)) sessionStart = t;
+    else if (st === 'OUT' || st === 'STOP') sessionStart = null;
+  }
+  return sessionStart;
+}
+
+const KIOSK_REASON_LABELS = {
+  END_SHIFT: 'End Shift',
+};
+
+/** Lunch/Break/Clean Up legacy REASON barcodes → STOP when on an active job. */
+const KIOSK_LEGACY_PAUSE_REASON_CODES = new Set(['LUNCH', 'BREAK', 'CLEAN_UP']);
+
+function kioskActivityLabel(raw) {
+  const code = normalizeActivityCode(raw);
+  if (!code) {
+    const labelKey = String(raw || '')
+      .trim()
+      .toUpperCase();
+    const mapped = KIOSK_ACTIVITY_LABEL_TO_CODE[labelKey] || KIOSK_ACTIVITY_LABEL_TO_CODE[labelKey.replace(/\//g, '')];
+    if (mapped) return KIOSK_ACTIVITY_LABELS[mapped] || mapped.replace(/_/g, ' ').slice(0, 20);
+    return null;
+  }
   return KIOSK_ACTIVITY_LABELS[code] || code.replace(/_/g, ' ').slice(0, 20);
 }
 
@@ -302,6 +584,174 @@ function kioskReasonLabel(raw) {
     .replace(/^REASON[:_]/, '');
   if (!code) return null;
   return KIOSK_REASON_LABELS[code] || code.replace(/_/g, ' ').slice(0, 20);
+}
+
+function normalizeStopReasonCode(raw) {
+  const code = String(raw || '')
+    .trim()
+    .toUpperCase()
+    .replace(/^STOP[:_]/, '')
+    .replace(/^REASON[:_]/, '')
+    .replace(/^ACTIVITY[:_]/, '')
+    .replace(/\s+/g, '_');
+  return KIOSK_STOP_CODE_ALIASES[code] || code;
+}
+
+function kioskStopLabel(raw) {
+  const code = normalizeStopReasonCode(raw);
+  if (!code) return null;
+  return KIOSK_STOP_LABELS[code] || code.replace(/_/g, ' ').slice(0, 20);
+}
+
+function isLegacyPauseReasonCode(raw) {
+  const code = normalizeStopReasonCode(raw);
+  return KIOSK_LEGACY_PAUSE_REASON_CODES.has(code);
+}
+
+function isProductionInRow(row) {
+  if (!row || String(row.status || '').toUpperCase() !== 'IN') return false;
+  const cat = String(row.note_category || '').toUpperCase();
+  if (cat === 'AVAILABLE' || cat === 'WAITING') return false;
+  return !cat || cat === 'WORK';
+}
+
+function hasActiveProductionJob(activeIn) {
+  if (!activeIn || !isProductionInRow(activeIn)) return false;
+  const tank = normalizeTankNumber(activeIn.tank_number || '');
+  if (!tank) return false;
+  const act = workActivityLabelFromInRow(activeIn);
+  return !!(act && act !== '-');
+}
+
+/**
+ * Production activity + tank to restore after STOP (from STOP row and prior IN scans).
+ * @param {string} code
+ * @returns {Promise<{ activity: string|null, tank: string|null, stop_reason: string|null }|null>}
+ */
+async function getLastActiveWorkContext(code) {
+  const employee = await getEmployeeByCode(code);
+  if (!employee) return null;
+  const eid = Number(employee.id);
+  if (!Number.isInteger(eid) || eid <= 0) return null;
+
+  const { rows } = await pool.query(
+    `SELECT status, scanned_at, id, tank_number, note_value, note, note_category
+     FROM scan_logs
+     WHERE employee_id = $1
+     ORDER BY scanned_at DESC, id DESC
+     LIMIT 100`,
+    [eid]
+  );
+  if (!rows.length) return null;
+
+  const latest = rows[0];
+  if (String(latest.status || '').toUpperCase() !== 'STOP') return null;
+
+  const stopReason =
+    latest.note_value != null && String(latest.note_value).trim() !== ''
+      ? String(latest.note_value).trim()
+      : null;
+
+  let activity = null;
+  let tank = normalizeTankNumber(latest.tank_number || '') || null;
+
+  const noteText = latest.note != null ? String(latest.note).trim() : '';
+  const noteVal = latest.note_value != null ? String(latest.note_value).trim() : '';
+  const noteCat = String(latest.note_category || '').toUpperCase();
+
+  if (noteCat === 'STOP' && noteText && noteText !== '-' && noteText !== noteVal) {
+    activity = noteText;
+  } else if (noteText && noteText !== noteVal && noteText !== '-') {
+    activity = noteText;
+  }
+
+  if (!activity || !tank) {
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      const st = String(row.status || '').toUpperCase();
+      if (st === 'STOP') continue;
+      if (st === 'IN' && isProductionInRow(row)) {
+        if (!activity) {
+          const label = workActivityLabelFromInRow(row);
+          if (label && label !== '-') activity = label;
+        }
+        if (!tank) tank = normalizeTankNumber(row.tank_number || '') || null;
+        if (activity && tank) break;
+      }
+      if (st === 'OUT') break;
+    }
+  }
+
+  if (!activity && !tank) return null;
+  return { activity: activity || null, tank: tank || null, stop_reason: stopReason };
+}
+
+/**
+ * Resume IN from STOP using saved work context; inserts a new IN scan log.
+ * @param {{ employee: object, code: string, auth: object|null, activity?: string|null, tank?: string|null }}
+ */
+async function resumeFromStop({ employee, code, auth, activity: activityOverride, tank: tankOverride }) {
+  const ctx = await getLastActiveWorkContext(code);
+  const activity = (activityOverride && String(activityOverride).trim()) || (ctx && ctx.activity) || null;
+  const tank = normalizeTankNumber(tankOverride || (ctx && ctx.tank) || '') || null;
+  if (!activity || !tank) {
+    return {
+      ok: false,
+      status: 400,
+      body: {
+        ok: false,
+        error: 'validation',
+        message: 'Missing resume activity or tank context.',
+      },
+    };
+  }
+  const tankRow = await ensureTankExists(tank);
+  if (tankRow && normalizeTankStatus(tankRow.status) === 'archived') {
+    return {
+      ok: false,
+      status: 403,
+      body: {
+        ok: false,
+        error: 'tank_archived',
+        message: 'This tank is archived. Restore it in Tank Management before resuming work.',
+      },
+    };
+  }
+  const row = await insertScanLogForEmployee({
+    employee,
+    code,
+    status: 'IN',
+    noteCategory: 'WORK',
+    noteValue: activity,
+    tankNumber: tank,
+    auth,
+  });
+  return {
+    ok: true,
+    body: {
+      ok: true,
+      action: 'resume_work',
+      log_id: row.id,
+      employee: { id: employee.id, code: employee.code, name: employee.name },
+      status: 'IN',
+      phase: 'IN',
+      activity,
+      tank_number: tank,
+      kiosk_message: 'Resumed previous job',
+      scanned_at: row.scanned_at,
+    },
+  };
+}
+
+async function migrateStopStatusConstraint() {
+  try {
+    await pool.query(`ALTER TABLE scan_logs DROP CONSTRAINT IF EXISTS scan_logs_status_check`);
+    await pool.query(
+      `ALTER TABLE scan_logs ADD CONSTRAINT scan_logs_status_check CHECK (status IN ('IN', 'OUT', 'STOP'))`
+    );
+  } catch (err) {
+    console.warn('[migration] scan_logs STOP status constraint:', err.message);
+  }
 }
 
 function isCommandInBarcode(normalized) {
@@ -320,6 +770,7 @@ async function insertScanLogForEmployee({
   status,
   noteCategory,
   noteValue,
+  noteText,
   tankNumber,
   auth,
   scannedAtIso,
@@ -328,6 +779,7 @@ async function insertScanLogForEmployee({
   const areaName = auth && auth.role === ROLE.KIOSK ? auth.area_name || null : null;
   const kioskUser = auth && auth.role === ROLE.KIOSK ? auth.username || null : null;
   const scannedAt = scannedAtIso || nowIso();
+  const noteCol = noteText != null && String(noteText).trim() !== '' ? String(noteText).trim() : noteValue;
   const ins = await pool.query(
     `INSERT INTO scan_logs (employee_code, employee_name, employee_id, status, scanned_at, note, note_category, note_value, tank_number, station_name, area_name, kiosk_user)
      VALUES ($1, $2, $3, $4, $5::timestamptz, $6, $7, $8, $9, $10, $11, $12)
@@ -338,7 +790,7 @@ async function insertScanLogForEmployee({
       employee.id,
       status,
       scannedAt,
-      noteValue,
+      noteCol,
       noteCategory,
       noteValue,
       tankNumber,
@@ -348,6 +800,591 @@ async function insertScanLogForEmployee({
     ]
   );
   return ins.rows[0];
+}
+
+/**
+ * Kiosk employee phase: OUT | IN | STOP (production context).
+ * @returns {Promise<{ phase: string, on_clock: boolean, currently_working: boolean, current_activity: string|null, current_tank: string|null, stop_reason: string|null, resume_activity: string|null, resume_tank: string|null }>}
+ */
+async function getEmployeeKioskWorkState(code) {
+  const paired = await getTodayPairingStateForEmployeeCode(code);
+  const latest = paired.latestRow;
+  const activeIn =
+    paired.currentlyWorking && paired.pendingInSourceRow && isProductionInRow(paired.pendingInSourceRow)
+      ? paired.pendingInSourceRow
+      : null;
+  let phase = 'OUT';
+  let stopReason = null;
+  let currentActivity = null;
+  let currentTank = null;
+  let resumeActivity = null;
+  let resumeTank = null;
+
+  if (latest) {
+    const st = String(latest.status || '').toUpperCase();
+    if (st === 'STOP') {
+      phase = 'STOP';
+      const ctx = await getLastActiveWorkContext(code);
+      stopReason = (ctx && ctx.stop_reason) || latest.note_value || null;
+      resumeActivity = ctx && ctx.activity ? ctx.activity : null;
+      resumeTank = ctx && ctx.tank ? ctx.tank : normalizeTankNumber(latest.tank_number || '') || null;
+      currentActivity = resumeActivity;
+      currentTank = resumeTank;
+    } else if (paired.currentlyWorking && String(latest.status || '').toUpperCase() === 'IN') {
+      phase = 'IN';
+      if (activeIn && hasActiveProductionJob(activeIn)) {
+        currentActivity = workActivityLabelFromInRow(activeIn);
+        currentTank = normalizeTankNumber(activeIn.tank_number || '') || null;
+      }
+    } else if (paired.currentlyWorking && activeIn && hasActiveProductionJob(activeIn)) {
+      phase = 'IN';
+      currentActivity = workActivityLabelFromInRow(activeIn);
+      currentTank = normalizeTankNumber(activeIn.tank_number || '') || null;
+    }
+  }
+
+  const onClock = phase === 'IN' || phase === 'STOP';
+  const hasJob = !!(activeIn && hasActiveProductionJob(activeIn));
+  return {
+    phase,
+    on_clock: onClock,
+    currently_working: phase === 'IN' && hasJob,
+    has_active_job: hasJob,
+    waiting_for_job: phase === 'IN' && onClock && !hasJob,
+    current_activity: currentActivity,
+    current_tank: currentTank,
+    stop_reason: stopReason,
+    resume_activity: resumeActivity,
+    resume_tank: resumeTank,
+  };
+}
+
+/**
+ * Start a production job while employee remains clocked IN (after FINISH / waiting).
+ */
+async function performAssignWorkWhileClockedIn({ employee, code, auth, activity, tank }) {
+  const tankRow = await ensureTankExists(tank);
+  if (tankRow && normalizeTankStatus(tankRow.status) === 'archived') {
+    return {
+      ok: false,
+      status: 403,
+      body: {
+        ok: false,
+        error: 'tank_archived',
+        message: 'This tank is archived. Restore it in Tank Management before assigning work.',
+      },
+    };
+  }
+  const baseMs = Date.now();
+  const outIso = new Date(baseMs).toISOString();
+  const inIso = new Date(baseMs + 15).toISOString();
+  await insertScanLogForEmployee({
+    employee,
+    code,
+    status: 'OUT',
+    noteCategory: 'SWITCH',
+    noteValue: 'ASSIGN_WORK',
+    tankNumber: null,
+    auth,
+    scannedAtIso: outIso,
+  });
+  const inRow = await insertScanLogForEmployee({
+    employee,
+    code,
+    status: 'IN',
+    noteCategory: 'WORK',
+    noteValue: activity,
+    tankNumber: tank,
+    auth,
+    scannedAtIso: inIso,
+  });
+  return {
+    ok: true,
+    action: 'assign_work',
+    log_id: inRow.id,
+    employee: { id: employee.id, code: employee.code, name: employee.name },
+    status: 'IN',
+    phase: 'IN',
+    activity,
+    tank_number: tank,
+    scanned_at: inRow.scanned_at,
+    has_active_job: true,
+    waiting_for_job: false,
+  };
+}
+
+/**
+ * Complete current tank/activity job; employee stays clocked IN (available for next job).
+ */
+async function recordFinishJobEvent({ employee, activeIn, outRow, inRow, auth, scanSource }) {
+  if (!outRow || !activeIn) return null;
+  const dup = await pool.query(`SELECT * FROM job_finish_events WHERE finish_out_log_id = $1 LIMIT 1`, [
+    Number(outRow.id),
+  ]);
+  if (dup.rows.length) return dup.rows[0];
+
+  const startedAt = activeIn.scanned_at;
+  const finishedAt = outRow.scanned_at;
+  const startMs = new Date(startedAt).getTime();
+  const finishMs = new Date(finishedAt).getTime();
+  const durationMinutes =
+    Number.isFinite(startMs) && Number.isFinite(finishMs) ? Math.max(0, Math.round((finishMs - startMs) / 60000)) : 0;
+
+  const activityName = workActivityLabelFromInRow(activeIn);
+  const tankNumber = normalizeTankNumber(outRow.tank_number || activeIn.tank_number || '') || '';
+  const areaName =
+    (auth && auth.area_name ? String(auth.area_name) : null) ||
+    (activeIn.area_name ? String(activeIn.area_name) : null) ||
+    (outRow.area_name ? String(outRow.area_name) : null);
+  const activityCode = areaName ? resolveActivityCodeForArea(areaName, activityName) : normalizeActivityCode(activityName);
+  let tankId = null;
+  if (tankNumber) {
+    const tankRow = await ensureTankExists(tankNumber);
+    if (tankRow && tankRow.id != null) tankId = Number(tankRow.id);
+  }
+  const kioskUser = auth && auth.role === ROLE.KIOSK ? auth.username || null : null;
+  const scanSrc = scanSource ? String(scanSource).trim().slice(0, 40) : 'kiosk';
+
+  const ins = await pool.query(
+    `INSERT INTO job_finish_events (
+       event_type, employee_id, employee_code, employee_name,
+       tank_id, tank_number, activity_code, activity_name,
+       area_name, started_at, finished_at, duration_minutes,
+       kiosk_user, scan_source, finish_out_log_id, finish_in_log_id, job_in_log_id
+     ) VALUES (
+       'FINISH_JOB', $1, $2, $3, $4, $5, $6, $7, $8, $9::timestamptz, $10::timestamptz, $11,
+       $12, $13, $14, $15, $16
+     )
+     ON CONFLICT (finish_out_log_id) DO NOTHING
+     RETURNING *`,
+    [
+      employee.id,
+      employee.code,
+      employee.name,
+      tankId,
+      tankNumber,
+      activityCode || null,
+      activityName,
+      areaName,
+      startedAt,
+      finishedAt,
+      durationMinutes,
+      kioskUser,
+      scanSrc,
+      Number(outRow.id),
+      inRow && inRow.id != null ? Number(inRow.id) : null,
+      activeIn.id != null ? Number(activeIn.id) : null,
+    ]
+  );
+  if (ins.rows.length) return ins.rows[0];
+  const again = await pool.query(`SELECT * FROM job_finish_events WHERE finish_out_log_id = $1 LIMIT 1`, [
+    Number(outRow.id),
+  ]);
+  return again.rows[0] || null;
+}
+
+function mapFinishJobEventRow(row) {
+  if (!row) return null;
+  const tankNumber = row.tank_number ? String(row.tank_number) : '';
+  const activityName = row.activity_name ? String(row.activity_name) : '-';
+  const employeeName = row.employee_name ? String(row.employee_name) : row.employee_code || '-';
+  const durationMinutes = Number(row.duration_minutes) || 0;
+  return {
+    id: Number(row.id),
+    event_type: String(row.event_type || 'FINISH_JOB'),
+    employee_id: row.employee_id != null ? Number(row.employee_id) : null,
+    employee_code: String(row.employee_code || ''),
+    employee_name: employeeName,
+    tank_id: row.tank_id != null ? Number(row.tank_id) : null,
+    tank_number: tankNumber,
+    activity_code: row.activity_code ? String(row.activity_code) : null,
+    activity_name: activityName,
+    area_name: row.area_name ? String(row.area_name) : null,
+    started_at: row.started_at,
+    finished_at: row.finished_at,
+    duration_minutes: durationMinutes,
+    kiosk_id: row.kiosk_user ? String(row.kiosk_user) : null,
+    scan_source: row.scan_source ? String(row.scan_source) : null,
+    employee_history_line: tankNumber
+      ? `Finished ${activityName} on Tank ${tankNumber}`
+      : `Finished ${activityName}`,
+    tank_history_line: `${employeeName} finished ${activityName}`,
+  };
+}
+
+async function backfillFinishJobEventsFromScanLogs() {
+  try {
+    const { rows: outs } = await pool.query(
+      `SELECT id, employee_id, employee_code, employee_name, scanned_at, tank_number, note, note_value,
+              area_name, kiosk_user
+       FROM scan_logs
+       WHERE UPPER(COALESCE(status, '')) = 'OUT'
+         AND UPPER(COALESCE(note_category, '')) = 'SWITCH'
+         AND UPPER(COALESCE(note_value, '')) = 'FINISH'
+         AND NOT EXISTS (SELECT 1 FROM job_finish_events e WHERE e.finish_out_log_id = scan_logs.id)
+       ORDER BY scanned_at ASC, id ASC`
+    );
+    for (const outRow of outs) {
+      const eid = outRow.employee_id != null ? Number(outRow.employee_id) : null;
+      if (!eid) continue;
+      const { rows: prior } = await pool.query(
+        `SELECT id, status, scanned_at, tank_number, note_value, note, note_category, area_name
+         FROM scan_logs
+         WHERE employee_id = $1 AND scanned_at < $2::timestamptz
+         ORDER BY scanned_at DESC, id DESC
+         LIMIT 30`,
+        [eid, outRow.scanned_at]
+      );
+      const activeIn = prior.find((r) => isProductionInRow(r));
+      if (!activeIn) continue;
+      const { rows: afterIn } = await pool.query(
+        `SELECT id FROM scan_logs
+         WHERE employee_id = $1 AND scanned_at > $2::timestamptz
+         ORDER BY scanned_at ASC, id ASC LIMIT 1`,
+        [eid, outRow.scanned_at]
+      );
+      const inRow = afterIn[0] || null;
+      const employee = {
+        id: eid,
+        code: outRow.employee_code,
+        name: outRow.employee_name,
+      };
+      await recordFinishJobEvent({
+        employee,
+        activeIn,
+        outRow,
+        inRow,
+        auth: outRow.kiosk_user ? { role: ROLE.KIOSK, username: outRow.kiosk_user, area_name: outRow.area_name } : null,
+        scanSource: 'backfill',
+      });
+    }
+  } catch (err) {
+    console.warn('[migration] finish job events backfill:', err.message);
+  }
+}
+
+async function fetchFinishJobEvents({
+  employeeCode,
+  tankNumber,
+  areaName,
+  limit = 20,
+  finishedAfter,
+  finishedBefore,
+}) {
+  const lim = Math.min(Math.max(Number(limit) || 20, 1), 100);
+  const params = [];
+  const where = [`event_type = 'FINISH_JOB'`];
+  if (employeeCode) {
+    params.push(normalizeCode(employeeCode));
+    where.push(`REPLACE(UPPER(TRIM(COALESCE(employee_code, ''))), ' ', '') = $${params.length}`);
+  }
+  if (tankNumber) {
+    params.push(normalizeTankNumber(tankNumber));
+    where.push(`UPPER(TRIM(COALESCE(tank_number, ''))) = $${params.length}`);
+  }
+  if (areaName) {
+    params.push(String(areaName).trim());
+    where.push(`TRIM(COALESCE(area_name, '')) = $${params.length}`);
+  }
+  if (finishedAfter) {
+    params.push(finishedAfter);
+    where.push(`finished_at >= $${params.length}::timestamptz`);
+  }
+  if (finishedBefore) {
+    params.push(finishedBefore);
+    where.push(`finished_at <= $${params.length}::timestamptz`);
+  }
+  params.push(lim);
+  const { rows } = await pool.query(
+    `SELECT * FROM job_finish_events
+     WHERE ${where.join(' AND ')}
+     ORDER BY finished_at DESC, id DESC
+     LIMIT $${params.length}`,
+    params
+  );
+  return rows.map(mapFinishJobEventRow).filter(Boolean);
+}
+
+function resolveFinishJobsAreaFilter(raw) {
+  const f = String(raw || '').trim();
+  if (!f || f.toUpperCase() === 'ALL') return null;
+  if (f === 'Shipping' || f === 'Shipping & Handling') return 'Shipping & Handling';
+  return normalizeKioskAreaName(f) || f;
+}
+
+async function fetchManagerFinishedJobs({ area, todayOnly, limit = 30 }) {
+  let finishedAfter;
+  let finishedBefore;
+  if (todayOnly !== false) {
+    const day = startEndOfLocalDay(localDateString());
+    if (day) {
+      finishedAfter = day.startIso;
+      finishedBefore = day.endIso;
+    }
+  }
+  const areaName = resolveFinishJobsAreaFilter(area);
+  return fetchFinishJobEvents({
+    areaName: areaName || undefined,
+    limit,
+    finishedAfter,
+    finishedBefore,
+  });
+}
+
+function mapDashboardFinishedJob(row) {
+  if (!row) return null;
+  const activityName = row.activity_name || row.activityName || '-';
+  const tankNumber = row.tank_number || row.tankNumber || '';
+  const employeeName = row.employee_name || row.employeeName || row.employee_code || row.employeeCode || '-';
+  const durationMinutes = Number(row.duration_minutes != null ? row.duration_minutes : row.durationMinutes) || 0;
+  const areaRaw = row.area_name || row.area || null;
+  return {
+    employeeCode: String(row.employee_code || row.employeeCode || ''),
+    employeeName: String(employeeName),
+    tankNumber: String(tankNumber),
+    activityName: String(activityName),
+    area: displayKioskAreaName(areaRaw),
+    finishedAt: row.finished_at || row.finishedAt || null,
+    durationMinutes,
+  };
+}
+
+async function fetchFinishedJobsFromScanLogs({ areaName, finishedAfter, finishedBefore, limit = 30 }) {
+  const lim = Math.min(Math.max(Number(limit) || 30, 1), 100);
+  const params = [];
+  const where = [
+    `UPPER(COALESCE(status, '')) = 'OUT'`,
+    `(
+      UPPER(COALESCE(note_value, '')) = 'FINISH'
+      OR UPPER(COALESCE(note, '')) = 'FINISH'
+      OR (UPPER(COALESCE(note_category, '')) = 'SWITCH' AND UPPER(COALESCE(note_value, '')) = 'FINISH')
+    )`,
+  ];
+  if (areaName) {
+    params.push(String(areaName).trim());
+    where.push(`TRIM(COALESCE(area_name, '')) = $${params.length}`);
+  }
+  if (finishedAfter) {
+    params.push(finishedAfter);
+    where.push(`scanned_at >= $${params.length}::timestamptz`);
+  }
+  if (finishedBefore) {
+    params.push(finishedBefore);
+    where.push(`scanned_at <= $${params.length}::timestamptz`);
+  }
+  params.push(lim);
+  const { rows: outs } = await pool.query(
+    `SELECT id, employee_id, employee_code, employee_name, scanned_at, tank_number, note, note_value,
+            area_name, kiosk_user
+     FROM scan_logs
+     WHERE ${where.join(' AND ')}
+     ORDER BY scanned_at DESC, id DESC
+     LIMIT $${params.length}`,
+    params
+  );
+  const jobs = [];
+  for (const outRow of outs) {
+    const eid = outRow.employee_id != null ? Number(outRow.employee_id) : null;
+    if (!eid) continue;
+    const { rows: prior } = await pool.query(
+      `SELECT id, status, scanned_at, tank_number, note_value, note, note_category, area_name
+       FROM scan_logs
+       WHERE employee_id = $1 AND scanned_at < $2::timestamptz
+       ORDER BY scanned_at DESC, id DESC
+       LIMIT 30`,
+      [eid, outRow.scanned_at]
+    );
+    const activeIn = prior.find((r) => isProductionInRow(r));
+    let activityName = activeIn ? workActivityLabelFromInRow(activeIn) : '';
+    if (!activityName || activityName === '-') {
+      const noteText = outRow.note ? String(outRow.note).trim() : '';
+      activityName = noteText && noteText.toUpperCase() !== 'FINISH' ? noteText : 'Job';
+    }
+    const tankNumber = normalizeTankNumber(outRow.tank_number || (activeIn && activeIn.tank_number) || '') || '';
+    const startedAt = activeIn ? activeIn.scanned_at : null;
+    const finishedAt = outRow.scanned_at;
+    const startMs = new Date(startedAt).getTime();
+    const finishMs = new Date(finishedAt).getTime();
+    const durationMinutes =
+      Number.isFinite(startMs) && Number.isFinite(finishMs) ? Math.max(0, Math.round((finishMs - startMs) / 60000)) : 0;
+    const areaRaw =
+      (outRow.area_name ? String(outRow.area_name) : null) ||
+      (activeIn.area_name ? String(activeIn.area_name) : null);
+    jobs.push(
+      mapDashboardFinishedJob({
+        employee_code: outRow.employee_code,
+        employee_name: outRow.employee_name,
+        tank_number: tankNumber,
+        activity_name: activityName,
+        area_name: areaRaw,
+        finished_at: finishedAt,
+        duration_minutes: durationMinutes,
+      })
+    );
+  }
+  return jobs.filter(Boolean);
+}
+
+async function fetchDashboardFinishedJobs({ area, todayOnly, limit = 30 }) {
+  let finishedAfter;
+  let finishedBefore;
+  if (todayOnly !== false) {
+    const day = startEndOfLocalDay(localDateString());
+    if (day) {
+      finishedAfter = day.startIso;
+      finishedBefore = day.endIso;
+    }
+  }
+  const areaName = resolveFinishJobsAreaFilter(area);
+  const scanJobs = await fetchFinishedJobsFromScanLogs({
+    areaName: areaName || undefined,
+    finishedAfter,
+    finishedBefore,
+    limit,
+  });
+  if (scanJobs.length) return scanJobs;
+  const eventRows = await fetchFinishJobEvents({
+    areaName: areaName || undefined,
+    limit,
+    finishedAfter,
+    finishedBefore,
+  });
+  return eventRows.map(mapDashboardFinishedJob).filter(Boolean);
+}
+
+async function fetchLastFinishByTankForWindow(startIso, endIso) {
+  const { rows } = await pool.query(
+    `SELECT DISTINCT ON (UPPER(TRIM(tank_number)))
+       tank_number, employee_name, activity_name, finished_at, duration_minutes
+     FROM job_finish_events
+     WHERE finished_at >= $1::timestamptz AND finished_at <= $2::timestamptz
+     ORDER BY UPPER(TRIM(tank_number)), finished_at DESC, id DESC`,
+    [startIso, endIso]
+  );
+  const map = new Map();
+  for (const r of rows) {
+    const key = normalizeTankNumber(r.tank_number);
+    if (key) map.set(key, r);
+  }
+  return map;
+}
+
+async function performFinishJob({ employee, code, activeIn, auth, scanSource }) {
+  if (!hasActiveProductionJob(activeIn)) {
+    return {
+      ok: false,
+      status: 409,
+      body: { ok: false, error: 'no_active_job', message: 'No active job to finish.' },
+    };
+  }
+  const prevActivity = workActivityLabelFromInRow(activeIn);
+  const prevTank = normalizeTankNumber(activeIn.tank_number || '') || null;
+  const baseMs = Date.now();
+  const outIso = new Date(baseMs).toISOString();
+  const inIso = new Date(baseMs + 15).toISOString();
+  const outRow = await insertScanLogForEmployee({
+    employee,
+    code,
+    status: 'OUT',
+    noteCategory: 'SWITCH',
+    noteValue: 'FINISH',
+    noteText: prevActivity,
+    tankNumber: prevTank,
+    auth,
+    scannedAtIso: outIso,
+  });
+  const inRow = await insertScanLogForEmployee({
+    employee,
+    code,
+    status: 'IN',
+    noteCategory: 'AVAILABLE',
+    noteValue: 'Waiting',
+    tankNumber: null,
+    auth,
+    scannedAtIso: inIso,
+  });
+  let finishEvent = null;
+  try {
+    finishEvent = await recordFinishJobEvent({
+      employee,
+      activeIn,
+      outRow,
+      inRow,
+      auth,
+      scanSource,
+    });
+  } catch (err) {
+    console.error('[finish_job event]', err);
+  }
+  return {
+    ok: true,
+    body: {
+      ok: true,
+      action: 'finish_job',
+      log_id: inRow.id,
+      out_log_id: outRow.id,
+      in_log_id: inRow.id,
+      finish_event_id: finishEvent && finishEvent.id != null ? Number(finishEvent.id) : null,
+      finish_event: mapFinishJobEventRow(finishEvent),
+      employee: { id: employee.id, code: employee.code, name: employee.name },
+      status: 'IN',
+      phase: 'IN',
+      activity: null,
+      tank_number: null,
+      previous_activity: prevActivity,
+      previous_tank: prevTank,
+      started_at: activeIn.scanned_at,
+      finished_at: outRow.scanned_at,
+      duration_minutes: finishEvent ? Number(finishEvent.duration_minutes) : null,
+      has_active_job: false,
+      waiting_for_job: true,
+      kiosk_message: 'IN — Waiting for next job',
+      scanned_at: inRow.scanned_at,
+    },
+  };
+}
+
+async function performProductionSwitch({ employee, code, activeIn, auth, nextActivity, nextTank, endedBy, action }) {
+  const prevActivity = workActivityLabelFromInRow(activeIn);
+  const prevTank = normalizeTankNumber(activeIn.tank_number || '') || null;
+  const baseMs = Date.now();
+  const outIso = new Date(baseMs).toISOString();
+  const inIso = new Date(baseMs + 15).toISOString();
+  const outRow = await insertScanLogForEmployee({
+    employee,
+    code,
+    status: 'OUT',
+    noteCategory: 'SWITCH',
+    noteValue: endedBy,
+    tankNumber: prevTank,
+    auth,
+    scannedAtIso: outIso,
+  });
+  const inRow = await insertScanLogForEmployee({
+    employee,
+    code,
+    status: 'IN',
+    noteCategory: 'WORK',
+    noteValue: nextActivity,
+    tankNumber: nextTank,
+    auth,
+    scannedAtIso: inIso,
+  });
+  return {
+    ok: true,
+    action,
+    ended_by: endedBy,
+    employee: { id: employee.id, code: employee.code, name: employee.name },
+    status: 'IN',
+    phase: 'IN',
+    previous_activity: prevActivity,
+    previous_tank: prevTank,
+    activity: nextActivity,
+    tank_number: nextTank,
+    out_log_id: outRow.id,
+    in_log_id: inRow.id,
+    scanned_at: inRow.scanned_at,
+  };
 }
 
 async function performKioskWorkAction(req, res) {
@@ -362,7 +1399,9 @@ async function performKioskWorkAction(req, res) {
   if (!employee.is_active) return res.status(403).json({ ok: false, error: 'inactive_employee', message: 'Employee is inactive.' });
 
   const latestAny = await getLatestLogForEmployeeCode(code);
-  if (recentDuplicateScan(latestAny)) {
+  const latestSt = latestAny ? String(latestAny.status || '').toUpperCase() : '';
+  const skipDebounce = action === 'resume_work' && latestSt === 'STOP';
+  if (!skipDebounce && recentDuplicateScan(latestAny)) {
     return res.status(429).json({
       ok: false,
       error: 'duplicate_scan',
@@ -371,66 +1410,51 @@ async function performKioskWorkAction(req, res) {
   }
 
   const pairedBefore = await getTodayPairingStateForEmployeeCode(code);
+  const workState = await getEmployeeKioskWorkState(code);
   const activeIn = await getCurrentActiveInSessionByCode(code);
-  const currentlyWorking = !!pairedBefore.currentlyWorking;
 
   const activityRaw = req.body && (req.body.activity != null ? req.body.activity : req.body.note_value);
   const reasonRaw = req.body && (req.body.reason != null ? req.body.reason : req.body.note_value);
+  const stopRaw = req.body && (req.body.stop != null ? req.body.stop : req.body.stop_reason);
   const tankRaw = normalizeTankNumber(req.body && req.body.tank_number);
 
-  if (action === 'clock_in_activity') {
-    if (currentlyWorking) {
-      return res.status(409).json({
-        ok: false,
-        error: 'already_in',
-        message: 'Employee is already clocked in.',
+  if (action === 'clock_in' || action === 'clock_in_activity') {
+    if (workState.on_clock && workState.phase === 'IN' && !activeIn) {
+      const activity = kioskActivityLabel(activityRaw);
+      if (!activity) {
+        return res.status(400).json({ ok: false, error: 'validation', message: 'Activity is required.' });
+      }
+      const activityCheck = validateKioskActivityForAuth(auth, activityRaw);
+      if (!activityCheck.ok) {
+        return res.status(400).json({ ok: false, error: 'validation', message: activityCheck.message });
+      }
+      if (!tankRaw) {
+        return res.status(400).json({ ok: false, error: 'validation', message: 'Tank is required.' });
+      }
+      const assign = await performAssignWorkWhileClockedIn({
+        employee,
+        code,
+        auth,
+        activity,
+        tank: tankRaw,
       });
+      if (!assign.ok) return res.status(assign.status).json(assign.body);
+      return res.json(assign);
     }
-    const activity = kioskActivityLabel(activityRaw);
-    if (!activity) {
-      return res.status(400).json({ ok: false, error: 'validation', message: 'Activity is required.' });
-    }
-    const row = await insertScanLogForEmployee({
-      employee,
-      code,
-      status: 'IN',
-      noteCategory: 'WORK',
-      noteValue: activity,
-      tankNumber: null,
-      auth,
-    });
-    let kiosk_message = null;
-    if (pairedBefore.regularAutoEnded && !pairedBefore.pendingOvertimeSession) {
-      kiosk_message = 'Overtime session started.';
-    }
-    return res.json({
-      ok: true,
-      action: 'clock_in_activity',
-      log_id: row.id,
-      employee: { id: employee.id, code: employee.code, name: employee.name },
-      status: 'IN',
-      activity,
-      tank_number: null,
-      awaiting_tank: true,
-      session_type: pairedBefore.regularAutoEnded ? 'OVERTIME' : 'REGULAR',
-      scanned_at: row.scanned_at,
-      kiosk_message,
-    });
-  }
-
-  if (action === 'clock_in') {
-    if (currentlyWorking) {
-      return res.json({
-        ok: true,
-        noop: true,
-        message: 'Employee is already clocked in.',
-        employee: { id: employee.id, code: employee.code, name: employee.name },
-        current_status: 'IN',
-      });
+    if (workState.on_clock) {
+      const msg =
+        workState.phase === 'STOP'
+          ? 'Employee is on STOP. Scan employee to resume or scan reason to clock out.'
+          : 'Employee is already clocked in.';
+      return res.status(409).json({ ok: false, error: 'already_in', message: msg });
     }
     const activity = kioskActivityLabel(activityRaw);
     if (!activity) {
       return res.status(400).json({ ok: false, error: 'validation', message: 'Activity is required to clock in.' });
+    }
+    const activityCheck = validateKioskActivityForAuth(auth, activityRaw);
+    if (!activityCheck.ok) {
+      return res.status(400).json({ ok: false, error: 'validation', message: activityCheck.message });
     }
     if (!tankRaw) {
       return res.status(400).json({ ok: false, error: 'validation', message: 'Tank is required to clock in.' });
@@ -462,6 +1486,7 @@ async function performKioskWorkAction(req, res) {
       log_id: row.id,
       employee: { id: employee.id, code: employee.code, name: employee.name },
       status: 'IN',
+      phase: 'IN',
       activity,
       tank_number: tankRaw,
       session_type: pairedBefore.regularAutoEnded ? 'OVERTIME' : 'REGULAR',
@@ -471,8 +1496,43 @@ async function performKioskWorkAction(req, res) {
   }
 
   if (action === 'clock_out') {
-    if (!currentlyWorking) {
+    if (!workState.on_clock) {
       return res.status(409).json({ ok: false, error: 'not_working', message: 'Employee is not clocked in.' });
+    }
+    if (isLegacyPauseReasonCode(reasonRaw)) {
+      if (workState.phase === 'IN' && activeIn && hasActiveProductionJob(activeIn)) {
+        const stopLabel = kioskStopLabel(reasonRaw);
+        const prevActivity = workActivityLabelFromInRow(activeIn);
+        const prevTank = normalizeTankNumber(activeIn.tank_number || '') || null;
+        const row = await insertScanLogForEmployee({
+          employee,
+          code,
+          status: 'STOP',
+          noteCategory: 'STOP',
+          noteValue: stopLabel,
+          noteText: prevActivity,
+          tankNumber: prevTank,
+          auth,
+        });
+        return res.json({
+          ok: true,
+          action: 'enter_stop',
+          log_id: row.id,
+          employee: { id: employee.id, code: employee.code, name: employee.name },
+          status: 'STOP',
+          phase: 'STOP',
+          stop_reason: stopLabel,
+          resume_activity: prevActivity,
+          resume_tank: prevTank,
+          scanned_at: row.scanned_at,
+          kiosk_message: `STOP: ${stopLabel} (legacy REASON barcode)`,
+        });
+      }
+      return res.status(409).json({
+        ok: false,
+        error: 'use_stop_barcode',
+        message: 'Lunch, Break, and Clean Up are STOP reasons. Scan STOP while on a job.',
+      });
     }
     const reason = kioskReasonLabel(reasonRaw);
     if (!reason) {
@@ -480,6 +1540,7 @@ async function performKioskWorkAction(req, res) {
     }
     const resolvedTank =
       tankRaw ||
+      workState.current_tank ||
       (activeIn && activeIn.tank_number ? normalizeTankNumber(activeIn.tank_number) : null);
     const row = await insertScanLogForEmployee({
       employee,
@@ -498,6 +1559,7 @@ async function performKioskWorkAction(req, res) {
       log_id: row.id,
       employee: { id: employee.id, code: employee.code, name: employee.name },
       status: 'OUT',
+      phase: 'OUT',
       reason,
       tank_number: resolvedTank,
       scanned_at: row.scanned_at,
@@ -505,13 +1567,120 @@ async function performKioskWorkAction(req, res) {
     });
   }
 
+  if (action === 'enter_stop') {
+    if (workState.phase !== 'IN' || !workState.on_clock) {
+      return res.status(409).json({
+        ok: false,
+        error: 'not_in',
+        message: 'Employee must be IN before using Stop.',
+      });
+    }
+    if (!activeIn || !hasActiveProductionJob(activeIn)) {
+      return res.status(409).json({
+        ok: false,
+        error: 'no_active_job',
+        message: 'No active job to stop. Scan activity and tank to start work.',
+      });
+    }
+    const stopLabel = kioskStopLabel(stopRaw);
+    if (!stopLabel) {
+      return res.status(400).json({ ok: false, error: 'validation', message: 'Stop reason is required.' });
+    }
+    const prevActivity = workActivityLabelFromInRow(activeIn);
+    const prevTank = normalizeTankNumber(activeIn.tank_number || '') || null;
+    const row = await insertScanLogForEmployee({
+      employee,
+      code,
+      status: 'STOP',
+      noteCategory: 'STOP',
+      noteValue: stopLabel,
+      noteText: prevActivity,
+      tankNumber: prevTank,
+      auth,
+    });
+    return res.json({
+      ok: true,
+      action: 'enter_stop',
+      log_id: row.id,
+      employee: { id: employee.id, code: employee.code, name: employee.name },
+      status: 'STOP',
+      phase: 'STOP',
+      stop_reason: stopLabel,
+      resume_activity: prevActivity,
+      resume_tank: prevTank,
+      scanned_at: row.scanned_at,
+    });
+  }
+
+  if (action === 'resume_work') {
+    if (workState.phase !== 'STOP') {
+      return res.status(409).json({
+        ok: false,
+        error: 'not_stopped',
+        message: 'Employee is not on STOP.',
+      });
+    }
+    const activityHint = workState.resume_activity || kioskActivityLabel(activityRaw);
+    const tankHint = workState.resume_tank || tankRaw;
+    const result = await resumeFromStop({
+      employee,
+      code,
+      auth,
+      activity: activityHint,
+      tank: tankHint,
+    });
+    if (!result.ok) return res.status(result.status).json(result.body);
+    return res.json(result.body);
+  }
+
+  if (action === 'finish_job' || action === 'finish') {
+    if (workState.phase === 'STOP') {
+      return res.status(409).json({
+        ok: false,
+        error: 'stopped',
+        message: 'Resume current job before finishing.',
+      });
+    }
+    if (workState.phase !== 'IN' || !workState.on_clock) {
+      return res.status(409).json({
+        ok: false,
+        error: 'not_in',
+        message: 'Employee must be IN to finish a job.',
+      });
+    }
+    const scanSource = String(
+      (req.body && req.body.scan_source) || (req.body && req.body.source) || 'kiosk'
+    )
+      .trim()
+      .slice(0, 40);
+    const finishResult = await performFinishJob({ employee, code, activeIn, auth, scanSource });
+    if (!finishResult.ok) return res.status(finishResult.status).json(finishResult.body);
+    return res.json(finishResult.body);
+  }
+
   if (action === 'switch_activity' || action === 'switch_tank' || action === 'switch_work' || action === 'assign_tank') {
-    if (!currentlyWorking || !activeIn) {
+    if (workState.phase !== 'IN' || !workState.on_clock) {
       return res.status(409).json({
         ok: false,
         error: 'not_working',
-        message: 'Scan activity first.',
+        message: 'Employee must be IN to assign or switch work.',
       });
+    }
+    if (!activeIn) {
+      const act = kioskActivityLabel(activityRaw);
+      if (!act) return res.status(400).json({ ok: false, error: 'validation', message: 'Activity is required.' });
+      const actCheck = validateKioskActivityForAuth(auth, activityRaw);
+      if (!actCheck.ok) return res.status(400).json({ ok: false, error: 'validation', message: actCheck.message });
+      if (!tankRaw) return res.status(400).json({ ok: false, error: 'validation', message: 'Tank is required.' });
+      const assign = await performAssignWorkWhileClockedIn({
+        employee,
+        code,
+        auth,
+        activity: act,
+        tank: tankRaw,
+      });
+      if (!assign.ok) return res.status(assign.status).json(assign.body);
+      return res.json(assign);
     }
     const prevActivity = workActivityLabelFromInRow(activeIn);
     const prevTank = normalizeTankNumber(activeIn.tank_number || '') || null;
@@ -522,6 +1691,8 @@ async function performKioskWorkAction(req, res) {
     if (effectiveAction === 'switch_activity') {
       const act = kioskActivityLabel(activityRaw);
       if (!act) return res.status(400).json({ ok: false, error: 'validation', message: 'Activity is required.' });
+      const actCheck = validateKioskActivityForAuth(auth, activityRaw);
+      if (!actCheck.ok) return res.status(400).json({ ok: false, error: 'validation', message: actCheck.message });
       if (act === prevActivity) {
         return res.json({
           ok: true,
@@ -529,6 +1700,7 @@ async function performKioskWorkAction(req, res) {
           message: 'Already on this activity.',
           activity: act,
           tank_number: prevTank,
+          phase: 'IN',
         });
       }
       nextActivity = act;
@@ -550,6 +1722,7 @@ async function performKioskWorkAction(req, res) {
           message: 'Already on this tank.',
           activity: prevActivity,
           tank_number: prevTank,
+          phase: 'IN',
         });
       }
       nextTank = tankRaw;
@@ -557,6 +1730,8 @@ async function performKioskWorkAction(req, res) {
     } else {
       const act = kioskActivityLabel(activityRaw);
       if (!act) return res.status(400).json({ ok: false, error: 'validation', message: 'Activity is required.' });
+      const actCheck = validateKioskActivityForAuth(auth, activityRaw);
+      if (!actCheck.ok) return res.status(400).json({ ok: false, error: 'validation', message: actCheck.message });
       if (!tankRaw) return res.status(400).json({ ok: false, error: 'validation', message: 'Tank is required.' });
       const tankRow = await ensureTankExists(tankRaw);
       if (tankRow && normalizeTankStatus(tankRow.status) === 'archived') {
@@ -570,43 +1745,17 @@ async function performKioskWorkAction(req, res) {
       nextTank = tankRaw;
       endedBy = 'SWITCH_WORK';
     }
-    const baseMs = Date.now();
-    const outIso = new Date(baseMs).toISOString();
-    const inIso = new Date(baseMs + 15).toISOString();
-    const outRow = await insertScanLogForEmployee({
+    const payload = await performProductionSwitch({
       employee,
       code,
-      status: 'OUT',
-      noteCategory: 'SWITCH',
-      noteValue: endedBy,
-      tankNumber: prevTank,
+      activeIn,
       auth,
-      scannedAtIso: outIso,
-    });
-    const inRow = await insertScanLogForEmployee({
-      employee,
-      code,
-      status: 'IN',
-      noteCategory: 'WORK',
-      noteValue: nextActivity,
-      tankNumber: nextTank,
-      auth,
-      scannedAtIso: inIso,
-    });
-    return res.json({
-      ok: true,
+      nextActivity,
+      nextTank,
+      endedBy,
       action,
-      ended_by: endedBy,
-      employee: { id: employee.id, code: employee.code, name: employee.name },
-      status: 'IN',
-      previous_activity: prevActivity,
-      previous_tank: prevTank,
-      activity: nextActivity,
-      tank_number: nextTank,
-      out_log_id: outRow.id,
-      in_log_id: inRow.id,
-      scanned_at: inRow.scanned_at,
     });
+    return res.json(payload);
   }
 
   return res.status(400).json({ ok: false, error: 'validation', message: 'Unknown kiosk action.' });
@@ -779,6 +1928,7 @@ function walkCumulativePairSegmentsNoWindow(logsAsc, closeMs, onClose, includeTr
     const t = new Date(row.scanned_at).getTime();
     if (Number.isNaN(t)) continue;
     if (st === 'IN') {
+      if (!isProductionInRow(row)) continue;
       if (pendingMs !== null) {
         if (!pendingOt) {
           const virtEnd = peekRegularSegmentEnd(pendingMs, t, regularByDay);
@@ -790,6 +1940,14 @@ function walkCumulativePairSegmentsNoWindow(logsAsc, closeMs, onClose, includeTr
       pendingRow = row;
       const dk = localDateString(new Date(t));
       pendingOt = (regularByDay.get(dk) || 0) >= REGULAR_SHIFT_CAP_MS;
+    } else if (st === 'STOP') {
+      if (pendingMs !== null) {
+        if (t < pendingMs) {
+          clearP();
+          continue;
+        }
+        closeAt(t);
+      }
     } else if (st === 'OUT') {
       if (pendingMs === null) continue;
       if (t < pendingMs) {
@@ -878,6 +2036,7 @@ function laborMsAttributedByTank(logsAsc, closeMs = Date.now()) {
       logs,
       closeMs,
       (tin, tout, inRow) => {
+        if (!isProductionInRow(inRow)) return;
         const tank = normalizeTankNumber(inRow.tank_number || '');
         if (!tank) return;
         const dur = tout - tin;
@@ -899,7 +2058,7 @@ function computeTankSummaryFromLogs(logsAsc, closeMs) {
     const tank = normalizeTankNumber(log.tank_number || '');
     if (log.status === 'IN') {
       if (tank) byEmp.set(code, tank);
-    } else if (log.status === 'OUT') {
+    } else if (log.status === 'OUT' || log.status === 'STOP') {
       byEmp.delete(code);
     }
     if (log.status !== 'IN') continue;
@@ -993,6 +2152,7 @@ function computeTankLaborReport(tankNumber, logsAsc, employeesByCode, closeMs = 
       logs,
       closeMs,
       (tin, tout, inRow, isOt) => {
+        if (!isProductionInRow(inRow)) return;
         const segTank = normalizeTankNumber(inRow.tank_number || '');
         if (segTank !== tankNorm) return;
         const dur = tout - tin;
@@ -1200,36 +2360,16 @@ async function seedDefaultUsers() {
       created_at: ts,
       updated_at: ts,
     },
-    {
-      username: 'kiosk_area_a',
-      password_hash: hashPassword(DEFAULT_USER_PASSWORDS.kiosk_area_a),
-      pin_hash: hashPassword(DEFAULT_KIOSK_PINS.kiosk_area_a),
+    ...KIOSK_AREA_PROFILES.map((p) => ({
+      username: p.username,
+      password_hash: hashPassword(DEFAULT_USER_PASSWORDS[p.passwordKey]),
+      pin_hash: hashPassword(DEFAULT_KIOSK_PINS[p.pinKey]),
       role: ROLE.KIOSK,
-      station_name: 'Area A Kiosk',
-      area_name: 'Area A',
+      station_name: p.station_name,
+      area_name: p.area_name,
       created_at: ts,
       updated_at: ts,
-    },
-    {
-      username: 'kiosk_area_b',
-      password_hash: hashPassword(DEFAULT_USER_PASSWORDS.kiosk_area_b),
-      pin_hash: hashPassword(DEFAULT_KIOSK_PINS.kiosk_area_b),
-      role: ROLE.KIOSK,
-      station_name: 'Area B Kiosk',
-      area_name: 'Area B',
-      created_at: ts,
-      updated_at: ts,
-    },
-    {
-      username: 'kiosk_area_c',
-      password_hash: hashPassword(DEFAULT_USER_PASSWORDS.kiosk_area_c),
-      pin_hash: hashPassword(DEFAULT_KIOSK_PINS.kiosk_area_c),
-      role: ROLE.KIOSK,
-      station_name: 'Area C Kiosk',
-      area_name: 'Area C',
-      created_at: ts,
-      updated_at: ts,
-    },
+    })),
   ];
   for (const u of seeds) {
     await pool.query(
@@ -1250,6 +2390,33 @@ async function seedDefaultUsers() {
   }
 }
 
+/** Existing DBs: refresh kiosk area labels and ensure Shipping kiosk account exists. */
+async function ensureKioskAreaProfiles() {
+  const ts = nowIso();
+  for (const p of KIOSK_AREA_PROFILES) {
+    await pool.query(
+      `INSERT INTO users (username, password_hash, pin_hash, role, station_name, area_name, is_active, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, 1, $7::timestamptz, $8::timestamptz)
+       ON CONFLICT (username) DO NOTHING`,
+      [
+        p.username,
+        hashPassword(DEFAULT_USER_PASSWORDS[p.passwordKey]),
+        hashPassword(DEFAULT_KIOSK_PINS[p.pinKey]),
+        ROLE.KIOSK,
+        p.station_name,
+        p.area_name,
+        ts,
+        ts,
+      ]
+    );
+    await pool.query(
+      `UPDATE users SET area_name = $1, station_name = $2, updated_at = $3::timestamptz
+       WHERE username = $4 AND role = $5`,
+      [p.area_name, p.station_name, ts, p.username, ROLE.KIOSK]
+    );
+  }
+}
+
 /** Existing databases: fill pin_hash only when missing (does not overwrite manager-set PINs). */
 async function ensureKioskDefaultPins() {
   const ts = nowIso();
@@ -1264,13 +2431,25 @@ async function ensureKioskDefaultPins() {
 
 async function initializeDatabase() {
   await runPostgresSchema();
-  await seedIfEmpty();
-  await seedDefaultUsers();
-  await ensureKioskDefaultPins();
+  await withDbRetry(
+    async () => {
+      await seedIfEmpty();
+      await seedDefaultUsers();
+      await ensureKioskAreaProfiles();
+      await ensureKioskDefaultPins();
+    },
+    { label: 'seed', maxAttempts: 3, delayMs: 1500 }
+  );
   console.log('[boot] database seed complete');
 }
 
-const dbReady = initializeDatabase();
+const dbReady = initializeDatabase().catch((err) => {
+  console.error('\n' + formatDbError(err) + '\n');
+  if (!process.env.VERCEL) {
+    process.exit(1);
+  }
+  throw err;
+});
 
 async function getEmployeeByCode(code) {
   const n = normalizeCode(code);
@@ -1486,6 +2665,14 @@ function pairSessionsMsForWindow(logsAsc, opts) {
       pendingSessionNum = sessionSeq;
       const dk = localDateString(new Date(t));
       pendingIsOvertime = (regularByDay.get(dk) || 0) >= REGULAR_SHIFT_CAP_MS;
+    } else if (st === 'STOP') {
+      if (pendingInMs !== null) {
+        if (t < pendingInMs) {
+          clearPending();
+          continue;
+        }
+        closePendingAtOutMs(t);
+      }
     } else if (st === 'OUT') {
       if (pendingInMs === null) continue;
       if (t < pendingInMs) {
@@ -2372,7 +3559,7 @@ function buildUnifiedExportPdfBuffer(payroll) {
         }
         doc.font('Helvetica-Bold')
           .fontSize(7.5)
-          .fillColor(row.status === 'IN' ? '#15803d' : '#b91c1c')
+          .fillColor(pdfStatusColor(row.status))
           .text(String(row.status), M.left + pad, y + 3, { width: wS - pad, align: 'center', lineBreak: false });
         doc.font('Helvetica').fontSize(7.5).fillColor(COL.body).text(tStr, M.left + pad + wS, y + 3, {
           width: wT - 8,
@@ -2448,7 +3635,7 @@ function buildUnifiedExportPdfBuffer(payroll) {
           const tStr = formatPdfScanLineTime(row.scanned_at, timeColShowsDate);
           doc.font('Helvetica').fontSize(8).fillColor(COL.body).text(tStr, M.left, y, { width: 52, lineBreak: false });
           doc.font('Helvetica-Bold')
-            .fillColor(row.status === 'IN' ? '#15803d' : '#b91c1c')
+            .fillColor(pdfStatusColor(row.status))
             .text(row.status, M.left + 54, y, { width: 34, lineBreak: false });
           doc.font('Helvetica').fillColor(COL.body).text('→', M.left + 92, y, { width: 14, lineBreak: false });
           doc.font('Helvetica').fillColor('#475569').text(pdfScanActivityTrunc(row, 52), M.left + 106, y, {
@@ -2551,7 +3738,7 @@ async function getLatestLogForCode(code) {
   const n = normalizeCode(code);
   if (!n) return null;
   const { rows } = await pool.query(
-    `SELECT id, employee_code, employee_name, status, scanned_at, tank_number
+    `SELECT id, employee_code, employee_name, status, scanned_at, tank_number, note_value, note, note_category
      FROM scan_logs
      WHERE REPLACE(UPPER(TRIM(COALESCE(employee_code, ''))), ' ', '') = $1
      ORDER BY scanned_at DESC, id DESC
@@ -2610,7 +3797,7 @@ async function getTodayPairingStateForEmployeeCode(code) {
     [eid, day.startIso, day.endIso]
   );
   const latestRes = await pool.query(
-    `SELECT id, employee_code, employee_name, status, scanned_at, tank_number
+    `SELECT id, employee_code, employee_name, status, scanned_at, tank_number, note_value, note, note_category
      FROM scan_logs
      WHERE REPLACE(UPPER(TRIM(COALESCE(employee_code, ''))), ' ', '') = $1
      ORDER BY scanned_at DESC, id DESC
@@ -2631,7 +3818,10 @@ async function getTodayPairingStateForEmployeeCode(code) {
 async function getCurrentActiveInSessionByCode(code) {
   const paired = await getTodayPairingStateForEmployeeCode(code);
   if (!paired.currentlyWorking || !paired.pendingInSourceRow) return null;
-  return paired.pendingInSourceRow;
+  const latest = paired.latestRow;
+  if (latest && String(latest.status || '').toUpperCase() === 'STOP') return null;
+  const row = paired.pendingInSourceRow;
+  return isProductionInRow(row) ? row : null;
 }
 
 async function resolveExpectedNextStatus(code) {
@@ -2639,7 +3829,7 @@ async function resolveExpectedNextStatus(code) {
   const latest = paired.latestRow;
   if (!latest) return 'IN';
   const st = String(latest.status || '').toUpperCase();
-  if (st === 'OUT') return 'IN';
+  if (st === 'OUT' || st === 'STOP') return 'IN';
   if (paired.currentlyWorking) return 'OUT';
   return 'IN';
 }
@@ -2706,8 +3896,12 @@ app.use(async (req, res, next) => {
     await dbReady;
     next();
   } catch (err) {
-    console.error('[boot] database unavailable:', err);
-    res.status(503).json({ ok: false, error: 'database_unavailable', message: 'Database initialization failed.' });
+    console.error('[boot] database unavailable:', formatDbError(err));
+    res.status(503).json({
+      ok: false,
+      error: 'database_unavailable',
+      message: 'Database connection failed. Check DATABASE_URL and PostgreSQL service.',
+    });
   }
 });
 
@@ -2717,10 +3911,95 @@ app.get('/api/auth/me', (req, res) => {
   return res.json({ ok: true, user: auth });
 });
 
+app.get('/api/debug/finished-jobs-test', (_req, res) => {
+  console.log('[finished-jobs] debug test endpoint called');
+  return res.json({
+    success: true,
+    count: 1,
+    jobs: [
+      {
+        employeeName: 'TEST EMPLOYEE',
+        employeeCode: 'EMP999',
+        tankNumber: 'TEST-TANK',
+        activityName: 'TEST ACTIVITY',
+        area: 'Fabrication',
+        finishedAt: '2026-06-02T19:00:00',
+        durationMinutes: 5,
+      },
+    ],
+  });
+});
+
 app.get('/api/auth/me-kiosk', (req, res) => {
   const auth = currentKioskFromSession(req);
   if (!auth) return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Kiosk login required.' });
   return res.json({ ok: true, user: auth });
+});
+
+app.get('/api/kiosk/work-config', (req, res) => {
+  const auth = currentKioskFromSession(req) || currentAuthFromSession(req);
+  if (!auth) {
+    return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Kiosk login required.' });
+  }
+  const area = auth.area_name ? String(auth.area_name) : '';
+  const activities = getKioskActivitiesForArea(area);
+  const stop_reasons = [
+    { code: 'CLEAN_UP', label: 'Clean Up', barcode: 'STOP:CLEAN_UP' },
+    { code: 'LUNCH', label: 'Lunch', barcode: 'STOP:LUNCH' },
+    { code: 'BREAK', label: 'Break', barcode: 'STOP:BREAK' },
+    { code: 'MATERIAL', label: 'Material', barcode: 'STOP:MATERIAL' },
+    { code: 'MAINTENANCE_DOWNTIME', label: 'Maintenance/Downtime', barcode: 'STOP:MAINTENANCE_DOWNTIME' },
+  ];
+  const out_reasons = [{ code: 'END_SHIFT', label: 'End Shift', barcode: 'REASON:END_SHIFT' }];
+  return res.json({
+    ok: true,
+    area_name: displayKioskAreaName(area),
+    production_areas: KIOSK_PRODUCTION_AREAS,
+    activities,
+    stop_reasons,
+    out_reasons,
+  });
+});
+
+app.get('/api/kiosk/finished-jobs', async (req, res) => {
+  const auth = currentKioskFromSession(req) || currentAuthFromSession(req);
+  if (!auth) {
+    return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Login required.' });
+  }
+  const limit = Math.min(Math.max(Number(req.query.limit) || 15, 1), 100);
+  const employeeCode = req.query.employee_code ? String(req.query.employee_code).trim() : '';
+  const tankNumber = req.query.tank_number ? String(req.query.tank_number).trim() : '';
+  const todayOnly = req.query.today_only === '1' || req.query.today_only === 'true';
+  let finishedAfter;
+  let finishedBefore;
+  if (todayOnly) {
+    const day = startEndOfLocalDay(localDateString());
+    if (day) {
+      finishedAfter = day.startIso;
+      finishedBefore = day.endIso;
+    }
+  }
+  let areaName = '';
+  const areaQuery = req.query.area ? String(req.query.area).trim() : '';
+  if (areaQuery && areaQuery.toUpperCase() !== 'ALL') {
+    areaName = resolveFinishJobsAreaFilter(areaQuery) || areaQuery;
+  } else if (String(auth.role || '').toUpperCase() === ROLE.KIOSK && auth.area_name) {
+    areaName = String(auth.area_name);
+  }
+  try {
+    const rows = await fetchFinishJobEvents({
+      employeeCode: employeeCode || undefined,
+      tankNumber: tankNumber || undefined,
+      areaName: !employeeCode && !tankNumber && areaName ? areaName : undefined,
+      finishedAfter,
+      finishedBefore,
+      limit,
+    });
+    return res.json({ ok: true, rows });
+  } catch (err) {
+    console.error('[kiosk finished-jobs]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load finished jobs.' });
+  }
 });
 
 app.post('/api/auth/login', async (req, res) => {
@@ -2788,7 +4067,7 @@ app.post('/api/auth/login-kiosk-pin', async (req, res) => {
   return res.json({
     ok: true,
     role: ROLE.KIOSK,
-    redirect: '/kiosk',
+    redirect: kioskLandingPathForUser(req.session.kiosk_user),
   });
 });
 
@@ -2826,11 +4105,12 @@ app.use((req, res, next) => {
     p === '/kiosk-login' ||
     p === '/install' ||
     p === '/install.html' ||
-    p.startsWith('/api/auth/')
+    p.startsWith('/api/auth/') ||
+    p.startsWith('/api/debug/')
   ) {
     return next();
   }
-  if (p === '/kiosk' || p === '/ipad-scan') return requireKiosk(req, res, next);
+  if (p === '/kiosk' || p === '/ipad-scan' || p === '/qa-qc') return requireKiosk(req, res, next);
   if (
     p === '/scan' ||
     p === '/scan/' ||
@@ -2870,7 +4150,8 @@ app.use((req, res, next) => {
     p.startsWith('/api/summary') ||
     p.startsWith('/api/status') ||
     p.startsWith('/api/logs') ||
-    p.startsWith('/api/scan_logs')
+    p.startsWith('/api/scan_logs') ||
+    p.startsWith('/api/dashboard/finished-jobs')
   ) {
     return requireManager(req, res, next);
   }
@@ -2912,26 +4193,12 @@ async function handleKioskEmployeeLookup(req, res) {
 
     const paired = await getTodayPairingStateForEmployeeCode(code);
     const latest = paired.latestRow || (await getLatestLogForCode(code));
+    const workState = await getEmployeeKioskWorkState(code);
     const next_status = await resolveExpectedNextStatus(code);
 
-    let current_status = 'OUT';
-    if (latest && latest.status) {
-      const s = String(latest.status).toUpperCase();
-      if (s === 'IN' && paired.currentlyWorking) current_status = 'IN';
-      else if (s === 'IN' && !paired.currentlyWorking) current_status = 'OUT';
-      else current_status = s === 'IN' || s === 'OUT' ? s : 'OUT';
-    }
-
-    let active_tank_number = null;
-    const activeIn = await getCurrentActiveInSessionByCode(code);
-    if (
-      activeIn &&
-      activeIn.status &&
-      String(activeIn.status).toUpperCase() === 'IN' &&
-      activeIn.tank_number != null &&
-      String(activeIn.tank_number).trim() !== ''
-    ) {
-      active_tank_number = String(activeIn.tank_number).trim();
+    let current_status = workState.phase;
+    if (latest && String(latest.status || '').toUpperCase() === 'IN' && !paired.currentlyWorking) {
+      current_status = 'OUT';
     }
 
     const staleRegularAuto =
@@ -2946,14 +4213,11 @@ async function handleKioskEmployeeLookup(req, res) {
     }
 
     let current_session_type = null;
-    if (paired.currentlyWorking) {
+    if (workState.on_clock && workState.phase === 'IN') {
       current_session_type = paired.pendingOvertimeSession ? 'OVERTIME' : 'REGULAR';
     }
-    const current_activity =
-      activeIn && paired.currentlyWorking ? workActivityLabelFromInRow(activeIn) : null;
 
     console.log('[kiosk lookup] current_status:', current_status);
-    console.log('[kiosk lookup] next_status:', next_status);
 
     return res.json({
       ok: true,
@@ -2963,10 +4227,16 @@ async function handleKioskEmployeeLookup(req, res) {
         name: String(employee.name),
       },
       current_status,
+      phase: workState.phase,
       next_status,
-      currently_working: paired.currentlyWorking,
-      active_tank_number,
-      current_activity,
+      currently_working: workState.on_clock,
+      active_tank_number: workState.current_tank || workState.resume_tank,
+      current_activity: workState.current_activity || workState.resume_activity,
+      has_active_job: workState.has_active_job,
+      waiting_for_job: workState.waiting_for_job,
+      stop_reason: workState.stop_reason,
+      resume_activity: workState.resume_activity,
+      resume_tank: workState.resume_tank,
       current_session_type,
       kiosk_notice,
     });
@@ -3003,6 +4273,15 @@ app.post('/api/scan', async (req, res) => {
       ok: false,
       error: 'duplicate_scan',
       message: 'Duplicate scan ignored. Please wait a moment before scanning again.',
+    });
+  }
+
+  const workState = await getEmployeeKioskWorkState(code);
+  if (workState.phase === 'STOP') {
+    return res.status(409).json({
+      ok: false,
+      error: 'employee_stopped',
+      message: 'Employee is on STOP. Use the kiosk to resume or clock out.',
     });
   }
 
@@ -3202,8 +4481,11 @@ async function applyEffectiveStatusToKioskRows(rowsFromDb) {
     const paired = pairCache.get(eid);
     if (!paired) return r;
     let status = r.status;
-    if (String(status || '').toUpperCase() === 'IN' && !paired.currentlyWorking) {
+    const st = String(status || '').toUpperCase();
+    if (st === 'IN' && !paired.currentlyWorking) {
       status = 'OUT';
+    } else if (st === 'STOP') {
+      status = 'STOP';
     }
     return { ...r, status };
   });
@@ -3243,7 +4525,8 @@ app.get('/api/kiosk/status', async (req, res) => {
          e.name AS employee_name,
          e.is_active AS is_active,
          latest_logs.status AS status,
-         COALESCE(NULLIF(TRIM(latest_logs.note_value), ''), NULLIF(TRIM(latest_logs.note), '')) AS note_value,
+         NULLIF(TRIM(latest_logs.note_value), '') AS note_value,
+         NULLIF(TRIM(latest_logs.note), '') AS note,
          latest_logs.tank_number AS tank_number,
          latest_logs.area_name AS area_name,
          latest_logs.station_name AS station_name,
@@ -3260,17 +4543,30 @@ app.get('/api/kiosk/status', async (req, res) => {
     return res.json({
       ok: true,
       kiosk_area: kioskArea,
-      rows: adjusted.map((r) => ({
+      rows: adjusted.map((r) => {
+        const st = ['IN', 'OUT', 'STOP'].includes(String(r.status || '').toUpperCase())
+          ? String(r.status).toUpperCase()
+          : 'OUT';
+        const noteVal = r.note_value ? String(r.note_value) : null;
+        const noteText = r.note ? String(r.note).trim() : '';
+        const stopReason = st === 'STOP' ? noteVal : null;
+        const jobActivity =
+          st === 'STOP' && noteText && noteText !== '-' && noteText !== noteVal ? noteText : null;
+        return {
         employee_code: String(r.employee_code || ''),
         employee_name: String(r.employee_name || ''),
-        status: r.status === 'IN' ? 'IN' : 'OUT',
-        note_value: r.note_value ? String(r.note_value) : null,
+        status: st,
+        note_value: noteVal,
+        stop_reason: stopReason,
+        job_activity: jobActivity,
+        display_activity: st === 'STOP' ? jobActivity || '—' : noteVal,
         tank_number: r.tank_number ? String(r.tank_number) : null,
         area_name: r.area_name ? String(r.area_name) : null,
         station_name: r.station_name ? String(r.station_name) : null,
         scanned_at: r.scanned_at || null,
         is_active: Number(r.is_active) ? 1 : 0,
-      })),
+      };
+      }),
     });
   } catch (err) {
     console.error('[kiosk status error]', err);
@@ -3359,11 +4655,27 @@ app.get('/api/status', async (_req, res) => {
   );
   const employees = emRes.rows;
   const workedMap = bounds ? await buildWorkedHoursMapForWindow(bounds, Math.min(Date.now(), new Date(bounds.endIso).getTime())) : new Map();
+  const dayLogsByEmpId = new Map();
+  if (bounds) {
+    const dayLogsRes = await pool.query(
+      `SELECT employee_id, employee_code, status, scanned_at, id, note_value, note, tank_number
+       FROM scan_logs
+       WHERE scanned_at >= $1::timestamptz AND scanned_at <= $2::timestamptz
+       ORDER BY scanned_at ASC, id ASC`,
+      [bounds.startIso, bounds.endIso]
+    );
+    for (const row of dayLogsRes.rows) {
+      const eid = row.employee_id != null ? Number(row.employee_id) : null;
+      if (!eid) continue;
+      if (!dayLogsByEmpId.has(eid)) dayLogsByEmpId.set(eid, []);
+      dayLogsByEmpId.get(eid).push(row);
+    }
+  }
 
   const payload = [];
   for (const e of employees) {
     const latestRes = await pool.query(
-      `SELECT status, scanned_at FROM scan_logs WHERE employee_code = $1 ORDER BY scanned_at DESC, id DESC LIMIT 1`,
+      `SELECT status, scanned_at, id FROM scan_logs WHERE employee_code = $1 ORDER BY scanned_at DESC, id DESC LIMIT 1`,
       [e.code]
     );
     const latest = latestRes.rows[0];
@@ -3387,6 +4699,19 @@ app.get('/api/status', async (_req, res) => {
       const cap = Number(daily.pendingRegularCapEndMs);
       if (Number.isFinite(cap)) effNow = Math.min(Date.now(), cap);
     }
+    let elapsed_seconds = 0;
+    let elapsed_paused = false;
+    if (current_status === 'STOP' && latest) {
+      const logs = dayLogsByEmpId.get(Number(e.id)) || [];
+      const inStartMs = activeSessionStartMsBeforeStop(logs, latest);
+      const stopMs = new Date(latest.scanned_at).getTime();
+      if (inStartMs != null && Number.isFinite(stopMs)) {
+        elapsed_seconds = Math.max(0, Math.floor((stopMs - inStartMs) / 1000));
+      }
+      elapsed_paused = true;
+    } else if (daily && daily.currentlyWorking && Number.isFinite(startMs)) {
+      elapsed_seconds = Math.max(0, Math.floor((effNow - startMs) / 1000));
+    }
     payload.push({
       id: e.id,
       code: e.code,
@@ -3398,14 +4723,33 @@ app.get('/api/status', async (_req, res) => {
       daily_hours: Number.isFinite(Number(workedMap.get(Number(e.id)))) ? Number(workedMap.get(Number(e.id))) : 0,
       currently_working: !!(daily && daily.currentlyWorking),
       current_session_start: daily && daily.currentlyWorking ? daily.currentSessionStart : null,
-      elapsed_seconds:
-        daily && daily.currentlyWorking && Number.isFinite(startMs)
-          ? Math.max(0, Math.floor((effNow - startMs) / 1000))
-          : 0,
+      elapsed_seconds,
+      elapsed_paused,
     });
   }
 
   res.json({ ok: true, scans_today: scansToday, employees: payload });
+});
+
+app.get('/api/dashboard/finished-jobs', async (req, res) => {
+  console.log('[finished-jobs] endpoint called');
+  const limit = Math.min(Math.max(Number(req.query.limit) || 30, 1), 100);
+  const todayOnly = req.query.today_only !== '0' && req.query.today_only !== 'false';
+  const area = req.query.area ? String(req.query.area).trim() : 'ALL';
+  try {
+    const jobs = await fetchDashboardFinishedJobs({ area, todayOnly, limit });
+    console.log('[finished-jobs] rows found:', jobs.length);
+    return res.json({ success: true, count: jobs.length, jobs });
+  } catch (err) {
+    console.error('[finished-jobs] error:', err);
+    return res.status(500).json({
+      success: false,
+      count: 0,
+      jobs: [],
+      error: 'server_error',
+      message: err && err.message ? err.message : 'Could not load finished jobs.',
+    });
+  }
 });
 
 app.get('/api/dashboard', async (_req, res) => {
@@ -3521,7 +4865,7 @@ function buildLogsCsvRows(rows) {
         csvEscape(r.note_value),
         csvEscape(r.tank_number),
         csvEscape(r.station_name),
-        csvEscape(r.area_name),
+        csvEscape(displayKioskAreaName(r.area_name)),
         csvEscape(r.kiosk_user),
         csvEscape(formatLogNoteDisplay(r)),
       ].join(',')
@@ -4002,6 +5346,7 @@ app.get('/api/tanks/:id/report', async (req, res) => {
     employeesByCode.set(normalizeCode(e.code), e);
   }
   const report = computeTankLaborReport(tank.tank_number, logsAsc, employeesByCode, Date.now());
+  const finishedJobs = await fetchFinishJobEvents({ tankNumber: tank.tank_number, limit: 50 });
   const registryStatus = normalizeTankStatus(tank.status);
   res.json({
     ok: true,
@@ -4016,6 +5361,7 @@ app.get('/api/tanks/:id/report', async (req, res) => {
     employeeBreakdown: report.employeeBreakdown,
     activityBreakdown: report.activityBreakdown,
     sessions: report.sessions,
+    finished_jobs: finishedJobs,
   });
 });
 
@@ -4057,9 +5403,45 @@ async function managerCurrentWorkRows() {
     const eid = Number(e.id);
     const list = byEmpId.get(eid) || [];
     const paired = pairEmployeeLogsForLocalDay(list, eid, carryMap, day, dayClose);
-    if (!paired.currentlyWorking || !paired.pendingInSourceRow) continue;
-    const inRow = paired.pendingInSourceRow;
     const lastRow = list.length ? list[list.length - 1] : null;
+    const lastSt = lastRow ? String(lastRow.status || '').toUpperCase() : '';
+    if (!paired.currentlyWorking && lastSt !== 'STOP') continue;
+
+    if (lastSt === 'STOP' && lastRow) {
+      const stopMs = new Date(lastRow.scanned_at).getTime();
+      const inStartMs = activeSessionStartMsBeforeStop(list, lastRow);
+      const elapsedMs =
+        inStartMs != null && Number.isFinite(stopMs)
+          ? Math.max(0, stopMs - inStartMs)
+          : 0;
+      const dailyHours = dailyMap.get(eid) || 0;
+      const weeklyHours = weeklyMap.get(eid) || 0;
+      rows.push({
+        employee_code: e.code,
+        employee_name: e.name,
+        status: 'STOP',
+        activity: lastRow.note_value || '-',
+        tank_number: lastRow.tank_number || '-',
+        stop_reason: lastRow.note_value || '-',
+        resume_activity: lastRow.note || null,
+        area_name: lastRow.area_name || null,
+        station_name: lastRow.station_name || null,
+        kiosk_user: lastRow.kiosk_user || null,
+        started_at: inStartMs != null ? new Date(inStartMs).toISOString() : lastRow.scanned_at,
+        elapsed_minutes: Math.round(elapsedMs / 60000),
+        elapsed_paused: true,
+        last_scan_time: lastRow.scanned_at,
+        hourly_rate: Number.isFinite(Number(e.hourly_rate)) ? Number(e.hourly_rate) : 20,
+        daily_hours: dailyHours,
+        weekly_hours: weeklyHours,
+        overtime_warning: false,
+        flags: ['stop'],
+      });
+      continue;
+    }
+
+    if (!paired.pendingInSourceRow) continue;
+    const inRow = paired.pendingInSourceRow;
     const startMs = new Date(inRow.scanned_at).getTime();
     const effNow = paired.pendingOvertimeSession
       ? Date.now()
@@ -4122,7 +5504,7 @@ async function managerTankSummaryRows() {
     const tank = normalizeTankNumber(r.tank_number);
     if (r.status === 'IN') {
       if (tank) workerTank.set(code, tank);
-    } else if (r.status === 'OUT') {
+    } else if (r.status === 'OUT' || r.status === 'STOP') {
       workerTank.delete(code);
     }
     if (r.status !== 'IN') continue;
@@ -4159,14 +5541,28 @@ async function managerTankSummaryRows() {
   for (const [tank, ms] of tankMs.entries()) {
     if (!byTank.has(tank)) byTank.set(tank, { workersNow: new Set(), last_activity: '-' });
   }
+  const lastFinishByTank = await fetchLastFinishByTankForWindow(bounds.startIso, bounds.endIso);
   const out = [];
   for (const [tank, item] of byTank.entries()) {
     const ms = tankMs.get(tank) || 0;
+    const lastFinish = lastFinishByTank.get(tank);
+    const lastCompleted = lastFinish
+      ? {
+          employee_name: String(lastFinish.employee_name || ''),
+          activity_name: String(lastFinish.activity_name || ''),
+          finished_at: lastFinish.finished_at,
+          duration_minutes: Number(lastFinish.duration_minutes) || 0,
+          label: `${String(lastFinish.employee_name || '')} - ${String(lastFinish.activity_name || '')} - ${new Date(
+            lastFinish.finished_at
+          ).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`,
+        }
+      : null;
     out.push({
       tank_number: tank,
       workers_currently_on_tank: item.workersNow.size,
       total_labor_hours_today: Math.round((ms / 3600000) * 100) / 100,
       last_activity: item.last_activity,
+      last_completed: lastCompleted,
       status: item.workersNow.size > 0 ? 'ACTIVE' : 'IDLE',
     });
   }
@@ -4268,6 +5664,24 @@ async function managerOvertimeWatch() {
   return rows;
 }
 
+app.get('/api/manager/finished-jobs', async (req, res) => {
+  const todayOnly = req.query.today_only !== '0' && req.query.today_only !== 'false';
+  const limit = Math.min(Math.max(Number(req.query.limit) || 30, 1), 100);
+  const area = req.query.area ? String(req.query.area).trim() : 'ALL';
+  try {
+    const rows = await fetchManagerFinishedJobs({ area, todayOnly, limit });
+    return res.json({
+      ok: true,
+      rows,
+      today_only: todayOnly,
+      area: area || 'ALL',
+    });
+  } catch (err) {
+    console.error('[manager finished-jobs]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load finished jobs.' });
+  }
+});
+
 app.get('/api/manager/current-work', async (_req, res) => {
   const rows = await managerCurrentWorkRows();
   res.json({ ok: true, rows });
@@ -4284,7 +5698,8 @@ app.get('/api/manager/overtime-watch', async (_req, res) => {
 });
 
 /**
- * Update kiosk PINs for Area A / B / C (manager only). Body: optional area_a_pin, area_b_pin, area_c_pin (4–6 digits each).
+ * Update kiosk PINs for production areas (manager only).
+ * Body: optional area_a_pin, area_b_pin, area_c_pin, area_d_pin (4–6 digits each).
  */
 app.patch('/api/manager/kiosk-pins', async (req, res) => {
   const auth = currentAuthFromSession(req);
@@ -4292,11 +5707,7 @@ app.patch('/api/manager/kiosk-pins', async (req, res) => {
     return authJson(res, 403, 'Forbidden.', 'forbidden');
   }
   const body = req.body || {};
-  const fields = [
-    ['kiosk_area_a', 'area_a_pin'],
-    ['kiosk_area_b', 'area_b_pin'],
-    ['kiosk_area_c', 'area_c_pin'],
-  ];
+  const fields = KIOSK_AREA_PROFILES.map((p) => [p.username, p.pinField]);
   /** @type {Array<[string, string]>} */
   const toApply = [];
   for (const [uname, key] of fields) {
@@ -4321,7 +5732,7 @@ app.patch('/api/manager/kiosk-pins', async (req, res) => {
     return res.status(400).json({
       ok: false,
       error: 'validation',
-      message: 'Provide at least one PIN (area_a_pin, area_b_pin, or area_c_pin).',
+      message: 'Provide at least one PIN (area_a_pin, area_b_pin, area_c_pin, or area_d_pin).',
     });
   }
   const ts = nowIso();
@@ -4412,7 +5823,11 @@ function scanKioskCacheHeaders(res) {
   res.setHeader('Expires', '0');
 }
 
-app.get('/scan', (_req, res) => {
+app.get('/scan', (req, res) => {
+  const auth = currentKioskFromSession(req) || currentAuthFromSession(req);
+  if (auth && auth.role === ROLE.KIOSK && isQaQcKioskArea(auth.area_name)) {
+    return res.redirect(302, '/qa-qc');
+  }
   scanKioskCacheHeaders(res);
   res.type('html');
   res.sendFile(path.join(PUBLIC_DIR, 'scan.html'));
@@ -4422,10 +5837,35 @@ app.get('/scan/', (_req, res) => {
   res.redirect(301, '/scan');
 });
 
-app.get('/kiosk', (_req, res) => {
+app.get('/kiosk', (req, res) => {
+  const auth = currentKioskFromSession(req);
+  if (auth && isQaQcKioskArea(auth.area_name)) {
+    return res.redirect(302, '/qa-qc');
+  }
   scanKioskCacheHeaders(res);
   res.type('html');
   res.sendFile(path.join(PUBLIC_DIR, 'scan.html'));
+});
+
+app.get('/qa-qc', (req, res) => {
+  const auth = currentKioskFromSession(req);
+  if (!auth) return res.redirect(302, '/kiosk-login');
+  if (!isQaQcKioskArea(auth.area_name)) return res.redirect(302, '/kiosk');
+  scanKioskCacheHeaders(res);
+  res.type('html');
+  res.sendFile(path.join(PUBLIC_DIR, 'qa-qc.html'));
+});
+
+app.get('/qa-qc.css', (_req, res) => {
+  scanKioskCacheHeaders(res);
+  res.type('text/css');
+  res.sendFile(path.join(PUBLIC_DIR, 'qa-qc.css'));
+});
+
+app.get('/qa-qc.js', (_req, res) => {
+  scanKioskCacheHeaders(res);
+  res.type('application/javascript');
+  res.sendFile(path.join(PUBLIC_DIR, 'qa-qc.js'));
 });
 
 app.get('/ipad-scan', (_req, res) => {
@@ -4550,46 +5990,53 @@ svg{max-width:100%;height:120px}
 app.get('/manager/command-print', (req, res) => {
   const type = String(req.query.type || '').toLowerCase();
   if (type === 'activities') {
+    const activityCards = KIOSK_PRODUCTION_AREAS.flatMap((area) => {
+      const items = getKioskActivitiesForArea(area);
+      return items.map((a) => ({
+        title: `${a.label} (${area})`,
+        barcode: a.barcode,
+        sub: area,
+      }));
+    });
     return res.type('html').send(
       renderMultiBarcodePrintPage(
-        'Activity Barcodes',
-        'Scan Employee → Activity → Tank',
-        [
-          { title: 'Run Machine', barcode: 'ACTIVITY:RUN_MACHINE', sub: 'Work activity' },
-          { title: 'Assemble', barcode: 'ACTIVITY:ASSEMBLY', sub: 'Work activity' },
-          { title: 'Quality Check', barcode: 'ACTIVITY:QUALITY', sub: 'Work activity' },
-          { title: 'Surface Sanding', barcode: 'ACTIVITY:SANDING', sub: 'Work activity' },
-          { title: 'Painting', barcode: 'ACTIVITY:PAINTING', sub: 'Work activity' },
-          { title: 'Cutting', barcode: 'ACTIVITY:CUTTING', sub: 'Work activity' },
-          { title: 'Welding', barcode: 'ACTIVITY:WELDING', sub: 'Work activity' },
-          { title: 'Material Handling', barcode: 'ACTIVITY:MATERIAL_HANDLING', sub: 'Work activity' },
-          { title: 'Other', barcode: 'ACTIVITY:OTHER', sub: 'Work activity' },
-        ]
+        'Production Activity Barcodes (Page 1)',
+        'OUT: Employee → Tank → Activity. IN: Employee → Activity or Tank. Activities are area-specific.',
+        activityCards
       )
     );
   }
-  if (type === 'reasons') {
+  if (type === 'areas') {
+    const areaCards = [
+      { title: 'Fabrication', barcode: 'AREA:FABRICATION', sub: 'Kiosk area' },
+      { title: 'Assembly', barcode: 'AREA:ASSEMBLY', sub: 'Kiosk area' },
+      { title: 'QA/QC', barcode: 'AREA:QAQC', sub: 'Kiosk area' },
+      { title: 'Shipping & Handling', barcode: 'AREA:SHIPPING_HANDLING', sub: 'Kiosk area' },
+    ];
+    return res.type('html').send(
+      renderMultiBarcodePrintPage('Production Area Barcodes', 'Reference labels for kiosk areas.', areaCards)
+    );
+  }
+  if (type === 'reasons' || type === 'stops') {
     return res.type('html').send(
       renderMultiBarcodePrintPage(
-        'Reason Barcodes (Clock OUT)',
-        'Scan Employee → Reason to clock out',
+        'Stop + End Shift Barcodes (Page 2)',
+        'STOP pauses the current job (activity + tank preserved). End Shift clocks OUT.',
         [
-          { title: 'Lunch', barcode: 'REASON:LUNCH', sub: 'Clock out' },
-          { title: 'Break', barcode: 'REASON:BREAK', sub: 'Clock out' },
-          { title: 'Bathroom', barcode: 'REASON:BATHROOM', sub: 'Clock out' },
-          { title: 'End Shift', barcode: 'REASON:END_SHIFT', sub: 'Clock out' },
-          { title: 'Machine Issue', barcode: 'REASON:MACHINE_ISSUE', sub: 'Clock out' },
-          { title: 'Waiting Material', barcode: 'REASON:WAITING_MATERIAL', sub: 'Clock out' },
-          { title: 'Maintenance', barcode: 'REASON:MAINTENANCE', sub: 'Clock out' },
-          { title: 'Setup Change', barcode: 'REASON:SETUP_CHANGE', sub: 'Clock out' },
-          { title: 'Other', barcode: 'REASON:OTHER', sub: 'Clock out' },
+          { title: 'Clean Up', barcode: 'STOP:CLEAN_UP', sub: 'STOP — pause job' },
+          { title: 'Lunch', barcode: 'STOP:LUNCH', sub: 'STOP — pause job' },
+          { title: 'Break', barcode: 'STOP:BREAK', sub: 'STOP — pause job' },
+          { title: 'Material', barcode: 'STOP:MATERIAL', sub: 'STOP — pause job' },
+          { title: 'Maintenance/Downtime', barcode: 'STOP:MAINTENANCE_DOWNTIME', sub: 'STOP — pause job' },
+          { title: 'End Shift', barcode: 'REASON:END_SHIFT', sub: 'Clock OUT' },
         ]
       )
     );
   }
   const map = {
-    lunch: { title: 'Lunch Reason', barcode: 'REASON:LUNCH', sub: 'Clock-out reason' },
-    break: { title: 'Break Reason', barcode: 'REASON:BREAK', sub: 'Clock-out reason' },
+    lunch: { title: 'Lunch Stop', barcode: 'STOP:LUNCH', sub: 'STOP — pause job' },
+    break: { title: 'Break Stop', barcode: 'STOP:BREAK', sub: 'STOP — pause job' },
+    clean_up: { title: 'Clean Up Stop', barcode: 'STOP:CLEAN_UP', sub: 'STOP — pause job' },
     end_shift: { title: 'End Shift', barcode: 'REASON:END_SHIFT', sub: 'Clock-out reason' },
     sanding: { title: 'Activity — Sanding', barcode: 'ACTIVITY:SANDING', sub: 'Work activity' },
     painting: { title: 'Activity — Painting', barcode: 'ACTIVITY:PAINTING', sub: 'Work activity' },

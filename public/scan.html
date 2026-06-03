@@ -16,6 +16,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700;800&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/scan.css" />
+    <link rel="stylesheet" href="/status-styles.css" />
   </head>
   <body class="scan-kiosk">
     <main class="kiosk-page">
@@ -63,7 +64,7 @@
               id="manualBarcodeInput"
               name="barcode"
               type="text"
-              placeholder="EMP001 · ACTIVITY:SANDING · TANK_1111 · REASON:LUNCH"
+              placeholder="EMP001 · TANK_1111 · ACTIVITY:WINDING · STOP:LUNCH · REASON:END_SHIFT"
               autocomplete="off"
               autocapitalize="characters"
               spellcheck="false"
@@ -78,6 +79,17 @@
           RESCAN BADGE
         </div>
         <p id="scanWarning" class="scan-warning" role="alert" aria-live="assertive" hidden></p>
+
+        <div
+          id="finishSuccessBanner"
+          class="finish-success-banner"
+          role="status"
+          aria-live="polite"
+          hidden
+        >
+          <strong class="finish-success-banner__title">Job finished successfully</strong>
+          <span class="finish-success-banner__sub">Employee is still IN and waiting for next job</span>
+        </div>
 
         <div id="scanDebugPanel" class="scan-debug scan-debug--minimal" aria-label="Scan debug">
           <div><span class="scan-debug-label">Last raw</span> <code id="debugRaw">—</code></div>
@@ -99,6 +111,7 @@
           <p id="currentWorkerMode" class="current-worker-status">—</p>
           <p id="currentWorkerActivity" class="current-worker-detail">Activity: —</p>
           <p id="currentWorkerTank" class="current-worker-detail">Tank: —</p>
+          <p id="currentWorkerStop" class="current-worker-detail current-worker-stop" hidden>Stop: —</p>
           <div id="allowedActions" class="allowed-actions" hidden></div>
         </div>
       </section>
@@ -145,7 +158,8 @@
       <p id="debugLine" class="debug-line" hidden>debug</p>
       <div id="scanToast" class="scan-toast" role="status" aria-live="polite" hidden></div>
     </main>
-    <script src="/scan.js?v=24"></script>
+    <script src="/status-styles.js"></script>
+    <script src="/scan.js?v=31"></script>
     <script src="/pwa.js"></script>
   </body>
 </html>

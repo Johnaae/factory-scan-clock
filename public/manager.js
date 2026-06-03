@@ -14,9 +14,11 @@ const logoutBtn = document.getElementById('logoutBtn');
 const pinAreaA = document.getElementById('pinAreaA');
 const pinAreaB = document.getElementById('pinAreaB');
 const pinAreaC = document.getElementById('pinAreaC');
+const pinAreaD = document.getElementById('pinAreaD');
 const showPinA = document.getElementById('showPinA');
 const showPinB = document.getElementById('showPinB');
 const showPinC = document.getElementById('showPinC');
+const showPinD = document.getElementById('showPinD');
 const btnSaveKioskPins = document.getElementById('btnSaveKioskPins');
 const kioskPinHint = document.getElementById('kioskPinHint');
 const ownerSecuritySection = document.getElementById('ownerSecuritySection');
@@ -75,6 +77,22 @@ function fmtHours(v) {
   return n.toFixed(2);
 }
 
+function displayAreaName(area) {
+  const map = {
+    'Area A': 'Fabrication',
+    'Area B': 'Assembly',
+    'Area C': 'QA/QC',
+  };
+  const s = String(area || '').trim();
+  return map[s] || s || '-';
+}
+
+function areaRowMatchesFilter(rowArea, filter) {
+  if (!filter || filter === 'ALL') return true;
+  const normalized = displayAreaName(rowArea);
+  return normalized === filter || String(rowArea || '').trim() === filter;
+}
+
 function titleCaseFlag(flag) {
   const map = {
     missing_out: 'Missing OUT',
@@ -85,6 +103,7 @@ function titleCaseFlag(flag) {
     overtime_session: 'Overtime session',
     auto_ended_at_8h: 'Auto ended at 8h',
     active_shift: 'On shift',
+    stop: 'On STOP',
   };
   if (map[flag]) return map[flag];
   return String(flag || '')
@@ -107,10 +126,25 @@ function elapsedFromIso(iso) {
   return minutesToText(mins);
 }
 
+function statusBadgeFor(value, labelOverride) {
+  if (typeof FactoryStatus !== 'undefined') {
+    return FactoryStatus.statusBadgeHtml(value, labelOverride ? { label: labelOverride } : undefined);
+  }
+  const st = String(value || '').toUpperCase();
+  const cls = st === 'IN' ? 'badge-in' : st === 'STOP' ? 'badge-stop' : 'badge-out';
+  const label = labelOverride || st;
+  return `<span class="badge ${cls}">${label}</span>`;
+}
+
 function refreshCurrentWorkElapsedCells() {
   if (!currentWorkBody) return;
   const cells = currentWorkBody.querySelectorAll('[data-started-at]');
   cells.forEach((cell) => {
+    if (cell.getAttribute('data-elapsed-paused') === '1') {
+      const mins = Number(cell.getAttribute('data-elapsed-minutes') || 0);
+      cell.textContent = `${minutesToText(mins)} (paused)`;
+      return;
+    }
     const iso = cell.getAttribute('data-started-at');
     cell.textContent = elapsedFromIso(iso);
   });
@@ -264,6 +298,7 @@ function renderTankReport(data) {
   const employees = data.employeeBreakdown || [];
   const activities = data.activityBreakdown || [];
   const sessions = data.sessions || [];
+  const finishedJobs = data.finished_jobs || [];
   const statusLabel = String(tank.status || '').toLowerCase() === 'active' ? 'Active' : 'Archived';
 
   const summaryCards = `
@@ -313,7 +348,7 @@ function renderTankReport(data) {
           (s) => `<tr>
         <td>${escapeHtml(s.employee_name)} (${escapeHtml(s.employee_code)})</td>
         <td>${escapeHtml(s.activity)}</td>
-        <td>${escapeHtml(s.area_name || '-')}</td>
+        <td>${escapeHtml(displayAreaName(s.area_name))}</td>
         <td>${fmtIso(s.in_time)}</td>
         <td>${fmtIso(s.out_time)}</td>
         <td>${fmtHours(s.duration_hours)}</td>
@@ -323,6 +358,19 @@ function renderTankReport(data) {
         )
         .join('')
     : '<tr><td colspan="8" class="muted">No scan sessions for this tank.</td></tr>';
+
+  const finishedJobRows = finishedJobs.length
+    ? finishedJobs
+        .map(
+          (row) => `<tr>
+        <td>${escapeHtml(row.tank_history_line || `${row.employee_name} finished ${row.activity_name}`)}</td>
+        <td>${escapeHtml(row.tank_number || '-')}</td>
+        <td>${fmtIso(row.finished_at)}</td>
+        <td>${formatDurationMinutes(row.duration_minutes)}</td>
+      </tr>`
+        )
+        .join('')
+    : '<tr><td colspan="4" class="muted">No finished jobs recorded for this tank yet.</td></tr>';
 
   return `
     <div id="tankReportPrintArea" class="tank-report-print-area">
@@ -339,6 +387,13 @@ function renderTankReport(data) {
         <table class="tank-report-table">
           <thead><tr><th>Activity</th><th>Total hrs</th><th>Sessions</th></tr></thead>
           <tbody>${activityRows}</tbody>
+        </table>
+      </div>
+      <h4 class="tank-report-section-title">Finished Jobs</h4>
+      <div class="table-wrap table-scroll">
+        <table class="tank-report-table">
+          <thead><tr><th>Event</th><th>Tank</th><th>Finished</th><th>Duration</th></tr></thead>
+          <tbody>${finishedJobRows}</tbody>
         </table>
       </div>
       <h4 class="tank-report-section-title">Session History</h4>
@@ -371,19 +426,23 @@ async function loadCurrentWork() {
   const { res, data } = await apiJson('/api/manager/current-work');
   if (!res.ok) return;
   const selectedArea = areaFilter ? areaFilter.value : 'ALL';
-  const rows = (data.rows || []).filter((r) => selectedArea === 'ALL' || (r.area_name || '') === selectedArea);
+  const rows = (data.rows || []).filter((r) => areaRowMatchesFilter(r.area_name, selectedArea));
   currentWorkRowsCache = rows;
   currentWorkBody.innerHTML =
     rows
       .map(
         (r) => `<tr>
       <td>${r.employee_name} (${r.employee_code})</td>
-      <td><span class="badge badge-in">${r.status}</span></td>
-      <td>${r.activity || '-'}</td>
+      <td>${statusBadgeFor(r.status)}</td>
+      <td>${escapeHtml(r.status === 'STOP' ? r.stop_reason || r.activity || '-' : r.activity || '-')}</td>
       <td><strong>${r.tank_number || '-'}</strong></td>
-      <td>${r.area_name || '-'}</td>
+      <td>${displayAreaName(r.area_name)}</td>
       <td>${fmtIso(r.started_at)}</td>
-      <td data-started-at="${r.started_at || ''}">${elapsedFromIso(r.started_at)}</td>
+      <td ${
+        r.elapsed_paused
+          ? `data-elapsed-paused="1" data-elapsed-minutes="${Number(r.elapsed_minutes || 0)}"`
+          : `data-started-at="${r.started_at || ''}"`
+      }>${r.elapsed_paused ? `${minutesToText(r.elapsed_minutes)} (paused)` : elapsedFromIso(r.started_at)}</td>
       <td>${r.daily_hours}</td>
       <td>${r.weekly_hours}</td>
       <td>${
@@ -396,8 +455,16 @@ async function loadCurrentWork() {
       <td>${fmtIso(r.last_scan_time)}</td>
     </tr>`
       )
-      .join('') || '<tr><td colspan="11" class="muted">No one currently clocked IN.</td></tr>';
+      .join('') || '<tr><td colspan="11" class="muted">No active IN or STOP workers right now.</td></tr>';
   if (currentWorkRowsCache.length) refreshCurrentWorkElapsedCells();
+}
+
+function formatDurationMinutes(mins) {
+  const m = Math.max(0, Number(mins) || 0);
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60);
+  const r = m % 60;
+  return r ? `${h}h ${r}m` : `${h}h`;
 }
 
 async function loadTankSummary() {
@@ -412,10 +479,11 @@ async function loadTankSummary() {
       <td>${r.workers_currently_on_tank}</td>
       <td>${r.total_labor_hours_today}</td>
       <td>${r.last_activity || '-'}</td>
+      <td>${r.last_completed && r.last_completed.label ? escapeHtml(r.last_completed.label) : '-'}</td>
       <td>${r.status === 'ACTIVE' ? '<span class="badge badge-in">Active</span>' : '<span class="badge">' + r.status + '</span>'}</td>
     </tr>`
       )
-      .join('') || '<tr><td colspan="5" class="muted">No tank activity yet.</td></tr>';
+      .join('') || '<tr><td colspan="6" class="muted">No tank activity yet.</td></tr>';
 }
 
 async function loadOvertime() {
@@ -428,9 +496,9 @@ async function loadOvertime() {
         const flags = Array.isArray(r.flags) && r.flags.length
           ? r.flags.map((f) => `<span class="badge badge-warn">${titleCaseFlag(f)}</span>`).join(' ')
           : [
-              r.flag_daily_over_8h ? '<span class="badge badge-out">Over 8h today</span>' : '',
+              r.flag_daily_over_8h ? '<span class="badge badge-err">Over 8h today</span>' : '',
               r.flag_daily_close_8h ? '<span class="badge badge-warn">Close to 8h</span>' : '',
-              r.flag_weekly_over_40h ? '<span class="badge badge-out">Over 40h week</span>' : '',
+              r.flag_weekly_over_40h ? '<span class="badge badge-err">Over 40h week</span>' : '',
             ]
               .filter(Boolean)
               .join(' ');
@@ -455,11 +523,11 @@ async function refreshAll() {
   await Promise.all([loadTanks(), refreshLivePanels()]);
 }
 
-btnAddTank.addEventListener('click', () => void createTank());
+if (btnAddTank) btnAddTank.addEventListener('click', () => void createTank());
 if (tankSearch) tankSearch.addEventListener('input', () => void loadTanks());
 if (btnClearTankSearch) btnClearTankSearch.addEventListener('click', () => clearTankSearch());
 if (tankStatusFilter) tankStatusFilter.addEventListener('change', () => void loadTanks());
-tankBody.addEventListener('click', (e) => {
+if (tankBody) tankBody.addEventListener('click', (e) => {
   const btn = e.target.closest('button[data-act]');
   if (!btn) return;
   const act = btn.getAttribute('data-act');
@@ -520,6 +588,7 @@ function wirePinShow(checkbox, input) {
 wirePinShow(showPinA, pinAreaA);
 wirePinShow(showPinB, pinAreaB);
 wirePinShow(showPinC, pinAreaC);
+wirePinShow(showPinD, pinAreaD);
 wirePinShow(showOwnerPasswords, ownerCurrentPassword);
 wirePinShow(showOwnerPasswords, ownerNewPassword);
 wirePinShow(showOwnerPasswords, ownerConfirmPassword);
@@ -540,9 +609,11 @@ async function saveKioskPins() {
   const a = pinAreaA && String(pinAreaA.value || '').trim();
   const b = pinAreaB && String(pinAreaB.value || '').trim();
   const c = pinAreaC && String(pinAreaC.value || '').trim();
+  const d = pinAreaD && String(pinAreaD.value || '').trim();
   if (a) body.area_a_pin = a;
   if (b) body.area_b_pin = b;
   if (c) body.area_c_pin = c;
+  if (d) body.area_d_pin = d;
   if (!Object.keys(body).length) {
     setAlert(kioskPinHint, 'Enter at least one new PIN to update.', 'error');
     return;
@@ -562,6 +633,7 @@ async function saveKioskPins() {
   if (pinAreaA) pinAreaA.value = '';
   if (pinAreaB) pinAreaB.value = '';
   if (pinAreaC) pinAreaC.value = '';
+  if (pinAreaD) pinAreaD.value = '';
   if (btnSaveKioskPins) btnSaveKioskPins.disabled = false;
 }
 
