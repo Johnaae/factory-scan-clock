@@ -7,10 +7,12 @@ const modalTitle = document.getElementById('modalTitle');
 const modalHint = document.getElementById('modalHint');
 const fCode = document.getElementById('fCode');
 const fName = document.getElementById('fName');
+const fBadgeRole = document.getElementById('fBadgeRole');
 const fRate = document.getElementById('fRate');
 const fStatus = document.getElementById('fStatus');
 
 const btnAdd = document.getElementById('btnAdd');
+const btnPrintAllBadges = document.getElementById('btnPrintAllBadges');
 const btnCloseModal = document.getElementById('btnCloseModal');
 const btnCancel = document.getElementById('btnCancel');
 const btnSave = document.getElementById('btnSave');
@@ -87,8 +89,9 @@ function render() {
         <td class="td-num">${escapeHtml(rate)}</td>
         <td>${st}</td>
         <td>
-          <div class="toolbar" style="justify-content:flex-start">
+          <div class="toolbar" style="justify-content:flex-start;flex-wrap:wrap">
             <button class="btn btn-sm edit-employee-btn" type="button" data-id="${eid}" data-employee-id="${eid}">Edit</button>
+            <a class="btn btn-sm" href="/api/employees/${eid}/badge.pdf" target="_blank" rel="noopener">Print badge</a>
             <button class="btn btn-sm" type="button" data-act="toggle" data-id="${eid}">${e.is_active ? 'Deactivate' : 'Activate'}</button>
             <button class="btn btn-danger btn-sm" type="button" data-act="del" data-id="${eid}">Delete</button>
           </div>
@@ -117,6 +120,7 @@ function startCreate() {
   modalTitle.textContent = 'Add employee';
   fCode.value = '';
   fName.value = '';
+  fBadgeRole.value = 'Fabrication Team Member';
   fRate.value = '20';
   fStatus.value = 'ACTIVE';
   fCode.disabled = false;
@@ -144,6 +148,7 @@ async function openEmployeeEditModal(rawId) {
   modalTitle.textContent = 'Edit employee';
   fCode.value = e.code;
   fName.value = e.name;
+  fBadgeRole.value = e.badge_role || 'Fabrication Team Member';
   fRate.value = String(Number.isFinite(Number(e.hourly_rate)) ? Number(e.hourly_rate) : 20);
   fStatus.value = e.is_active ? 'ACTIVE' : 'INACTIVE';
   fCode.disabled = false;
@@ -156,6 +161,7 @@ async function save() {
   const code = String(fCode.value || '').trim().replace(/\s+/g, '').toUpperCase();
   const name = String(fName.value || '').trim();
   const hourly_rate = parseRateInput();
+  const badge_role = String(fBadgeRole.value || '').trim();
   const status = String(fStatus.value || 'ACTIVE').toUpperCase() === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE';
   if (!code || !name) {
     modalHint.textContent = 'Code and name are required.';
@@ -169,7 +175,7 @@ async function save() {
       const { res, data } = await apiJson('/api/employees', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code, name, hourly_rate, status }),
+        body: JSON.stringify({ code, name, hourly_rate, badge_role, status }),
       });
       if (!res.ok) {
         modalHint.textContent = (data && data.message) || 'Could not create employee.';
@@ -180,7 +186,7 @@ async function save() {
       const { res, data } = await apiJson(`/api/employees/${editingId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code, name, hourly_rate, status }),
+        body: JSON.stringify({ code, name, hourly_rate, badge_role, status }),
       });
       if (!res.ok) {
         modalHint.textContent = (data && data.message) || (data && data.error) || 'Could not update employee.';
@@ -235,6 +241,11 @@ empBody.addEventListener('click', (e) => {
 });
 
 btnAdd.addEventListener('click', () => startCreate());
+if (btnPrintAllBadges) {
+  btnPrintAllBadges.addEventListener('click', () => {
+    window.open('/api/employees/badges.pdf?active_only=1', '_blank', 'noopener,noreferrer');
+  });
+}
 btnCloseModal.addEventListener('click', () => closeModal());
 btnCancel.addEventListener('click', () => closeModal());
 btnSave.addEventListener('click', () => void save());

@@ -26,7 +26,7 @@ async function run() {
        FROM employees ORDER BY id ASC`
     );
     const tanks = await client.query(
-      `SELECT id, tank_number, description, status, created_at, updated_at
+      `SELECT id, tank_number, description, status, created_at, completed_at, updated_at
        FROM tanks ORDER BY id ASC`
     );
     const scanLogs = await client.query(

@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS tanks (
   description TEXT,
   status TEXT NOT NULL DEFAULT 'active',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS scan_logs (
@@ -56,6 +57,9 @@ CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 CREATE INDEX IF NOT EXISTS idx_tanks_tank_number ON tanks(tank_number);
 CREATE INDEX IF NOT EXISTS idx_scan_logs_employee_code ON scan_logs(employee_code);
 CREATE INDEX IF NOT EXISTS idx_scan_logs_scanned_at ON scan_logs(scanned_at);
+
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS badge_role TEXT;
+ALTER TABLE tanks ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_scan_logs_tank_number ON scan_logs(tank_number);
 
 CREATE TABLE IF NOT EXISTS job_finish_events (
@@ -90,6 +94,18 @@ async function run() {
     await client.query('BEGIN');
     try {
       await client.query(MIGRATION_SQL);
+      await client.query(`UPDATE tanks SET created_at = NOW() WHERE created_at IS NULL`);
+      await client.query(`
+        UPDATE tanks
+        SET completed_at = COALESCE(completed_at, updated_at, NOW())
+        WHERE LOWER(TRIM(status)) = 'archived'
+          AND completed_at IS NULL
+      `);
+      await client.query(`
+        UPDATE tanks
+        SET completed_at = NULL
+        WHERE LOWER(TRIM(COALESCE(status, ''))) IN ('active', '')
+      `);
       await client.query('COMMIT');
       console.log('[migrate] schema ready');
     } catch (err) {

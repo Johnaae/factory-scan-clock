@@ -58,6 +58,78 @@ async function apiJson(url, opts) {
   return { res, data };
 }
 
+function tankIsActive(t) {
+  const st = String((t && t.status) || 'active').toLowerCase();
+  return st === 'active' || st === '';
+}
+
+function fmtTankDateTime(iso) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return new Intl.DateTimeFormat('en-US', {
+    month: '2-digit',
+    day: '2-digit',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  }).format(d);
+}
+
+function tankCreatedIso(t) {
+  return t.created_at || t.updated_at || null;
+}
+
+function computeTankDurationMsClient(t) {
+  const createdIso = tankCreatedIso(t);
+  if (!createdIso) return 0;
+  const created = new Date(createdIso).getTime();
+  if (Number.isNaN(created)) return 0;
+  let end = Date.now();
+  if (!tankIsActive(t) && t.completed_at) {
+    end = new Date(t.completed_at).getTime();
+    if (Number.isNaN(end)) end = Date.now();
+  }
+  return Math.max(0, end - created);
+}
+
+function formatTankDurationClient(t) {
+  if (t.duration_display) return t.duration_display;
+  const totalMins = Math.floor(computeTankDurationMsClient(t) / 60000);
+  if (totalMins < 60) return `${totalMins}m`;
+  if (totalMins < 24 * 60) {
+    const h = Math.floor(totalMins / 60);
+    const m = totalMins % 60;
+    return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  }
+  const totalHours = Math.floor(totalMins / 60);
+  const d = Math.floor(totalHours / 24);
+  const h = totalHours % 24;
+  return h > 0 ? `${d}d ${h}h` : `${d}d`;
+}
+
+function renderTankCreatedCell(t) {
+  const text = fmtTankDateTime(tankCreatedIso(t)) || fmtTankDateTime(new Date().toISOString());
+  return `<span class="tank-lifecycle-muted">${escapeHtml(text)}</span>`;
+}
+
+function renderTankCompletedCell(t) {
+  if (tankIsActive(t)) {
+    return '<span class="tank-lifecycle-in-progress">In Progress</span>';
+  }
+  const text = fmtTankDateTime(t.completed_at || t.updated_at) || fmtTankDateTime(new Date().toISOString());
+  return `<span class="tank-lifecycle-muted">${escapeHtml(text)}</span>`;
+}
+
+function renderTankDurationBadge(t) {
+  const isActive = tankIsActive(t);
+  const label = formatTankDurationClient(t);
+  const cls = isActive ? 'tank-duration-badge tank-duration-badge--active' : 'tank-duration-badge tank-duration-badge--archived';
+  const icon = isActive ? '🟢' : '🔵';
+  return `<span class="${cls}">${icon} ${escapeHtml(label)}</span>`;
+}
+
 function fmtIso(iso) {
   if (!iso) return '-';
   const d = new Date(iso);
@@ -156,8 +228,12 @@ function getTankStatusFilter() {
   return 'active';
 }
 
+function tankStatusLabel(t) {
+  return tankIsActive(t) ? 'Active' : 'Completed';
+}
+
 function tankEmptyMessage(filter) {
-  if (filter === 'archived') return 'No archived tanks';
+  if (filter === 'archived') return 'No completed tanks';
   if (filter === 'all') return 'No tanks found';
   return 'No active tanks';
 }
@@ -189,20 +265,22 @@ async function loadTanks() {
   }
   const rows = data.tanks || [];
   if (!rows.length) {
-    tankBody.innerHTML = `<tr><td colspan="4" class="muted">${tankEmptyMessage(statusFilter)}</td></tr>`;
+    tankBody.innerHTML = `<tr><td colspan="7" class="muted">${tankEmptyMessage(statusFilter)}</td></tr>`;
     return;
   }
   tankBody.innerHTML = rows
     .map((t) => {
-      const st = String(t.status || 'active').toLowerCase();
-      const isActive = st === 'active' || st === '';
+      const isActive = tankIsActive(t);
       const statusBadge = isActive
         ? '<span class="badge badge-in">Active</span>'
-        : '<span class="badge badge-muted">Archived</span>';
+        : '<span class="badge badge-muted">Completed</span>';
       return `<tr>
       <td><strong>${escapeHtml(t.tank_number)}</strong></td>
       <td>${escapeHtml(t.description || '-')}</td>
       <td>${statusBadge}</td>
+      <td>${renderTankCreatedCell(t)}</td>
+      <td>${renderTankCompletedCell(t)}</td>
+      <td>${renderTankDurationBadge(t)}</td>
       <td>
         <div class="toolbar" style="justify-content:flex-start">
           <button class="btn btn-sm" data-act="report" data-id="${t.id}">View Report</button>
@@ -210,7 +288,7 @@ async function loadTanks() {
           <button class="btn btn-sm" data-act="print" data-tank="${escapeHtml(t.tank_number)}">Print Barcode</button>
           ${
             isActive
-              ? `<button class="btn btn-sm" data-act="archive" data-id="${t.id}">Archive</button>`
+              ? `<button class="btn btn-sm" data-act="archive" data-id="${t.id}">Complete Tank</button>`
               : `<button class="btn btn-sm" data-act="restore" data-id="${t.id}">Restore</button>`
           }
         </div>
@@ -262,7 +340,7 @@ async function editTank(id) {
 async function setTankStatus(id, nextStatus) {
   if (tankActionInFlight) return;
   const makeActive = nextStatus === 'active';
-  const prompt = makeActive ? 'Restore this tank?' : 'Archive this tank?';
+  const prompt = makeActive ? 'Restore this tank to active?' : 'Complete this tank? It will move to the Completed list.';
   if (!window.confirm(prompt)) return;
   tankActionInFlight = true;
   const url = makeActive ? `/api/tanks/${id}/restore` : `/api/tanks/${id}/archive`;
@@ -278,10 +356,10 @@ async function setTankStatus(id, nextStatus) {
   }
   const filter = getTankStatusFilter();
   tankHint.textContent = makeActive
-    ? 'Tank restored.'
+    ? 'Tank restored to active.'
     : filter === 'active'
-      ? 'Tank archived. Switch to Archived or All to see it.'
-      : 'Tank archived.';
+      ? 'Tank completed. Switch to Completed or All to see it.'
+      : 'Tank completed.';
   await loadTanks();
 }
 
@@ -299,7 +377,34 @@ function renderTankReport(data) {
   const activities = data.activityBreakdown || [];
   const sessions = data.sessions || [];
   const finishedJobs = data.finished_jobs || [];
-  const statusLabel = String(tank.status || '').toLowerCase() === 'active' ? 'Active' : 'Archived';
+  const statusLabel = tankStatusLabel(tank);
+  const isActive = tankIsActive(tank);
+  const lifecycleSection = `
+    <section class="tank-lifecycle-panel">
+      <h4 class="tank-report-section-title">Tank Lifecycle</h4>
+      <div class="tank-lifecycle-grid">
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Tank #</div>
+          <div class="tank-lifecycle-value">#${escapeHtml(tank.tank_number)}</div>
+        </div>
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Status</div>
+          <div class="tank-lifecycle-value"><span class="badge ${isActive ? 'badge-in' : 'badge-muted'}">${statusLabel}</span></div>
+        </div>
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Created</div>
+          <div class="tank-lifecycle-value">${renderTankCreatedCell(tank)}</div>
+        </div>
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Completed</div>
+          <div class="tank-lifecycle-value">${renderTankCompletedCell(tank)}</div>
+        </div>
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Duration</div>
+          <div class="tank-lifecycle-value">${renderTankDurationBadge(tank)}</div>
+        </div>
+      </div>
+    </section>`;
 
   const summaryCards = `
     <div class="tank-report-cards">
@@ -374,6 +479,7 @@ function renderTankReport(data) {
 
   return `
     <div id="tankReportPrintArea" class="tank-report-print-area">
+      ${lifecycleSection}
       ${summaryCards}
       <h4 class="tank-report-section-title">By Employee</h4>
       <div class="table-wrap table-scroll">

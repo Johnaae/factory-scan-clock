@@ -64,7 +64,7 @@
               <label for="tankStatusFilter" style="margin-top:10px">Tank Filter</label>
               <select id="tankStatusFilter">
                 <option value="active" selected>Active</option>
-                <option value="archived">Archived</option>
+                <option value="archived">Completed</option>
                 <option value="all">All</option>
               </select>
             </div>
@@ -75,7 +75,7 @@
           <div class="table-wrap table-scroll">
             <table>
               <thead>
-                <tr><th>Tank #</th><th>Description</th><th>Status</th><th>Actions</th></tr>
+                <tr><th>Tank #</th><th>Description</th><th>Status</th><th>Created</th><th>Completed</th><th>Duration</th><th>Actions</th></tr>
               </thead>
               <tbody id="tankBody"></tbody>
             </table>
@@ -91,13 +91,11 @@
           </div>
         </div>
         <div class="card-body">
-          <p class="muted" style="margin-top:0"><strong>Page 1 — Activities:</strong> Production activities by area (each kiosk allows its area only)</p>
-          <p class="muted"><strong>Areas:</strong> Reference barcodes for production areas</p>
-          <p class="muted"><strong>Page 2 — Stop + End Shift:</strong> STOP barcodes (pause job) and End Shift (clock OUT)</p>
+          <p class="muted" style="margin-top:0"><strong>Activities:</strong> Production activity barcodes grouped by area for laminated kiosk books.</p>
+          <p class="muted"><strong>Stop / End Shift:</strong> STOP barcodes (pause job) and End Shift (clock OUT)</p>
           <div class="toolbar" style="flex-wrap:wrap;margin-top:12px">
-            <a class="btn btn-primary btn-sm" href="/manager/command-print?type=activities" target="_blank" rel="noopener">Print Activities (Page 1)</a>
-            <a class="btn btn-primary btn-sm" href="/manager/command-print?type=areas" target="_blank" rel="noopener">Print Area Barcodes</a>
-            <a class="btn btn-primary btn-sm" href="/manager/command-print?type=reasons" target="_blank" rel="noopener">Print Stop + End Shift (Page 2)</a>
+            <a class="btn btn-primary btn-sm" href="/manager/command-print?type=activities" target="_blank" rel="noopener">Print Activities by Area</a>
+            <a class="btn btn-primary btn-sm" href="/manager/command-print?type=reasons" target="_blank" rel="noopener">Print Stop / End Shift</a>
           </div>
         </div>
       </section>
@@ -132,7 +130,7 @@
         <div class="card-header">
           <div class="card-header-main">
             <h2 class="card-title">Recent Finished Jobs</h2>
-            <p class="card-kicker">Who finished which activity on which tank — updates every few seconds</p>
+            <p class="card-kicker">Latest completed work from the floor</p>
           </div>
           <div class="toolbar" style="flex-wrap:wrap;gap:10px;align-items:center">
             <label for="finishedJobsAreaFilter" class="muted">Area</label>
@@ -281,6 +279,8 @@
       </section>
     </main>
 
+    <footer class="app-footer" id="adminFooter" hidden aria-label="System information"></footer>
+
     <div id="tankReportBackdrop" class="modal-backdrop tank-report-backdrop" role="dialog" aria-modal="true" aria-hidden="true">
       <div class="modal modal-wide" role="document">
         <div class="modal-head">
@@ -295,8 +295,9 @@
     </div>
 
     <script src="/status-styles.js"></script>
-    <script src="/finished-jobs-dashboard.js?v=6"></script>
-    <script src="/manager.js"></script>
+    <script src="/finished-jobs-dashboard.js?v=8"></script>
+    <script src="/manager.js?v=3"></script>
+    <script src="/admin-footer.js"></script>
     <script src="/pwa.js"></script>
   </body>
 </html>

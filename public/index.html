@@ -50,6 +50,7 @@
         <a class="active" href="/">Dashboard</a>
         <a href="/admin.html">Employees</a>
         <a href="/summary.html">Daily Summary</a>
+        <a href="/system">System</a>
       </nav>
     </div>
 
@@ -375,7 +376,7 @@
           <div class="card-header card-header-rows">
             <div class="card-header-main">
               <h2 class="card-title">Recent Finished Jobs</h2>
-              <p class="card-kicker">Completed jobs from kiosk Finish Job scans — today by default</p>
+              <p class="card-kicker">Latest completed work from the floor</p>
             </div>
             <div class="card-header-tools card-header-tools-stack retain-focus">
               <label for="mainFinishedJobsAreaFilter" class="sr-only">Filter by area</label>
@@ -439,9 +440,12 @@
       </div>
     </main>
 
+    <footer class="app-footer" id="adminFooter" hidden aria-label="System information"></footer>
+
     <script src="/status-styles.js"></script>
-    <script src="/finished-jobs-dashboard.js?v=6"></script>
+    <script src="/finished-jobs-dashboard.js?v=8"></script>
     <script src="/app.js"></script>
+    <script src="/admin-footer.js"></script>
     <script src="/pwa.js"></script>
   </body>
 </html>

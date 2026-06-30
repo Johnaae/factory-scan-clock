@@ -59,3 +59,9 @@ DB host: localhost
 3. Do **not** set `INTERNAL_LAN_MODE=true` in production
 
 See `.env.example` for cloud deploy variables.
+
+## Database backup and restore (Windows)
+
+- **Create backup:** System page (`/system`) or `npm run backup:pg` → files in `backups\`
+- **Restore after crash:** see [DATABASE_RESTORE.md](DATABASE_RESTORE.md) and run `restore_database.bat`
+- **Nightly 11 PM backup:** see [WINDOWS_SCHEDULED_BACKUP.md](WINDOWS_SCHEDULED_BACKUP.md) and run `scheduled_backup.bat`

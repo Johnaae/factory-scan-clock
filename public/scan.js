@@ -2,7 +2,7 @@
 
 /**
  * Factory kiosk — Phase 1 workflow
- * Barcodes: EMPLOYEE, TANK, ACTIVITY (production), STOP (downtime), REASON (clock out), FINISH (end job)
+ * Barcodes: EMPLOYEE, TANK, ACTIVITY (production), STOP (downtime), REASON (clock out), FINISHED_JOB / FINISH (end job)
  */
 
 const scanForm = document.getElementById('scanForm');
@@ -220,8 +220,9 @@ function classifyBarcode(code) {
   if (KNOWN_ACTIVITY_CODES.has(n)) return { type: 'ACTIVITY', value: CODE_ALIASES.get(n) || n };
   if (KNOWN_STOP_CODES.has(n)) return { type: 'STOP', value: normalizeStopScanCode(n) };
   if (KNOWN_REASON_CODES.has(n)) return { type: 'REASON', value: n };
-  if (n === 'FINISH') return { type: 'FINISH', value: 'FINISH' };
+  if (n === 'FINISHED_JOB' || n === 'FINISH') return { type: 'FINISH', value: 'FINISH' };
   const finishPrefixed =
+    parsePrefixed(n, 'FINISHED') ||
     parsePrefixed(n, 'ACTION_FINISH') ||
     parsePrefixed(n, 'FINISH_CURRENT_TANK') ||
     parsePrefixed(n, 'FINISH_CURRENT');

@@ -15,6 +15,15 @@ const {
   withDbRetry,
   formatDbError,
 } = require('./scripts/db-config');
+const { buildEmployeeBadgesPdfBuffer } = require('./scripts/employee-badge-pdf');
+const {
+  getBackupStatus,
+  createPgBackup,
+  getLatestBackup,
+  resolveBackupDownload,
+} = require('./scripts/pg-backup');
+const { readAppVersion } = require('./scripts/app-version');
+const { getSystemHealthSummary, getServerStatus, checkDatabase, checkPm2Status, getDatabaseSize, toIsoTime } = require('./scripts/system-health');
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const app = express();
@@ -22,6 +31,7 @@ const app = express();
 app.set('trust proxy', 1);
 
 logDatabaseBootInfo();
+console.log('App version:', readAppVersion());
 
 if (!process.env.SESSION_SECRET) {
   console.error('❌ SESSION_SECRET missing');
@@ -91,7 +101,8 @@ CREATE TABLE IF NOT EXISTS tanks (
   description TEXT,
   status TEXT NOT NULL DEFAULT 'active',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS scan_logs (
@@ -155,6 +166,8 @@ async function runPostgresSchema() {
         await client.query('COMMIT');
         await normalizeTankStatusesInDb();
         await migrateStopStatusConstraint();
+        await migrateEmployeeBadgeRoleColumn();
+        await migrateTankLifecycleColumns();
         await backfillFinishJobEventsFromScanLogs();
         console.log('[migration] Postgres schema ready');
       } catch (e) {
@@ -713,7 +726,7 @@ async function resumeFromStop({ employee, code, auth, activity: activityOverride
       body: {
         ok: false,
         error: 'tank_archived',
-        message: 'This tank is archived. Restore it in Tank Management before resuming work.',
+        message: 'This tank is completed. Restore it in Tank Management before resuming work.',
       },
     };
   }
@@ -752,6 +765,40 @@ async function migrateStopStatusConstraint() {
   } catch (err) {
     console.warn('[migration] scan_logs STOP status constraint:', err.message);
   }
+}
+
+async function migrateEmployeeBadgeRoleColumn() {
+  try {
+    await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS badge_role TEXT`);
+  } catch (err) {
+    console.warn('[migration] employees.badge_role:', err.message);
+  }
+}
+
+async function migrateTankLifecycleColumns() {
+  try {
+    await pool.query(`ALTER TABLE tanks ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ`);
+    await pool.query(`UPDATE tanks SET created_at = NOW() WHERE created_at IS NULL`);
+    await pool.query(`
+      UPDATE tanks
+      SET completed_at = COALESCE(completed_at, updated_at, NOW())
+      WHERE LOWER(TRIM(status)) IN ('archived', 'completed')
+        AND completed_at IS NULL
+    `);
+    await pool.query(`
+      UPDATE tanks
+      SET completed_at = NULL
+      WHERE LOWER(TRIM(COALESCE(status, ''))) IN ('active', '')
+    `);
+  } catch (err) {
+    console.warn('[migration] tanks lifecycle:', err.message);
+  }
+}
+
+function parseBadgeRoleInput(body) {
+  if (!body || body.badge_role === undefined) return null;
+  const s = String(body.badge_role).trim();
+  return s || null;
 }
 
 function isCommandInBarcode(normalized) {
@@ -871,7 +918,7 @@ async function performAssignWorkWhileClockedIn({ employee, code, auth, activity,
       body: {
         ok: false,
         error: 'tank_archived',
-        message: 'This tank is archived. Restore it in Tank Management before assigning work.',
+        message: 'This tank is completed. Restore it in Tank Management before assigning work.',
       },
     };
   }
@@ -1464,7 +1511,7 @@ async function performKioskWorkAction(req, res) {
       return res.status(403).json({
         ok: false,
         error: 'tank_archived',
-        message: 'This tank is archived. Restore it in Tank Management before assigning work.',
+        message: 'This tank is completed. Restore it in Tank Management before assigning work.',
       });
     }
     const row = await insertScanLogForEmployee({
@@ -1712,7 +1759,7 @@ async function performKioskWorkAction(req, res) {
         return res.status(403).json({
           ok: false,
           error: 'tank_archived',
-          message: 'This tank is archived. Restore it in Tank Management before assigning work.',
+          message: 'This tank is completed. Restore it in Tank Management before assigning work.',
         });
       }
       if (prevTank && prevTank === tankRaw) {
@@ -1738,7 +1785,7 @@ async function performKioskWorkAction(req, res) {
         return res.status(403).json({
           ok: false,
           error: 'tank_archived',
-          message: 'This tank is archived. Restore it in Tank Management before assigning work.',
+          message: 'This tank is completed. Restore it in Tank Management before assigning work.',
         });
       }
       nextActivity = act;
@@ -1777,11 +1824,59 @@ function normalizeTankStatus(raw) {
   return 'active';
 }
 
+const TANK_SELECT_COLUMNS = 'id, tank_number, description, status, created_at, completed_at, updated_at';
+
+function tankTimestampToIso(value) {
+  if (value == null || value === '') return null;
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString();
+}
+
+function computeTankDurationMs(row) {
+  const createdIso = tankTimestampToIso(row && row.created_at);
+  if (!createdIso) return 0;
+  const created = new Date(createdIso);
+  const status = normalizeTankStatus(row && row.status);
+  let end = new Date();
+  if (status === 'archived') {
+    const completedIso = tankTimestampToIso(row.completed_at);
+    end = completedIso ? new Date(completedIso) : new Date();
+    if (Number.isNaN(end.getTime())) end = new Date();
+  }
+  return Math.max(0, end.getTime() - created.getTime());
+}
+
+function formatTankDurationDisplay(durationMs) {
+  const totalMins = Math.floor(Math.max(0, Number(durationMs) || 0) / 60000);
+  if (totalMins < 60) return `${totalMins}m`;
+  if (totalMins < 24 * 60) {
+    const h = Math.floor(totalMins / 60);
+    const m = totalMins % 60;
+    return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  }
+  const totalHours = Math.floor(totalMins / 60);
+  const d = Math.floor(totalHours / 24);
+  const h = totalHours % 24;
+  return h > 0 ? `${d}d ${h}h` : `${d}d`;
+}
+
 function mapTankRowForApi(row) {
   if (!row) return row;
+  const status = normalizeTankStatus(row.status);
+  const created_at = tankTimestampToIso(row.created_at) || nowIso();
+  const completed_at = status === 'archived' ? tankTimestampToIso(row.completed_at) : null;
+  const duration_ms = computeTankDurationMs({ ...row, created_at, completed_at, status });
   return {
-    ...row,
-    status: normalizeTankStatus(row.status),
+    id: Number(row.id),
+    tank_number: row.tank_number,
+    description: row.description,
+    status,
+    created_at,
+    completed_at,
+    updated_at: tankTimestampToIso(row.updated_at),
+    duration_ms,
+    duration_display: formatTankDurationDisplay(duration_ms),
   };
 }
 
@@ -2476,7 +2571,7 @@ async function getUserByUsername(username) {
 
 async function getTankByNumber(tankNumber) {
   const { rows } = await pool.query(
-    `SELECT id, tank_number, description, status, created_at, updated_at FROM tanks WHERE tank_number = $1`,
+    `SELECT ${TANK_SELECT_COLUMNS} FROM tanks WHERE tank_number = $1`,
     [tankNumber]
   );
   return rows[0] || null;
@@ -4121,7 +4216,10 @@ app.use((req, res, next) => {
   ) {
     return requireScanRole(req, res, next);
   }
-  if (p === '/admin.html' || p === '/summary.html' || p === '/index.html') {
+  if (p === '/admin.html' || p === '/summary.html' || p === '/index.html' || p === '/system.html') {
+    return requireManager(req, res, next);
+  }
+  if (p === '/system') {
     return requireManager(req, res, next);
   }
   if (
@@ -4151,7 +4249,9 @@ app.use((req, res, next) => {
     p.startsWith('/api/status') ||
     p.startsWith('/api/logs') ||
     p.startsWith('/api/scan_logs') ||
-    p.startsWith('/api/dashboard/finished-jobs')
+    p.startsWith('/api/dashboard/finished-jobs') ||
+    p.startsWith('/api/admin/') ||
+    p.startsWith('/api/system/')
   ) {
     return requireManager(req, res, next);
   }
@@ -4376,7 +4476,7 @@ async function postScanRecord(req, res) {
       return res.status(403).json({
         ok: false,
         error: 'tank_archived',
-        message: 'This tank is archived. Restore it in Tank Management before assigning work.',
+        message: 'This tank is completed. Restore it in Tank Management before assigning work.',
       });
     }
   }
@@ -5054,6 +5154,85 @@ app.get('/api/payroll', async (req, res) => {
   res.json({ ok: true, ...p });
 });
 
+async function loadEmployeesForBadges({ ids, activeOnly, roleOverride }) {
+  let rows;
+  if (ids && ids.length) {
+    const r = await pool.query(
+      `SELECT id, code, name, badge_role FROM employees WHERE id = ANY($1::bigint[]) ORDER BY LOWER(name) ASC`,
+      [ids]
+    );
+    rows = r.rows;
+  } else if (activeOnly) {
+    const r = await pool.query(
+      `SELECT id, code, name, badge_role FROM employees WHERE is_active = 1 ORDER BY LOWER(name) ASC`
+    );
+    rows = r.rows;
+  } else {
+    const r = await pool.query(`SELECT id, code, name, badge_role FROM employees ORDER BY LOWER(name) ASC`);
+    rows = r.rows;
+  }
+  return rows.map((e) => {
+    const fromDb =
+      e.badge_role != null && e.badge_role !== undefined ? String(e.badge_role).trim() : '';
+    return {
+      name: e.name,
+      code: e.code,
+      badge_role: roleOverride || fromDb,
+    };
+  });
+}
+
+app.get('/api/employees/badges.pdf', async (req, res) => {
+  try {
+    const activeOnly = req.query.active_only !== '0' && req.query.active_only !== 'false';
+    const roleOverride = req.query.role ? String(req.query.role).trim() : null;
+    let ids = null;
+    if (req.query.ids) {
+      ids = String(req.query.ids)
+        .split(',')
+        .map((x) => Number(String(x).trim()))
+        .filter((n) => Number.isInteger(n) && n > 0);
+    }
+    const employees = await loadEmployeesForBadges({
+      ids: ids && ids.length ? ids : null,
+      activeOnly: ids && ids.length ? false : activeOnly,
+      roleOverride,
+    });
+    if (!employees.length) {
+      return res.status(404).json({ ok: false, message: 'No employees found for badge print.' });
+    }
+    const buf = await buildEmployeeBadgesPdfBuffer(employees);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'attachment; filename="fgt-employee-badges.pdf"');
+    return res.send(buf);
+  } catch (err) {
+    console.error('[badge pdf] batch', err);
+    return res.status(500).json({ ok: false, message: err.message || 'Could not generate badges.' });
+  }
+});
+
+app.get('/api/employees/:id/badge.pdf', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({ ok: false, message: 'Invalid employee id.' });
+  }
+  try {
+    const roleOverride = req.query.role ? String(req.query.role).trim() : null;
+    const employees = await loadEmployeesForBadges({ ids: [id], activeOnly: false, roleOverride });
+    if (!employees.length) {
+      return res.status(404).json({ ok: false, message: 'Employee not found.' });
+    }
+    const buf = await buildEmployeeBadgesPdfBuffer(employees);
+    const code = String(employees[0].code || 'employee').replace(/[^\w-]+/g, '_');
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="fgt-badge-${code}.pdf"`);
+    return res.send(buf);
+  } catch (err) {
+    console.error('[badge pdf] single', err);
+    return res.status(500).json({ ok: false, message: err.message || 'Could not generate badge.' });
+  }
+});
+
 app.get('/api/employees', async (req, res) => {
   const search = req.query.search ? String(req.query.search).trim() : '';
   const day = localDateString();
@@ -5064,7 +5243,7 @@ app.get('/api/employees', async (req, res) => {
     const safe = search.replace(/%/g, '').replace(/_/g, '');
     const pattern = `%${safe}%`;
     const r = await pool.query(
-      `SELECT id, code, name, is_active, hourly_rate, created_at, updated_at FROM employees
+      `SELECT id, code, name, is_active, hourly_rate, badge_role, created_at, updated_at FROM employees
        WHERE lower(code) LIKE lower($1) OR lower(name) LIKE lower($2)
        ORDER BY LOWER(name) ASC`,
       [pattern, pattern]
@@ -5072,7 +5251,7 @@ app.get('/api/employees', async (req, res) => {
     rows = r.rows;
   } else {
     const r = await pool.query(
-      `SELECT id, code, name, is_active, hourly_rate, created_at, updated_at FROM employees ORDER BY LOWER(name) ASC`
+      `SELECT id, code, name, is_active, hourly_rate, badge_role, created_at, updated_at FROM employees ORDER BY LOWER(name) ASC`
     );
     rows = r.rows;
   }
@@ -5082,6 +5261,7 @@ app.get('/api/employees', async (req, res) => {
       ...e,
       is_active: !!e.is_active,
       hourly_rate: Number.isFinite(Number(e.hourly_rate)) ? Number(e.hourly_rate) : 20,
+      badge_role: e.badge_role ? String(e.badge_role) : '',
       daily_hours: Number.isFinite(Number(workedMap.get(Number(e.id)))) ? Number(workedMap.get(Number(e.id))) : 0,
     })),
   });
@@ -5093,7 +5273,7 @@ app.get('/api/employees/:id', async (req, res) => {
     return res.status(400).json({ ok: false, error: 'invalid_id', message: 'Invalid employee id.' });
   }
   const r = await pool.query(
-    'SELECT id, code, name, is_active, hourly_rate, created_at, updated_at FROM employees WHERE id = $1',
+    'SELECT id, code, name, is_active, hourly_rate, badge_role, created_at, updated_at FROM employees WHERE id = $1',
     [id]
   );
   if (!r.rows.length) {
@@ -5106,6 +5286,7 @@ app.get('/api/employees/:id', async (req, res) => {
       ...e,
       is_active: !!e.is_active,
       hourly_rate: Number.isFinite(Number(e.hourly_rate)) ? Number(e.hourly_rate) : 20,
+      badge_role: e.badge_role ? String(e.badge_role) : '',
     },
   });
 });
@@ -5117,14 +5298,15 @@ app.post('/api/employees', async (req, res) => {
     return res.status(400).json({ ok: false, error: 'validation', message: 'code and name are required.' });
   }
   const hourly_rate = parseHourlyRate(req.body && req.body.hourly_rate);
+  const badge_role = parseBadgeRoleInput(req.body);
 
   const ts = nowIso();
   try {
     const ins = await pool.query(
-      `INSERT INTO employees (code, name, is_active, hourly_rate, created_at, updated_at)
-       VALUES ($1, $2, 1, $3, $4::timestamptz, $5::timestamptz)
-       RETURNING id, code, name, is_active, hourly_rate, created_at, updated_at`,
-      [code, name, hourly_rate, ts, ts]
+      `INSERT INTO employees (code, name, is_active, hourly_rate, badge_role, created_at, updated_at)
+       VALUES ($1, $2, 1, $3, $4, $5::timestamptz, $6::timestamptz)
+       RETURNING id, code, name, is_active, hourly_rate, badge_role, created_at, updated_at`,
+      [code, name, hourly_rate, badge_role, ts, ts]
     );
     const created = ins.rows[0];
     return res.status(201).json({
@@ -5158,17 +5340,14 @@ app.put('/api/employees/:id', async (req, res) => {
   const hourly_rate = parseHourlyRate(req.body && req.body.hourly_rate);
   const statusRaw = String((req.body && req.body.status) || '').trim().toUpperCase();
   const is_active = statusRaw === 'INACTIVE' ? 0 : 1;
+  const badge_role = parseBadgeRoleInput(req.body);
 
   const ts = nowIso();
   try {
-    await pool.query(`UPDATE employees SET code = $1, name = $2, hourly_rate = $3, is_active = $4, updated_at = $5::timestamptz WHERE id = $6`, [
-      code,
-      name,
-      hourly_rate,
-      is_active,
-      ts,
-      id,
-    ]);
+    await pool.query(
+      `UPDATE employees SET code = $1, name = $2, hourly_rate = $3, is_active = $4, badge_role = $5, updated_at = $6::timestamptz WHERE id = $7`,
+      [code, name, hourly_rate, is_active, badge_role, ts, id]
+    );
   } catch (e) {
     if (e && e.code === '23505') {
       return res.status(409).json({ ok: false, error: 'duplicate_code', message: 'Employee code already exists.' });
@@ -5177,14 +5356,19 @@ app.put('/api/employees/:id', async (req, res) => {
   }
 
   const updatedRes = await pool.query(
-    'SELECT id, code, name, is_active, hourly_rate, created_at, updated_at FROM employees WHERE id = $1',
+    'SELECT id, code, name, is_active, hourly_rate, badge_role, created_at, updated_at FROM employees WHERE id = $1',
     [id]
   );
   const updated = updatedRes.rows[0];
   res.json({
     success: true,
     ok: true,
-    employee: { ...updated, is_active: !!updated.is_active, hourly_rate: Number(updated.hourly_rate) },
+    employee: {
+      ...updated,
+      is_active: !!updated.is_active,
+      hourly_rate: Number(updated.hourly_rate),
+      badge_role: updated.badge_role ? String(updated.badge_role) : '',
+    },
   });
 });
 
@@ -5223,7 +5407,7 @@ app.get('/api/tanks', async (req, res) => {
   const search = String(req.query.search || '').trim();
   const statusFilter = String(req.query.status || 'active').trim().toLowerCase();
   const activeOnly = String(req.query.active_only || '').toLowerCase() === '1';
-  let sql = `SELECT id, tank_number, description, status, created_at, updated_at FROM tanks WHERE 1=1`;
+  let sql = `SELECT ${TANK_SELECT_COLUMNS} FROM tanks WHERE 1=1`;
   const params = [];
   let n = 1;
   if (statusFilter === 'active') {
@@ -5236,7 +5420,7 @@ app.get('/api/tanks', async (req, res) => {
     return res.status(400).json({
       ok: false,
       error: 'validation',
-      message: 'status filter must be active, archived, or all.',
+      message: 'status filter must be active, completed, or all.',
     });
   }
   if (search) {
@@ -5263,10 +5447,7 @@ app.post('/api/tanks', async (req, res) => {
       [tank_number, description, ts, ts]
     );
     const tid = ins.rows[0].id;
-    const tankRes = await pool.query(
-      `SELECT id, tank_number, description, status, created_at, updated_at FROM tanks WHERE id = $1`,
-      [tid]
-    );
+    const tankRes = await pool.query(`SELECT ${TANK_SELECT_COLUMNS} FROM tanks WHERE id = $1`, [tid]);
     return res.status(201).json({ ok: true, tank: mapTankRowForApi(tankRes.rows[0]) });
   } catch (e) {
     if (e && e.code === '23505') {
@@ -5290,20 +5471,30 @@ app.put('/api/tanks/:id', async (req, res) => {
   if (!tank_number) return res.status(400).json({ ok: false, error: 'validation', message: 'tank_number is required.' });
   const ts = nowIso();
   try {
-    await pool.query(`UPDATE tanks SET tank_number = $1, description = $2, status = $3, updated_at = $4::timestamptz WHERE id = $5`, [
-      tank_number,
-      description,
-      status,
-      ts,
-      id,
-    ]);
+    const becomingArchived = status === 'archived' && normalizeTankStatus(current.rows[0].status) !== 'archived';
+    const becomingActive = status === 'active' && normalizeTankStatus(current.rows[0].status) === 'archived';
+    const completedAt = becomingArchived ? ts : becomingActive ? null : undefined;
+    if (completedAt !== undefined) {
+      await pool.query(
+        `UPDATE tanks SET tank_number = $1, description = $2, status = $3, completed_at = $4, updated_at = $5::timestamptz WHERE id = $6`,
+        [tank_number, description, status, completedAt, ts, id]
+      );
+    } else {
+      await pool.query(`UPDATE tanks SET tank_number = $1, description = $2, status = $3, updated_at = $4::timestamptz WHERE id = $5`, [
+        tank_number,
+        description,
+        status,
+        ts,
+        id,
+      ]);
+    }
   } catch (e) {
     if (e && e.code === '23505') {
       return res.status(409).json({ ok: false, error: 'duplicate_tank', message: 'Tank number already exists.' });
     }
     return res.status(500).json({ ok: false, error: 'server', message: 'Could not update tank.' });
   }
-  const tankRes = await pool.query(`SELECT id, tank_number, description, status, created_at, updated_at FROM tanks WHERE id = $1`, [id]);
+  const tankRes = await pool.query(`SELECT ${TANK_SELECT_COLUMNS} FROM tanks WHERE id = $1`, [id]);
   res.json({ ok: true, tank: mapTankRowForApi(tankRes.rows[0]) });
 });
 
@@ -5314,8 +5505,12 @@ app.patch('/api/tanks/:id/archive', async (req, res) => {
   if (!rowRes.rows.length) return res.status(404).json({ ok: false, error: 'not_found' });
   const status = normalizeTankStatus(req.body && req.body.status ? req.body.status : 'archived');
   const ts = nowIso();
-  await pool.query(`UPDATE tanks SET status = $1, updated_at = $2::timestamptz WHERE id = $3`, [status, ts, id]);
-  const tankRes = await pool.query(`SELECT id, tank_number, description, status, created_at, updated_at FROM tanks WHERE id = $1`, [id]);
+  await pool.query(`UPDATE tanks SET status = $1, completed_at = $2::timestamptz, updated_at = $2::timestamptz WHERE id = $3`, [
+    status,
+    ts,
+    id,
+  ]);
+  const tankRes = await pool.query(`SELECT ${TANK_SELECT_COLUMNS} FROM tanks WHERE id = $1`, [id]);
   res.json({ ok: true, tank: mapTankRowForApi(tankRes.rows[0]) });
 });
 
@@ -5325,20 +5520,17 @@ app.patch('/api/tanks/:id/restore', async (req, res) => {
   const rowRes = await pool.query(`SELECT id FROM tanks WHERE id = $1`, [id]);
   if (!rowRes.rows.length) return res.status(404).json({ ok: false, error: 'not_found' });
   const ts = nowIso();
-  await pool.query(`UPDATE tanks SET status = 'active', updated_at = $1::timestamptz WHERE id = $2`, [ts, id]);
-  const tankRes = await pool.query(`SELECT id, tank_number, description, status, created_at, updated_at FROM tanks WHERE id = $1`, [id]);
+  await pool.query(`UPDATE tanks SET status = 'active', completed_at = NULL, updated_at = $1::timestamptz WHERE id = $2`, [ts, id]);
+  const tankRes = await pool.query(`SELECT ${TANK_SELECT_COLUMNS} FROM tanks WHERE id = $1`, [id]);
   res.json({ ok: true, tank: mapTankRowForApi(tankRes.rows[0]) });
 });
 
 app.get('/api/tanks/:id/report', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ ok: false, error: 'invalid_id' });
-  const tankRes = await pool.query(
-    `SELECT id, tank_number, description, status, created_at, updated_at FROM tanks WHERE id = $1`,
-    [id]
-  );
+  const tankRes = await pool.query(`SELECT ${TANK_SELECT_COLUMNS} FROM tanks WHERE id = $1`, [id]);
   if (!tankRes.rows.length) return res.status(404).json({ ok: false, error: 'not_found', message: 'Tank not found.' });
-  const tank = tankRes.rows[0];
+  const tank = mapTankRowForApi(tankRes.rows[0]);
   const logsAsc = await fetchTankLaborLogs(tank.tank_number);
   const emRes = await pool.query(`SELECT id, code, name, hourly_rate FROM employees`);
   const employeesByCode = new Map();
@@ -5347,15 +5539,18 @@ app.get('/api/tanks/:id/report', async (req, res) => {
   }
   const report = computeTankLaborReport(tank.tank_number, logsAsc, employeesByCode, Date.now());
   const finishedJobs = await fetchFinishJobEvents({ tankNumber: tank.tank_number, limit: 50 });
-  const registryStatus = normalizeTankStatus(tank.status);
   res.json({
     ok: true,
     tank: {
       id: tank.id,
       tank_number: tank.tank_number,
       description: tank.description,
-      status: registryStatus,
-      registry_status: tank.status,
+      status: tank.status,
+      registry_status: tankRes.rows[0].status,
+      created_at: tank.created_at,
+      completed_at: tank.completed_at,
+      duration_ms: tank.duration_ms,
+      duration_display: tank.duration_display,
     },
     summary: report.summary,
     employeeBreakdown: report.employeeBreakdown,
@@ -5756,6 +5951,143 @@ function isOwnerManager(auth) {
   return !!auth && auth.role === ROLE.MANAGER && String(auth.username || '').toLowerCase() === 'owner';
 }
 
+app.get('/api/system/server-status', (_req, res) => {
+  try {
+    return res.json(getServerStatus());
+  } catch (e) {
+    console.error('[system/server-status]', e);
+    return res.json({ ok: false, status: 'offline', message: 'Server status unavailable' });
+  }
+});
+
+app.get('/api/system/database-status', async (_req, res) => {
+  try {
+    const db = await checkDatabase(pool);
+    return res.json({
+      ok: db.status === 'connected',
+      status: db.status,
+      message: db.message,
+      server_time: db.server_time ? toIsoTime(db.server_time) : null,
+    });
+  } catch (e) {
+    console.error('[system/database-status]', e);
+    return res.json({ ok: false, status: 'disconnected', message: 'Database check failed' });
+  }
+});
+
+app.get('/api/system/database-size', async (_req, res) => {
+  try {
+    const size = await getDatabaseSize(pool);
+    return res.json({ ok: true, size: size || 'unknown' });
+  } catch (e) {
+    console.error('[system/database-size]', e);
+    return res.json({ ok: false, size: null, message: 'Could not read database size' });
+  }
+});
+
+app.get('/api/system/server-time', async (_req, res) => {
+  try {
+    const db = await checkDatabase(pool);
+    if (db.status === 'connected' && db.server_time) {
+      return res.json({ ok: true, server_time: toIsoTime(db.server_time) });
+    }
+    return res.json({
+      ok: false,
+      server_time: new Date().toISOString(),
+      message: 'Database unavailable — using app server time',
+    });
+  } catch (e) {
+    console.error('[system/server-time]', e);
+    return res.json({
+      ok: false,
+      server_time: new Date().toISOString(),
+      message: 'Could not read server time from database',
+    });
+  }
+});
+
+app.get('/api/system/pm2-status', async (_req, res) => {
+  try {
+    const pm2 = await checkPm2Status();
+    return res.json({
+      ok: pm2.status === 'online',
+      status: pm2.status,
+      message: pm2.message,
+    });
+  } catch (e) {
+    console.error('[system/pm2-status]', e);
+    return res.json({ ok: false, status: 'offline', message: 'PM2 check failed' });
+  }
+});
+
+app.get('/api/admin/system/info', async (_req, res) => {
+  try {
+    const health = await getSystemHealthSummary(pool, readAppVersion());
+    return res.json(health);
+  } catch (e) {
+    console.error('[admin/system/info]', e);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not read system information.' });
+  }
+});
+
+app.get('/api/admin/backup/status', (_req, res) => {
+  try {
+    const status = getBackupStatus(readAppVersion());
+    return res.json({ ok: true, ...status });
+  } catch (e) {
+    console.error('[admin/backup/status]', e);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not read backup status.' });
+  }
+});
+
+app.post('/api/admin/backup/create', async (req, res) => {
+  try {
+    const result = await createPgBackup();
+    console.log(`[admin/backup/create] wrote ${result.filename} (${result.size_bytes} bytes)`);
+    return res.json({
+      ok: true,
+      message: `Backup created: ${result.filename}`,
+      filename: result.filename,
+      created_at: result.created_at,
+      size_bytes: result.size_bytes,
+    });
+  } catch (e) {
+    console.error('[admin/backup/create]', e);
+    const details = e && e.details ? e.details : null;
+    const message =
+      e && e.code === 'backup_config'
+        ? (details && details.length ? details.join(' ') : e.message)
+        : e && e.message
+          ? e.message
+          : 'Backup failed.';
+    return res.status(e && e.code === 'backup_config' ? 400 : 500).json({
+      ok: false,
+      error: e && e.code === 'backup_config' ? 'backup_config' : 'server_error',
+      message,
+      details,
+    });
+  }
+});
+
+app.get('/api/admin/backup/latest/download', (req, res) => {
+  try {
+    const latest = getLatestBackup();
+    if (!latest) {
+      return res.status(404).json({ ok: false, error: 'not_found', message: 'No PostgreSQL backup file found.' });
+    }
+    const resolved = resolveBackupDownload(latest.filename);
+    if (resolved.error) {
+      return res.status(404).json({ ok: false, error: 'not_found', message: resolved.error });
+    }
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="${resolved.filename}"`);
+    return res.sendFile(resolved.path);
+  } catch (e) {
+    console.error('[admin/backup/latest/download]', e);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not download backup.' });
+  }
+});
+
 app.post('/api/owner/change-password', async (req, res) => {
   const auth = currentAuthFromSession(req);
   if (!isOwnerManager(auth)) {
@@ -5912,6 +6244,10 @@ app.get('/manager', (_req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'manager.html'));
 });
 
+app.get('/system', (_req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'system.html'));
+});
+
 app.get('/dashboard', (_req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
 });
@@ -5919,6 +6255,179 @@ app.get('/dashboard', (_req, res) => {
 app.get('/', (_req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
 });
+
+function renderActivitiesByAreaPrintPage() {
+  let bcIndex = 0;
+  const scripts = [];
+  const sections = KIOSK_PRODUCTION_AREAS.map((area) => {
+    const items = getKioskActivitiesForArea(area);
+    const areaHeader = String(area).replace(/</g, '&lt;').toUpperCase();
+    const cards = items
+      .map((a) => {
+        const label = String(a.label || '').replace(/</g, '&lt;');
+        const sub = String(area).replace(/</g, '&lt;');
+        const val = String(a.barcode || '').replace(/</g, '&lt;');
+        const esc = String(a.barcode || '').replace(/'/g, "\\'");
+        const id = `bc${bcIndex++}`;
+        scripts.push(
+          `JsBarcode('#${id}','${esc}',{format:'CODE128',displayValue:false,height:110,margin:10,width:2.4});`
+        );
+        return `<div class="card">
+  <p class="label">${label}</p>
+  <p class="sub">${sub}</p>
+  <svg id="${id}"></svg>
+  <p class="value">${val}</p>
+</div>`;
+      })
+      .join('');
+    return `<section class="area-section">
+  <h2 class="area-header">${areaHeader}</h2>
+  <hr class="area-rule" />
+  <div class="area-grid">${cards}</div>
+</section>`;
+  }).join('');
+
+  return `<!doctype html>
+<html><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Production Activities by Area</title>
+<style>
+@page { size: letter; margin: 0.55in; }
+* { box-sizing: border-box; }
+body { font-family: Arial, Helvetica, sans-serif; margin: 0; padding: 20px 24px 28px; color: #0f172a; background: #fff; }
+.page-head { margin-bottom: 24px; }
+h1 { font-size: 26px; font-weight: 800; margin: 0 0 6px; letter-spacing: 0.02em; }
+.instr { font-size: 14px; color: #475569; margin: 0; line-height: 1.45; max-width: 720px; }
+.area-section { margin-bottom: 32px; page-break-inside: avoid; }
+.area-section + .area-section { page-break-before: auto; }
+.area-header { font-size: 20px; font-weight: 800; margin: 0 0 6px; letter-spacing: 0.08em; color: #1a3a5c; }
+.area-rule { border: none; border-top: 2px solid #1a3a5c; margin: 0 0 16px; }
+.area-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 22px; }
+.card { border: 2px solid #cbd5e1; border-radius: 12px; padding: 16px 14px 14px; text-align: center; break-inside: avoid; background: #fff; }
+.label { font-size: 20px; font-weight: 800; margin: 0; line-height: 1.2; color: #0f172a; }
+.sub { font-size: 11px; color: #64748b; margin: 6px 0 12px; text-transform: uppercase; letter-spacing: 0.07em; font-weight: 600; }
+.card svg { display: block; width: 100%; max-width: 340px; height: 110px; margin: 0 auto; }
+.value { font-size: 13px; font-family: Consolas, Monaco, monospace; margin: 10px 0 0; font-weight: 700; color: #1e293b; letter-spacing: 0.04em; word-break: break-all; }
+@media print {
+  body { padding: 0; }
+  .area-section { margin-bottom: 28px; }
+  .card { border: 1.5px solid #94a3b8; }
+}
+@media (max-width: 640px) {
+  .area-grid { grid-template-columns: 1fr; }
+}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
+</head><body>
+<div class="page-head">
+  <h1>Production Activities by Area</h1>
+  <p class="instr">Scan employee badge, tank, then activity. Each section lists activities for one production area. Laminate and keep at the kiosk station.</p>
+</div>
+${sections}
+<script>${scripts.join('')}window.setTimeout(()=>window.print(),450);</script>
+</body></html>`;
+}
+
+function renderStopEndShiftPrintPage() {
+  let bcIndex = 0;
+  const scripts = [];
+
+  function renderCard(title, description, barcode) {
+    const safeTitle = String(title || '').replace(/</g, '&lt;');
+    const safeDesc = String(description || '').replace(/</g, '&lt;');
+    const safeVal = String(barcode || '').replace(/</g, '&lt;');
+    const esc = String(barcode || '').replace(/'/g, "\\'");
+    const id = `bc${bcIndex++}`;
+    scripts.push(
+      `JsBarcode('#${id}','${esc}',{format:'CODE128',displayValue:false,height:112,margin:12,width:3});`
+    );
+    return `<div class="scan-card">
+  <p class="card-title">${safeTitle}</p>
+  <p class="card-desc">${safeDesc}</p>
+  <svg id="${id}"></svg>
+  <p class="card-code">${safeVal}</p>
+</div>`;
+  }
+
+  const jobActions = [
+    {
+      title: 'Finished Job',
+      description: 'Complete current activity and send it to Recent Finished Jobs.',
+      barcode: 'FINISHED_JOB',
+    },
+    {
+      title: 'End Shift',
+      description: 'Employee clocks OUT for the day.',
+      barcode: 'REASON:END_SHIFT',
+    },
+  ];
+
+  const stopReasons = [
+    { title: 'Clean Up', description: 'Pause current job. Activity and tank are preserved.', barcode: 'STOP:CLEAN_UP' },
+    { title: 'Lunch', description: 'Pause current job. Activity and tank are preserved.', barcode: 'STOP:LUNCH' },
+    { title: 'Break', description: 'Pause current job. Activity and tank are preserved.', barcode: 'STOP:BREAK' },
+    { title: 'Material', description: 'Pause current job. Activity and tank are preserved.', barcode: 'STOP:MATERIAL' },
+    {
+      title: 'Maintenance / Downtime',
+      description: 'Pause current job. Activity and tank are preserved.',
+      barcode: 'STOP:MAINTENANCE_DOWNTIME',
+    },
+  ];
+
+  const jobCards = jobActions.map((a) => renderCard(a.title, a.description, a.barcode)).join('');
+  const stopCards = stopReasons.map((a) => renderCard(a.title, a.description, a.barcode)).join('');
+
+  return `<!doctype html>
+<html><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>STOP / END SHIFT SCAN SHEET</title>
+<style>
+@page { size: letter; margin: 0.55in; }
+* { box-sizing: border-box; }
+body { font-family: Arial, Helvetica, sans-serif; margin: 0; padding: 0; color: #0f172a; background: #fff; }
+.print-page { padding: 20px 24px 28px; }
+.print-page + .print-page { page-break-before: always; padding-top: 24px; }
+.page-head { margin-bottom: 22px; }
+h1 { font-size: 28px; font-weight: 800; margin: 0 0 8px; letter-spacing: 0.04em; color: #1a3a5c; }
+.subtitle { font-size: 15px; color: #475569; margin: 0; line-height: 1.45; max-width: 720px; }
+.section { margin-bottom: 8px; }
+.section-title { font-size: 16px; font-weight: 800; margin: 0 0 14px; letter-spacing: 0.1em; text-transform: uppercase; color: #1a3a5c; }
+.grid { display: grid; gap: 20px 22px; }
+.grid--2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.scan-card { border: 2px solid #cbd5e1; border-radius: 14px; padding: 18px 16px 16px; text-align: center; background: #fff; min-height: 180px; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; break-inside: avoid; }
+.card-title { font-size: 22px; font-weight: 800; margin: 0; line-height: 1.2; color: #0f172a; }
+.card-desc { font-size: 12px; color: #64748b; margin: 8px 0 14px; line-height: 1.4; max-width: 280px; min-height: 34px; }
+.scan-card svg { display: block; width: 100%; max-width: 360px; height: 112px; margin: 0 auto; flex-shrink: 0; }
+.card-code { font-size: 14px; font-family: Consolas, Monaco, monospace; margin: 12px 0 0; font-weight: 700; color: #1e293b; letter-spacing: 0.05em; word-break: break-all; }
+@media print {
+  .print-page { padding: 0; }
+  .scan-card { border: 1.5px solid #94a3b8; min-height: 180px; }
+}
+@media (max-width: 640px) {
+  .grid--2 { grid-template-columns: 1fr; }
+}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
+</head><body>
+<div class="print-page">
+  <div class="page-head">
+    <h1>STOP / END SHIFT SCAN SHEET</h1>
+    <p class="subtitle">Scan these codes when pausing work, completing work, or clocking out.</p>
+  </div>
+  <section class="section">
+    <h2 class="section-title">Job Status Actions</h2>
+    <div class="grid grid--2">${jobCards}</div>
+  </section>
+</div>
+<div class="print-page">
+  <section class="section">
+    <h2 class="section-title">Stop Reasons</h2>
+    <div class="grid grid--2">${stopCards}</div>
+  </section>
+</div>
+<script>${scripts.join('')}window.setTimeout(()=>window.print(),450);</script>
+</body></html>`;
+}
 
 function renderMultiBarcodePrintPage(pageTitle, instruction, items) {
   const safeTitle = String(pageTitle || 'Barcodes').replace(/</g, '&lt;');
@@ -5990,48 +6499,13 @@ svg{max-width:100%;height:120px}
 app.get('/manager/command-print', (req, res) => {
   const type = String(req.query.type || '').toLowerCase();
   if (type === 'activities') {
-    const activityCards = KIOSK_PRODUCTION_AREAS.flatMap((area) => {
-      const items = getKioskActivitiesForArea(area);
-      return items.map((a) => ({
-        title: `${a.label} (${area})`,
-        barcode: a.barcode,
-        sub: area,
-      }));
-    });
-    return res.type('html').send(
-      renderMultiBarcodePrintPage(
-        'Production Activity Barcodes (Page 1)',
-        'OUT: Employee → Tank → Activity. IN: Employee → Activity or Tank. Activities are area-specific.',
-        activityCards
-      )
-    );
+    return res.type('html').send(renderActivitiesByAreaPrintPage());
   }
   if (type === 'areas') {
-    const areaCards = [
-      { title: 'Fabrication', barcode: 'AREA:FABRICATION', sub: 'Kiosk area' },
-      { title: 'Assembly', barcode: 'AREA:ASSEMBLY', sub: 'Kiosk area' },
-      { title: 'QA/QC', barcode: 'AREA:QAQC', sub: 'Kiosk area' },
-      { title: 'Shipping & Handling', barcode: 'AREA:SHIPPING_HANDLING', sub: 'Kiosk area' },
-    ];
-    return res.type('html').send(
-      renderMultiBarcodePrintPage('Production Area Barcodes', 'Reference labels for kiosk areas.', areaCards)
-    );
+    return res.status(410).send('Area barcode printing has been removed. Use Print Activities by Area instead.');
   }
   if (type === 'reasons' || type === 'stops') {
-    return res.type('html').send(
-      renderMultiBarcodePrintPage(
-        'Stop + End Shift Barcodes (Page 2)',
-        'STOP pauses the current job (activity + tank preserved). End Shift clocks OUT.',
-        [
-          { title: 'Clean Up', barcode: 'STOP:CLEAN_UP', sub: 'STOP — pause job' },
-          { title: 'Lunch', barcode: 'STOP:LUNCH', sub: 'STOP — pause job' },
-          { title: 'Break', barcode: 'STOP:BREAK', sub: 'STOP — pause job' },
-          { title: 'Material', barcode: 'STOP:MATERIAL', sub: 'STOP — pause job' },
-          { title: 'Maintenance/Downtime', barcode: 'STOP:MAINTENANCE_DOWNTIME', sub: 'STOP — pause job' },
-          { title: 'End Shift', barcode: 'REASON:END_SHIFT', sub: 'Clock OUT' },
-        ]
-      )
-    );
+    return res.type('html').send(renderStopEndShiftPrintPage());
   }
   const map = {
     lunch: { title: 'Lunch Stop', barcode: 'STOP:LUNCH', sub: 'STOP — pause job' },
