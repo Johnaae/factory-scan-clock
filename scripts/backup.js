@@ -38,6 +38,25 @@ async function run() {
       `SELECT id, username, role, station_name, area_name, is_active, created_at, updated_at
        FROM users ORDER BY id ASC`
     );
+    const teams = await client.query(
+      `SELECT id, name, barcode, active, created_at, updated_at FROM teams ORDER BY id ASC`
+    );
+    const machines = await client.query(
+      `SELECT id, name, code, kiosk_slug, active, created_at, updated_at FROM machines ORDER BY id ASC`
+    );
+    const machineSessions = await client.query(
+      `SELECT id, machine_id, team_id, tank_id, activity_code, activity_name, status,
+              started_at, stopped_at, resumed_at, finished_at, stop_reason, notes, created_at, updated_at
+       FROM machine_sessions ORDER BY id ASC`
+    );
+    const teamMembers = await client.query(
+      `SELECT tm.id, tm.team_id, tm.name, tm.role, tm.active, tm.created_at, tm.employee_id FROM team_members tm ORDER BY tm.id ASC`
+    );
+    const alertEvents = await client.query(
+      `SELECT id, machine_id, team_id, tank_id, session_id, alert_type, alert_code, status,
+              reported_at, resolved_at, resolved_by, notes, created_at
+       FROM alert_events ORDER BY id ASC`
+    );
 
     return {
       generated_at: new Date().toISOString(),
@@ -46,6 +65,11 @@ async function run() {
       employees: employees.rows,
       tanks: tanks.rows,
       scan_logs: scanLogs.rows,
+      teams: teams.rows,
+      machines: machines.rows,
+      machine_sessions: machineSessions.rows,
+      team_members: teamMembers.rows,
+      alert_events: alertEvents.rows,
     };
   });
 

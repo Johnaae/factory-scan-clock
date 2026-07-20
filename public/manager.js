@@ -6,19 +6,13 @@ const tankStatusFilter = document.getElementById('tankStatusFilter');
 const btnAddTank = document.getElementById('btnAddTank');
 const tankHint = document.getElementById('tankHint');
 const tankBody = document.getElementById('tankBody');
-const currentWorkBody = document.getElementById('currentWorkBody');
-const tankSummaryBody = document.getElementById('tankSummaryBody');
-const overtimeBody = document.getElementById('overtimeBody');
-const areaFilter = document.getElementById('areaFilter');
 const logoutBtn = document.getElementById('logoutBtn');
-const pinAreaA = document.getElementById('pinAreaA');
-const pinAreaB = document.getElementById('pinAreaB');
-const pinAreaC = document.getElementById('pinAreaC');
-const pinAreaD = document.getElementById('pinAreaD');
-const showPinA = document.getElementById('showPinA');
-const showPinB = document.getElementById('showPinB');
-const showPinC = document.getElementById('showPinC');
-const showPinD = document.getElementById('showPinD');
+const pinWm1 = document.getElementById('pinWm1');
+const pinWm2 = document.getElementById('pinWm2');
+const pinWm3 = document.getElementById('pinWm3');
+const showPinWm1 = document.getElementById('showPinWm1');
+const showPinWm2 = document.getElementById('showPinWm2');
+const showPinWm3 = document.getElementById('showPinWm3');
 const btnSaveKioskPins = document.getElementById('btnSaveKioskPins');
 const kioskPinHint = document.getElementById('kioskPinHint');
 const ownerSecuritySection = document.getElementById('ownerSecuritySection');
@@ -39,7 +33,6 @@ const tankReportBody = document.getElementById('tankReportBody');
 const btnCloseTankReport = document.getElementById('btnCloseTankReport');
 const btnPrintTankReport = document.getElementById('btnPrintTankReport');
 let currentAuthUser = null;
-let currentWorkRowsCache = [];
 let tanksFetchSeq = 0;
 let tankActionInFlight = false;
 
@@ -60,7 +53,7 @@ async function apiJson(url, opts) {
 
 function tankIsActive(t) {
   const st = String((t && t.status) || 'active').toLowerCase();
-  return st === 'active' || st === '';
+  return st === 'active' || st === 'paused' || st === '';
 }
 
 function fmtTankDateTime(iso) {
@@ -151,7 +144,11 @@ function fmtHours(v) {
 
 function displayAreaName(area) {
   const map = {
-    'Area A': 'Fabrication',
+    'Area A': 'Winding Machine 01',
+    Fabrication: 'Winding Machine 01',
+    'Winding Machine 1': 'Winding Machine 01',
+    'Winding Machine 2': 'Winding Machine 02',
+    'Winding Machine 3': 'Winding Machine 03',
     'Area B': 'Assembly',
     'Area C': 'QA/QC',
   };
@@ -208,20 +205,6 @@ function statusBadgeFor(value, labelOverride) {
   return `<span class="badge ${cls}">${label}</span>`;
 }
 
-function refreshCurrentWorkElapsedCells() {
-  if (!currentWorkBody) return;
-  const cells = currentWorkBody.querySelectorAll('[data-started-at]');
-  cells.forEach((cell) => {
-    if (cell.getAttribute('data-elapsed-paused') === '1') {
-      const mins = Number(cell.getAttribute('data-elapsed-minutes') || 0);
-      cell.textContent = `${minutesToText(mins)} (paused)`;
-      return;
-    }
-    const iso = cell.getAttribute('data-started-at');
-    cell.textContent = elapsedFromIso(iso);
-  });
-}
-
 function getTankStatusFilter() {
   const raw = tankStatusFilter ? String(tankStatusFilter.value || '').toLowerCase() : 'active';
   if (raw === 'archived' || raw === 'all') return raw;
@@ -229,7 +212,10 @@ function getTankStatusFilter() {
 }
 
 function tankStatusLabel(t) {
-  return tankIsActive(t) ? 'Active' : 'Completed';
+  const st = String((t && t.status) || 'active').toLowerCase();
+  if (st === 'archived') return 'Completed';
+  if (st === 'paused') return 'In Progress — Paused';
+  return 'In Progress';
 }
 
 function tankEmptyMessage(filter) {
@@ -372,15 +358,38 @@ function closeTankReport() {
 
 function renderTankReport(data) {
   const tank = data.tank || {};
-  const summary = data.summary || {};
-  const employees = data.employeeBreakdown || [];
-  const activities = data.activityBreakdown || [];
-  const sessions = data.sessions || [];
-  const finishedJobs = data.finished_jobs || [];
+  const teamCompletion = data.team_completion || {
+    recorded: false,
+    team_id: null,
+    team_name: null,
+    completed_at: null,
+    confirmed_by_employee_id: null,
+    confirmed_by_employee_name: null,
+    confirmation_line: null,
+    members: [],
+    members_included: 0,
+    total_team_hours: 0,
+    total_estimated_labor_cost: 0,
+  };
+  const teamProduction = data.team_production || null;
+  const memberBreakdown =
+    (teamProduction && teamProduction.member_breakdown && teamProduction.member_breakdown.length
+      ? teamProduction.member_breakdown
+      : teamCompletion.members) || [];
+  const totalLaborCost =
+    teamProduction && teamProduction.total_estimated_labor_cost != null
+      ? teamProduction.total_estimated_labor_cost
+      : teamCompletion.total_estimated_labor_cost || 0;
+  const totalTeamHours =
+    teamProduction && teamProduction.total_hours != null
+      ? teamProduction.total_hours
+      : teamCompletion.total_team_hours || 0;
+
   const statusLabel = tankStatusLabel(tank);
   const isActive = tankIsActive(tank);
+
   const lifecycleSection = `
-    <section class="tank-lifecycle-panel">
+    <section class="tank-report-section tank-lifecycle-panel">
       <h4 class="tank-report-section-title">Tank Lifecycle</h4>
       <div class="tank-lifecycle-grid">
         <div class="tank-lifecycle-item">
@@ -390,6 +399,10 @@ function renderTankReport(data) {
         <div class="tank-lifecycle-item">
           <div class="tank-lifecycle-label">Status</div>
           <div class="tank-lifecycle-value"><span class="badge ${isActive ? 'badge-in' : 'badge-muted'}">${statusLabel}</span></div>
+        </div>
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Description</div>
+          <div class="tank-lifecycle-value">${escapeHtml(tank.description || 'No description')}</div>
         </div>
         <div class="tank-lifecycle-item">
           <div class="tank-lifecycle-label">Created</div>
@@ -406,109 +419,138 @@ function renderTankReport(data) {
       </div>
     </section>`;
 
-  const summaryCards = `
-    <div class="tank-report-cards">
-      <article class="tank-report-card"><div class="tank-report-card-label">Total Hours</div><div class="tank-report-card-value">${fmtHours(summary.total_hours)}</div></article>
-      <article class="tank-report-card"><div class="tank-report-card-label">Regular</div><div class="tank-report-card-value">${fmtHours(summary.regular_hours)}</div></article>
-      <article class="tank-report-card"><div class="tank-report-card-label">Overtime</div><div class="tank-report-card-value">${fmtHours(summary.overtime_hours)}</div></article>
-      <article class="tank-report-card"><div class="tank-report-card-label">Est. Pay</div><div class="tank-report-card-value">${fmtMoney(summary.estimated_pay)}</div></article>
-    </div>
-    <p class="muted tank-report-meta">
-      Tank <strong>${escapeHtml(tank.tank_number)}</strong> · ${escapeHtml(tank.description || 'No description')}
-      · <span class="badge ${statusLabel === 'Active' ? 'badge-in' : 'badge-muted'}">${statusLabel}</span>
-      · ${summary.workers_count || 0} worker(s) · Last activity ${fmtIso(summary.last_activity_at)}
-    </p>`;
+  const teamCompletionSection = `<section class="tank-report-section tank-team-completion-panel">
+      <h4 class="tank-report-section-title">Team Completion</h4>
+      ${
+        teamCompletion.recorded && teamCompletion.confirmation_line
+          ? `<p class="tank-team-completion-summary">${escapeHtml(teamCompletion.confirmation_line)}</p>`
+          : ''
+      }
+      ${
+        teamCompletion.recorded
+          ? `<div class="tank-lifecycle-grid">
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Team Name</div>
+          <div class="tank-lifecycle-value">${escapeHtml(teamCompletion.team_name || '—')}</div>
+        </div>
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Completed At</div>
+          <div class="tank-lifecycle-value">${teamCompletion.completed_at ? fmtIso(teamCompletion.completed_at) : '—'}</div>
+        </div>
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Confirmed By</div>
+          <div class="tank-lifecycle-value">${escapeHtml(teamCompletion.confirmed_by_employee_name || '—')}</div>
+        </div>
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Members Included</div>
+          <div class="tank-lifecycle-value">${Number(teamCompletion.members_included) || 0}</div>
+        </div>
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Total Team Hours</div>
+          <div class="tank-lifecycle-value">${fmtHours(teamCompletion.total_team_hours || 0)}</div>
+        </div>
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Total Labor Cost</div>
+          <div class="tank-lifecycle-value">${fmtMoney(teamCompletion.total_estimated_labor_cost || 0)}</div>
+        </div>
+      </div>`
+          : `<p class="muted tank-team-completion-empty">No team completion recorded for this tank.</p>`
+      }
+    </section>`;
 
-  const employeeRows = employees.length
-    ? employees
-        .map(
-          (e) => `<tr>
-        <td>${escapeHtml(e.employee_name)}</td>
-        <td>${escapeHtml(e.employee_code)}</td>
-        <td>${fmtHours(e.total_hours)}</td>
-        <td>${fmtHours(e.regular_hours)}</td>
-        <td>${fmtHours(e.overtime_hours)}</td>
-        <td>${fmtMoney(e.estimated_pay)}</td>
-        <td>${escapeHtml((e.activities_performed || []).join(', ') || '-')}</td>
-      </tr>`
-        )
-        .join('')
-    : '<tr><td colspan="7" class="muted">No labor recorded for this tank.</td></tr>';
+  const phaseTimeSummary =
+    (teamProduction && teamProduction.phase_time_summary) || data.phase_time_summary || [];
 
-  const activityRows = activities.length
-    ? activities
-        .map(
-          (a) => `<tr>
-        <td>${escapeHtml(a.activity_name)}</td>
-        <td>${fmtHours(a.total_hours)}</td>
-        <td>${a.session_count || 0}</td>
-      </tr>`
-        )
-        .join('')
-    : '<tr><td colspan="3" class="muted">No activities recorded.</td></tr>';
+  const phaseSummarySection =
+    phaseTimeSummary.length > 0
+      ? `<div class="tank-phase-summary-panel tank-phase-summary-panel--inline">
+      <h5 class="tank-report-subsection-title">Phase Time Summary</h5>
+      <ul class="phase-time-summary-list phase-time-summary-list--report">
+        ${phaseTimeSummary
+          .map(
+            (row) =>
+              `<li class="phase-time-summary-item phase-time-summary-item--${escapeHtml(row.status || 'not_started')}">${escapeHtml(row.summary_line || row.phase_name || '')}</li>`
+          )
+          .join('')}
+      </ul>
+    </div>`
+      : '';
 
-  const sessionRows = sessions.length
-    ? sessions
-        .map(
-          (s) => `<tr>
-        <td>${escapeHtml(s.employee_name)} (${escapeHtml(s.employee_code)})</td>
-        <td>${escapeHtml(s.activity)}</td>
-        <td>${escapeHtml(displayAreaName(s.area_name))}</td>
-        <td>${fmtIso(s.in_time)}</td>
-        <td>${fmtIso(s.out_time)}</td>
-        <td>${fmtHours(s.duration_hours)}</td>
-        <td>${escapeHtml(s.session_type || '-')}</td>
-        <td>${s.auto_ended ? '<span class="badge badge-warn">Yes</span>' : '-'}</td>
-      </tr>`
-        )
-        .join('')
-    : '<tr><td colspan="8" class="muted">No scan sessions for this tank.</td></tr>';
+  const phaseBlocks =
+    teamProduction && (teamProduction.phases || []).length
+      ? teamProduction.phases
+          .map((phase) => {
+            const sessionRows = (phase.sessions || [])
+              .map((s) => {
+                const endLabel =
+                  s.status === 'running'
+                    ? 'In progress'
+                    : s.status === 'stopped' && s.ended_at
+                      ? fmtIso(s.ended_at)
+                      : s.finished_at
+                        ? fmtIso(s.finished_at)
+                        : '—';
+                return `<tr>
+            <td>${escapeHtml(s.phase_name || '—')}</td>
+            <td>${escapeHtml(s.team_name || '—')}</td>
+            <td>${fmtIso(s.started_at)}</td>
+            <td>${endLabel === 'In progress' ? 'In progress' : escapeHtml(endLabel)}</td>
+            <td>${escapeHtml(s.duration_display || fmtHours(s.duration_hours))}</td>
+            <td>${fmtMoney(s.total_estimated_cost)}</td>
+            <td><span class="badge ${s.status === 'running' ? 'badge-in' : s.status === 'stopped' ? 'badge-warn' : 'badge-muted'}">${escapeHtml(s.status_label || (s.status === 'running' ? 'Running' : s.status === 'stopped' ? 'Paused' : 'Completed'))}</span></td>
+            <td class="tank-report-actions">${s.id ? `<button type="button" class="btn btn-sm btn-session-details" data-session-id="${Number(s.id)}">Details</button>` : '—'}</td>
+          </tr>`;
+              })
+              .join('');
+            return `<div class="tank-phase-group">
+          <h5 class="tank-report-subsection-title">${escapeHtml(phase.phase_name || phase.phase_code || 'Phase')} · ${fmtHours(phase.phase_total_hours)} total · ${fmtMoney(phase.phase_total_cost)}</h5>
+          <div class="table-wrap table-scroll">
+            <table class="tank-report-table">
+              <thead><tr><th>Phase</th><th>Team</th><th>Start</th><th>End</th><th>Duration</th><th>Labor Cost</th><th>Status</th><th></th></tr></thead>
+              <tbody>${sessionRows}</tbody>
+            </table>
+          </div>
+        </div>`;
+          })
+          .join('')
+      : '<p class="muted">No team production sessions recorded for this tank.</p>';
 
-  const finishedJobRows = finishedJobs.length
-    ? finishedJobs
-        .map(
-          (row) => `<tr>
-        <td>${escapeHtml(row.tank_history_line || `${row.employee_name} finished ${row.activity_name}`)}</td>
-        <td>${escapeHtml(row.tank_number || '-')}</td>
-        <td>${fmtIso(row.finished_at)}</td>
-        <td>${formatDurationMinutes(row.duration_minutes)}</td>
-      </tr>`
-        )
-        .join('')
-    : '<tr><td colspan="4" class="muted">No finished jobs recorded for this tank yet.</td></tr>';
+  const teamProductionSection = `<section class="tank-report-section tank-team-production-panel">
+      <h4 class="tank-report-section-title">Team Production by Phase</h4>
+      <p class="tank-report-summary-line"><strong>Total Labor Cost:</strong> ${fmtMoney(totalLaborCost)} · <strong>Total Team Hours:</strong> ${fmtHours(totalTeamHours)}</p>
+      ${phaseSummarySection}
+      ${phaseBlocks}
+    </section>`;
+
+  const memberBreakdownSection = `<section class="tank-report-section tank-member-breakdown-panel">
+      <h4 class="tank-report-section-title">Member Cost Breakdown</h4>
+      <div class="table-wrap table-scroll">
+        <table class="tank-report-table">
+          <thead><tr><th>Member</th><th>Code</th><th>Hours</th><th>Labor Cost</th></tr></thead>
+          <tbody>${
+            memberBreakdown.length
+              ? memberBreakdown
+                  .map(
+                    (m) => `<tr>
+            <td>${escapeHtml(m.employee_name || 'Unknown')}</td>
+            <td>${escapeHtml(m.employee_code || '—')}</td>
+            <td>${fmtHours(m.total_hours || 0)}</td>
+            <td>${fmtMoney(m.total_estimated_cost != null ? m.total_estimated_cost : 0)}</td>
+          </tr>`
+                  )
+                  .join('')
+              : '<tr><td colspan="4" class="muted">No team member labor recorded for this tank.</td></tr>'
+          }</tbody>
+        </table>
+      </div>
+    </section>`;
 
   return `
     <div id="tankReportPrintArea" class="tank-report-print-area">
       ${lifecycleSection}
-      ${summaryCards}
-      <h4 class="tank-report-section-title">By Employee</h4>
-      <div class="table-wrap table-scroll">
-        <table class="tank-report-table">
-          <thead><tr><th>Employee</th><th>Code</th><th>Total hrs</th><th>Regular</th><th>OT</th><th>Est. pay</th><th>Activities</th></tr></thead>
-          <tbody>${employeeRows}</tbody>
-        </table>
-      </div>
-      <h4 class="tank-report-section-title">By Activity</h4>
-      <div class="table-wrap table-scroll">
-        <table class="tank-report-table">
-          <thead><tr><th>Activity</th><th>Total hrs</th><th>Sessions</th></tr></thead>
-          <tbody>${activityRows}</tbody>
-        </table>
-      </div>
-      <h4 class="tank-report-section-title">Finished Jobs</h4>
-      <div class="table-wrap table-scroll">
-        <table class="tank-report-table">
-          <thead><tr><th>Event</th><th>Tank</th><th>Finished</th><th>Duration</th></tr></thead>
-          <tbody>${finishedJobRows}</tbody>
-        </table>
-      </div>
-      <h4 class="tank-report-section-title">Session History</h4>
-      <div class="table-wrap table-scroll">
-        <table class="tank-report-table">
-          <thead><tr><th>Employee</th><th>Activity</th><th>Area</th><th>IN</th><th>OUT</th><th>Duration</th><th>Type</th><th>Auto-ended</th></tr></thead>
-          <tbody>${sessionRows}</tbody>
-        </table>
-      </div>
+      ${teamCompletionSection}
+      ${teamProductionSection}
+      ${memberBreakdownSection}
     </div>`;
 }
 
@@ -526,43 +568,12 @@ async function openTankReport(id) {
     tankReportTitle.textContent = `Tank Report · ${data.tank && data.tank.tank_number ? data.tank.tank_number : id}`;
   }
   tankReportBody.innerHTML = renderTankReport(data);
-}
-
-async function loadCurrentWork() {
-  const { res, data } = await apiJson('/api/manager/current-work');
-  if (!res.ok) return;
-  const selectedArea = areaFilter ? areaFilter.value : 'ALL';
-  const rows = (data.rows || []).filter((r) => areaRowMatchesFilter(r.area_name, selectedArea));
-  currentWorkRowsCache = rows;
-  currentWorkBody.innerHTML =
-    rows
-      .map(
-        (r) => `<tr>
-      <td>${r.employee_name} (${r.employee_code})</td>
-      <td>${statusBadgeFor(r.status)}</td>
-      <td>${escapeHtml(r.status === 'STOP' ? r.stop_reason || r.activity || '-' : r.activity || '-')}</td>
-      <td><strong>${r.tank_number || '-'}</strong></td>
-      <td>${displayAreaName(r.area_name)}</td>
-      <td>${fmtIso(r.started_at)}</td>
-      <td ${
-        r.elapsed_paused
-          ? `data-elapsed-paused="1" data-elapsed-minutes="${Number(r.elapsed_minutes || 0)}"`
-          : `data-started-at="${r.started_at || ''}"`
-      }>${r.elapsed_paused ? `${minutesToText(r.elapsed_minutes)} (paused)` : elapsedFromIso(r.started_at)}</td>
-      <td>${r.daily_hours}</td>
-      <td>${r.weekly_hours}</td>
-      <td>${
-        Array.isArray(r.flags) && r.flags.length
-          ? r.flags.map((f) => `<span class="badge badge-warn">${titleCaseFlag(f)}</span>`).join(' ')
-          : r.overtime_warning
-            ? '<span class="badge badge-warn">Watch</span>'
-            : '<span class="badge badge-warn">Missing OUT</span>'
-      }</td>
-      <td>${fmtIso(r.last_scan_time)}</td>
-    </tr>`
-      )
-      .join('') || '<tr><td colspan="11" class="muted">No active IN or STOP workers right now.</td></tr>';
-  if (currentWorkRowsCache.length) refreshCurrentWorkElapsedCells();
+  tankReportBody.querySelectorAll('.btn-session-details').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const sessionId = btn.getAttribute('data-session-id');
+      if (sessionId && window.SessionDetails) window.SessionDetails.open(sessionId);
+    });
+  });
 }
 
 function formatDurationMinutes(mins) {
@@ -573,60 +584,8 @@ function formatDurationMinutes(mins) {
   return r ? `${h}h ${r}m` : `${h}h`;
 }
 
-async function loadTankSummary() {
-  const { res, data } = await apiJson('/api/manager/tank-summary');
-  if (!res.ok) return;
-  const rows = data.rows || [];
-  tankSummaryBody.innerHTML =
-    rows
-      .map(
-        (r) => `<tr>
-      <td><strong>${r.tank_number}</strong></td>
-      <td>${r.workers_currently_on_tank}</td>
-      <td>${r.total_labor_hours_today}</td>
-      <td>${r.last_activity || '-'}</td>
-      <td>${r.last_completed && r.last_completed.label ? escapeHtml(r.last_completed.label) : '-'}</td>
-      <td>${r.status === 'ACTIVE' ? '<span class="badge badge-in">Active</span>' : '<span class="badge">' + r.status + '</span>'}</td>
-    </tr>`
-      )
-      .join('') || '<tr><td colspan="6" class="muted">No tank activity yet.</td></tr>';
-}
-
-async function loadOvertime() {
-  const { res, data } = await apiJson('/api/manager/overtime-watch');
-  if (!res.ok) return;
-  const rows = data.rows || [];
-  overtimeBody.innerHTML =
-    rows
-      .map((r) => {
-        const flags = Array.isArray(r.flags) && r.flags.length
-          ? r.flags.map((f) => `<span class="badge badge-warn">${titleCaseFlag(f)}</span>`).join(' ')
-          : [
-              r.flag_daily_over_8h ? '<span class="badge badge-err">Over 8h today</span>' : '',
-              r.flag_daily_close_8h ? '<span class="badge badge-warn">Close to 8h</span>' : '',
-              r.flag_weekly_over_40h ? '<span class="badge badge-err">Over 40h week</span>' : '',
-            ]
-              .filter(Boolean)
-              .join(' ');
-        return `<tr>
-          <td>${r.employee_name} (${r.employee_code})</td>
-          <td>${Number(r.daily_hours || 0).toFixed(2)}</td>
-          <td>${Number(r.weekly_hours || 0).toFixed(2)}</td>
-          <td>${Number(r.regular_hours || 0).toFixed(2)}</td>
-          <td>${Number(r.overtime_hours || 0).toFixed(2)}</td>
-          <td>${fmtMoney(r.estimated_pay)}</td>
-          <td>${flags || '-'}</td>
-        </tr>`;
-      })
-      .join('') || '<tr><td colspan="7" class="muted">No overtime data.</td></tr>';
-}
-
-async function refreshLivePanels() {
-  await Promise.all([loadCurrentWork(), loadTankSummary(), loadOvertime()]);
-}
-
 async function refreshAll() {
-  await Promise.all([loadTanks(), refreshLivePanels()]);
+  await loadTanks();
 }
 
 if (btnAddTank) btnAddTank.addEventListener('click', () => void createTank());
@@ -672,11 +631,7 @@ if (tankReportBackdrop) {
 window.addEventListener('load', () => {
   void refreshAll();
   void refreshAuthUi();
-  window.setInterval(() => void refreshLivePanels(), 3500);
-  window.setInterval(() => refreshCurrentWorkElapsedCells(), 1000);
 });
-
-if (areaFilter) areaFilter.addEventListener('change', () => void loadCurrentWork());
 
 if (logoutBtn) {
   logoutBtn.addEventListener('click', async () => {
@@ -691,10 +646,9 @@ function wirePinShow(checkbox, input) {
     input.type = checkbox.checked ? 'text' : 'password';
   });
 }
-wirePinShow(showPinA, pinAreaA);
-wirePinShow(showPinB, pinAreaB);
-wirePinShow(showPinC, pinAreaC);
-wirePinShow(showPinD, pinAreaD);
+wirePinShow(showPinWm1, pinWm1);
+wirePinShow(showPinWm2, pinWm2);
+wirePinShow(showPinWm3, pinWm3);
 wirePinShow(showOwnerPasswords, ownerCurrentPassword);
 wirePinShow(showOwnerPasswords, ownerNewPassword);
 wirePinShow(showOwnerPasswords, ownerConfirmPassword);
@@ -712,14 +666,12 @@ async function saveKioskPins() {
   if (!kioskPinHint) return;
   setAlert(kioskPinHint, '', null);
   const body = {};
-  const a = pinAreaA && String(pinAreaA.value || '').trim();
-  const b = pinAreaB && String(pinAreaB.value || '').trim();
-  const c = pinAreaC && String(pinAreaC.value || '').trim();
-  const d = pinAreaD && String(pinAreaD.value || '').trim();
-  if (a) body.area_a_pin = a;
-  if (b) body.area_b_pin = b;
-  if (c) body.area_c_pin = c;
-  if (d) body.area_d_pin = d;
+  const wm1 = pinWm1 && String(pinWm1.value || '').trim();
+  const wm2 = pinWm2 && String(pinWm2.value || '').trim();
+  const wm3 = pinWm3 && String(pinWm3.value || '').trim();
+  if (wm1) body.wm_1_pin = wm1;
+  if (wm2) body.wm_2_pin = wm2;
+  if (wm3) body.wm_3_pin = wm3;
   if (!Object.keys(body).length) {
     setAlert(kioskPinHint, 'Enter at least one new PIN to update.', 'error');
     return;
@@ -736,10 +688,9 @@ async function saveKioskPins() {
     return;
   }
   setAlert(kioskPinHint, 'Kiosk PINs updated.', 'success');
-  if (pinAreaA) pinAreaA.value = '';
-  if (pinAreaB) pinAreaB.value = '';
-  if (pinAreaC) pinAreaC.value = '';
-  if (pinAreaD) pinAreaD.value = '';
+  if (pinWm1) pinWm1.value = '';
+  if (pinWm2) pinWm2.value = '';
+  if (pinWm3) pinWm3.value = '';
   if (btnSaveKioskPins) btnSaveKioskPins.disabled = false;
 }
 

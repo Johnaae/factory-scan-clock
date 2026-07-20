@@ -41,7 +41,7 @@ const debugScanId = document.getElementById('debugScanId');
 const debugProcessing = document.getElementById('debugProcessing');
 const debugActiveEl = document.getElementById('debugActiveEl');
 const logoutBtn = document.getElementById('logoutBtn');
-const kioskStationLabel = document.getElementById('kioskStationLabel');
+const kioskMachineLabel = document.getElementById('kioskMachineLabel');
 const managerQuickNav = document.getElementById('managerQuickNav');
 
 let activityOptions = [];
@@ -769,11 +769,11 @@ async function loadAuthUser() {
   ks.kioskArea = data.user.area_name ? String(data.user.area_name) : '';
   await loadKioskWorkConfig();
   if (ks.authUser.role === 'KIOSK' && ks.authUser.area_name) {
-    if (kioskStationLabel) kioskStationLabel.textContent = `${ks.authUser.area_name} Kiosk`;
+    if (kioskMachineLabel) kioskMachineLabel.textContent = `${ks.authUser.area_name} Kiosk`;
     if (managerQuickNav) managerQuickNav.hidden = true;
     if (logoutBtn) logoutBtn.hidden = false;
   } else if (ks.authUser.role === 'MANAGER') {
-    if (kioskStationLabel) kioskStationLabel.textContent = 'Manager Scan Access';
+    if (kioskMachineLabel) kioskMachineLabel.textContent = 'Manager Scan Access';
     if (managerQuickNav) managerQuickNav.hidden = false;
     if (logoutBtn) logoutBtn.hidden = false;
   }

@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Factory Scan Clock — Winding Machine Kiosk</title>
+    <meta name="theme-color" content="#0f2a44" />
+    <link rel="stylesheet" href="/scan.css" />
+    <link rel="stylesheet" href="/status-styles.css" />
+    <style>
+      .wk-sub { font-size: 1.1rem; font-weight: 700; color: #1e3a5f; margin: 0.15rem 0 0; }
+      .wk-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }
+      .wk-item { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px; }
+      .wk-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: #64748b; font-weight: 700; margin: 0 0 4px; }
+      .wk-value { font-size: 1.05rem; font-weight: 700; margin: 0; }
+      .wk-value--running { color: #15803d; }
+      .wk-value--idle { color: #64748b; }
+      .wk-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+      .wk-pending { background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 10px; padding: 12px; margin-top: 12px; }
+      .wk-assignment { display: flex; align-items: center; gap: 12px; background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 10px; padding: 12px 16px; margin: 12px 0; }
+      .wk-assignment-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: #047857; font-weight: 700; }
+      .wk-assignment-team { font-size: 1.15rem; font-weight: 800; color: #065f46; }
+      .wk-phase-summary { margin-top: 16px; padding: 14px; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; }
+      .wk-phase-summary-title { margin: 0 0 10px; font-size: 0.95rem; font-weight: 800; color: #1e3a5f; }
+      .wk-phase-summary-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+      .wk-phase-summary-item { font-size: 0.9rem; font-weight: 600; color: #334155; }
+      .wk-phase-summary-item--running { color: #15803d; }
+      .wk-value--paused { color: #b45309; }
+      .wk-phase-summary-item--paused { color: #b45309; }
+      .wk-phase-summary-item--completed { color: #1d4ed8; }
+      .wk-phase-summary-item--not_started { color: #94a3b8; font-weight: 500; }
+      @media (max-width: 640px) { .wk-grid { grid-template-columns: 1fr; } }
+    </style>
+  </head>
+  <body class="scan-kiosk">
+    <main class="kiosk-page">
+      <header class="kiosk-header">
+        <div class="kiosk-header-row">
+          <div>
+            <h1>Factory Scan Clock</h1>
+            <p id="machineLabel" class="wk-sub">Winding Machine</p>
+          </div>
+          <button id="logoutBtn" type="button" class="btn-secondary">Exit Kiosk</button>
+        </div>
+      </header>
+      <section class="kiosk-card scan-panel">
+        <div class="scan-panel-head">
+          <h2 id="workflowTitle">Scan team barcode</h2>
+          <p id="workflowSub">Scan TEAM, tank, then phase. Pause: STOP:BREAK / STOP:LUNCH / RESUME. End day: REASON:END_SHIFT. Finish: employee badge + Part Complete.</p>
+        </div>
+        <input id="scannerTrap" type="text" class="scanner-trap-input" tabindex="0" inputmode="none" autocomplete="off" readonly aria-label="Scanner" />
+        <form id="scanForm" class="scan-input-row" autocomplete="off">
+          <label for="manualBarcodeInput">Manual entry</label>
+          <div class="scan-input-wrap scan-input-wrap--scanner">
+            <input id="manualBarcodeInput" type="text" placeholder="TEAM-WINDER-1 · TANK_1234 · PHASE:WIND · STOP:LUNCH · RESUME · REASON:END_SHIFT" autocomplete="off" />
+            <button id="scanButton" type="button" class="scan-submit-btn">Scan</button>
+          </div>
+        </form>
+        <p id="scanWarning" class="scan-warning" role="alert" hidden></p>
+        <div id="assignmentBanner" class="wk-assignment" role="status" hidden>
+          <span class="wk-assignment-label">Assigned Team</span>
+          <strong id="assignmentTeam" class="wk-assignment-team">—</strong>
+        </div>
+        <div id="finishBanner" class="finish-success-banner" role="status" hidden>
+          <strong class="finish-success-banner__title">Part complete — tank finished</strong>
+        </div>
+        <div class="wk-grid">
+          <div class="wk-item"><p class="wk-label">Team</p><p id="valTeam" class="wk-value">—</p></div>
+          <div class="wk-item"><p class="wk-label">Tank</p><p id="valTank" class="wk-value">—</p></div>
+          <div class="wk-item"><p class="wk-label">Current Phase</p><p id="valPhase" class="wk-value">—</p></div>
+          <div class="wk-item"><p class="wk-label">Status</p><p id="valStatus" class="wk-value wk-value--idle">Idle</p></div>
+          <div class="wk-item"><p class="wk-label">Current Phase Time</p><p id="valElapsed" class="wk-value">—</p></div>
+          <div class="wk-item"><p class="wk-label">Tank Total Running Time</p><p id="valTankTotal" class="wk-value">—</p></div>
+        </div>
+        <div id="phaseSummaryPanel" class="wk-phase-summary" hidden>
+          <h3 class="wk-phase-summary-title">Phase Time Summary</h3>
+          <ul id="phaseSummaryList" class="wk-phase-summary-list"></ul>
+        </div>
+        <div id="pendingPanel" class="wk-pending" hidden><p id="pendingText">—</p></div>
+        <div class="wk-actions">
+          <button id="btnPartComplete" type="button" class="btn-primary" hidden>Part Complete</button>
+        </div>
+      </section>
+      <section class="kiosk-card selection-panel" id="phasePanel" hidden>
+        <h3>Select phase</h3>
+        <div id="phaseButtons" class="selection-buttons"></div>
+      </section>
+    </main>
+    <script src="/machine-kiosk.js?v=2"></script>
+  </body>
+</html>

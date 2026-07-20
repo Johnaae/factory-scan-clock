@@ -1,0 +1,28 @@
+
+============================================================
+[2026-07-05] Scheduled backup started
+Backups folder: C:\factory-scan-clock\backups
+============================================================
+Running npm run backup:pg ...
+
+> factory-scan-clock@1.0.0 backup:pg
+> node scripts/pg-backup.js
+
+[pg-backup] wrote C:\factory-scan-clock\backups\factory_scan_clock_20260705_141256.backup (66656 bytes)
+Running prune — keep 30
+[prune-pg-backups] kept 10 backup(s), deleted 0 older file(s)
+[2026-07-05] SUCCESS — scheduled backup finished
+
+============================================================
+[2026-07-05] Scheduled backup started
+Backups folder: C:\factory-scan-clock\backups
+============================================================
+Running npm run backup:pg ...
+
+> factory-scan-clock@1.0.0 backup:pg
+> node scripts/pg-backup.js
+
+[pg-backup] wrote C:\factory-scan-clock\backups\factory_scan_clock_20260705_230004.backup (66656 bytes)
+Running prune — keep 30
+[prune-pg-backups] kept 11 backup(s), deleted 0 older file(s)
+[2026-07-05] SUCCESS — scheduled backup finished

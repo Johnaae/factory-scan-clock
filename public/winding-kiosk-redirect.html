@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Redirecting…</title>
+  </head>
+  <body>
+    <script>
+      (function () {
+        var slug = null;
+        try {
+          slug = localStorage.getItem('windingKioskSlug');
+        } catch (_err) {
+          slug = null;
+        }
+        if (slug) {
+          window.location.replace('/kiosk/machine/' + encodeURIComponent(slug));
+          return;
+        }
+        window.location.replace('/kiosk-login');
+      })();
+    </script>
+  </body>
+</html>

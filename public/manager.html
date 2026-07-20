@@ -22,7 +22,7 @@
         <div class="brand">
           <div class="brand-text">
             <div class="brand-title">Factory Manager Dashboard</div>
-            <div class="brand-sub">Tanks, workforce, overtime</div>
+            <div class="brand-sub">Production teams &amp; tanks</div>
           </div>
         </div>
         <nav class="nav">
@@ -35,6 +35,18 @@
     </header>
 
     <main class="container manager-layout">
+      <div id="alertSoundEnableBanner" class="alert-sound-banner" role="status" hidden>
+        <span>Click Enable Alert Sound to hear open QA/QC and Maintenance alerts on this dashboard.</span>
+        <button type="button" id="btnEnableAlertSound" class="btn btn-sm btn-primary">Enable Alert Sound</button>
+      </div>
+
+      <div class="alert-sound-toolbar toolbar" id="alertSoundToolbar" aria-label="Alert sound controls">
+        <button type="button" id="btnTestAlertSound" class="btn btn-sm">Test Alert Sound</button>
+        <button type="button" id="btnMuteAlertSound" class="btn btn-sm">Mute Alert Sound</button>
+        <button type="button" id="btnUnmuteAlertSound" class="btn btn-sm" hidden>Unmute Alert Sound</button>
+        <span id="alertSoundStatus" class="muted alert-sound-status"></span>
+      </div>
+
       <section class="card manager-card">
         <div class="card-header">
           <div class="card-header-main">
@@ -43,25 +55,27 @@
           </div>
         </div>
         <div class="card-body manager-form-stack">
-          <div class="manager-form-grid manager-form-grid-2">
+          <div class="manager-tank-form-row">
             <div class="field">
               <label for="tankNumber">Tank Number</label>
               <input id="tankNumber" type="text" placeholder="e.g. 1023 or FGT-2201" autocomplete="off" />
             </div>
-            <button id="btnAddTank" class="btn btn-primary manager-action-btn" type="button">Add Tank</button>
-          </div>
-          <div class="manager-form-grid manager-form-grid-2">
             <div class="field">
               <label for="tankDescription">Description</label>
-              <input id="tankDescription" type="text" placeholder="Optional short description" autocomplete="off" />
+              <textarea id="tankDescription" class="manager-textarea-short" rows="3" placeholder="Optional short description" autocomplete="off"></textarea>
             </div>
+            <button id="btnAddTank" class="btn btn-primary manager-form-action-btn" type="button">Add Tank</button>
+          </div>
+          <div class="manager-tank-form-filters manager-form-grid manager-form-grid-2">
             <div class="field">
               <label for="tankSearch">Search Tanks</label>
-              <div class="toolbar" style="gap:8px;align-items:stretch">
+              <div class="manager-input-group">
                 <input id="tankSearch" type="search" placeholder="Search by tank number or description" autocomplete="off" />
                 <button id="btnClearTankSearch" class="btn btn-sm" type="button">Clear</button>
               </div>
-              <label for="tankStatusFilter" style="margin-top:10px">Tank Filter</label>
+            </div>
+            <div class="field">
+              <label for="tankStatusFilter">Tank Filter</label>
               <select id="tankStatusFilter">
                 <option value="active" selected>Active</option>
                 <option value="archived">Completed</option>
@@ -72,8 +86,8 @@
           <div class="toastline manager-alert" id="tankHint"></div>
         </div>
         <div class="card-body card-body--flush">
-          <div class="table-wrap table-scroll">
-            <table>
+          <div class="table-wrap table-scroll manager-table-wrap">
+            <table class="manager-table">
               <thead>
                 <tr><th>Tank #</th><th>Description</th><th>Status</th><th>Created</th><th>Completed</th><th>Duration</th><th>Actions</th></tr>
               </thead>
@@ -87,41 +101,19 @@
         <div class="card-header">
           <div class="card-header-main">
             <h2 class="card-title">Kiosk Barcodes</h2>
-            <p class="card-kicker">Print activity and reason sheets for the scan station.</p>
+            <p class="card-kicker">Print team, phase, and alert barcodes for winding production.</p>
           </div>
         </div>
         <div class="card-body">
-          <p class="muted" style="margin-top:0"><strong>Activities:</strong> Production activity barcodes grouped by area for laminated kiosk books.</p>
-          <p class="muted"><strong>Stop / End Shift:</strong> STOP barcodes (pause job) and End Shift (clock OUT)</p>
-          <div class="toolbar" style="flex-wrap:wrap;margin-top:12px">
-            <a class="btn btn-primary btn-sm" href="/manager/command-print?type=activities" target="_blank" rel="noopener">Print Activities by Area</a>
-            <a class="btn btn-primary btn-sm" href="/manager/command-print?type=reasons" target="_blank" rel="noopener">Print Stop / End Shift</a>
-          </div>
-        </div>
-      </section>
-
-      <section class="card manager-card">
-        <div class="card-header">
-          <h2 class="card-title">Currently Working</h2>
-          <div class="toolbar">
-            <label for="areaFilter" class="muted">Area</label>
-            <select id="areaFilter">
-              <option value="ALL">All areas</option>
-              <option value="Fabrication">Fabrication</option>
-              <option value="Assembly">Assembly</option>
-              <option value="QA/QC">QA/QC</option>
-              <option value="Shipping & Handling">Shipping & Handling</option>
-            </select>
-          </div>
-        </div>
-        <div class="card-body card-body--flush">
-          <div class="table-wrap table-scroll">
-            <table>
-              <thead>
-                <tr><th>Employee</th><th>Status</th><th>Activity</th><th>Tank #</th><th>Area</th><th>Started At</th><th>Elapsed</th><th>Daily hrs</th><th>Weekly hrs</th><th>OT</th><th>Last Scan</th></tr>
-              </thead>
-              <tbody id="currentWorkBody"></tbody>
-            </table>
+          <p class="muted manager-kiosk-note"><strong>Phase 1 — Winding Machines:</strong> Each tablet uses its permanent kiosk URL from Manage Machines. No machine barcodes are needed.</p>
+          <p class="muted manager-kiosk-note"><strong>Stop / End Shift:</strong> STOP barcodes (pause job) and End Shift (clock OUT) for legacy scan kiosks.</p>
+          <div class="toolbar manager-toolbar">
+            <a class="btn btn-primary" href="/manager/command-print?type=teams" target="_blank" rel="noopener">Print Team Barcodes</a>
+            <a class="btn btn-primary" href="/manager/command-print?type=phases" target="_blank" rel="noopener">Print Phase Barcodes</a>
+            <a class="btn btn-primary" href="/manager/command-print?type=alerts" target="_blank" rel="noopener">Print Alert Barcodes</a>
+            <a class="btn" href="/teams">Manage Teams</a>
+            <a class="btn" href="/machine-areas">Manage Machines</a>
+            <a class="btn" href="/manager/command-print?type=reasons" target="_blank" rel="noopener">Print Stop / End Shift</a>
           </div>
         </div>
       </section>
@@ -129,57 +121,48 @@
       <section class="card manager-card">
         <div class="card-header">
           <div class="card-header-main">
-            <h2 class="card-title">Recent Finished Jobs</h2>
-            <p class="card-kicker">Latest completed work from the floor</p>
+            <h2 class="card-title">Winding Machines</h2>
+            <p class="card-kicker">Live production per machine — team, tank, phase, elapsed time, and open alerts</p>
           </div>
-          <div class="toolbar" style="flex-wrap:wrap;gap:10px;align-items:center">
-            <label for="finishedJobsAreaFilter" class="muted">Area</label>
-            <select id="finishedJobsAreaFilter">
-              <option value="ALL" selected>All areas</option>
-              <option value="Fabrication">Fabrication</option>
-              <option value="Assembly">Assembly</option>
-              <option value="QA/QC">QA/QC</option>
-              <option value="Shipping & Handling">Shipping & Handling</option>
-            </select>
+        </div>
+        <div class="card-body" id="managerMachineCards">
+          <p class="muted">Loading machines…</p>
+        </div>
+        <div class="card-body card-body--flush" id="managerDashboardAlerts"></div>
+      </section>
+
+      <section class="card manager-card">
+        <div class="card-header">
+          <div class="card-header-main">
+            <h2 class="card-title">Team Management</h2>
+            <p class="card-kicker">Live production per team — machine, tank, phase, and roster. Expand a team to view or edit members.</p>
+          </div>
+          <div class="toolbar">
             <label class="manager-inline-check">
-              <input id="finishedJobsTodayOnly" type="checkbox" checked />
-              Today only
+              <input id="showInactiveTeams" type="checkbox" />
+              Show inactive teams
             </label>
-            <button id="refreshFinishedJobsBtn" class="btn btn-sm" type="button">Refresh</button>
+            <a class="btn btn-sm" href="/teams">Manage Teams</a>
           </div>
         </div>
-        <div class="card-body">
-          <div id="finishedJobsBody" class="manager-finish-jobs-list">
-            <p class="muted">Loading finished jobs…</p>
-          </div>
+        <div class="card-body" id="managerTeamCards">
+          <p class="muted">Loading teams…</p>
         </div>
       </section>
 
       <section class="card manager-card">
-        <div class="card-header"><h2 class="card-title">Tank Summary (Today)</h2></div>
-        <div class="card-body card-body--flush">
-          <div class="table-wrap table-scroll">
-            <table>
-              <thead>
-                <tr><th>Tank #</th><th>Workers now</th><th>Total labor hours</th><th>Last activity</th><th>Last completed</th><th>Status</th></tr>
-              </thead>
-              <tbody id="tankSummaryBody"></tbody>
-            </table>
+        <div class="card-header">
+          <div class="card-header-main">
+            <h2 class="card-title">Production Alerts</h2>
+            <p class="card-kicker">QA/QC (red) and Maintenance/Tooling (orange) — resolve when handled</p>
+          </div>
+          <div class="toolbar">
+            <a class="btn btn-sm" href="/alert-email-settings">Alert Email Settings</a>
+            <button id="alertHistoryRefresh" class="btn btn-sm" type="button">Refresh</button>
           </div>
         </div>
-      </section>
-
-      <section class="card manager-card">
-        <div class="card-header"><h2 class="card-title">Overtime Watch</h2></div>
-        <div class="card-body card-body--flush">
-          <div class="table-wrap table-scroll">
-            <table>
-              <thead>
-                <tr><th>Employee</th><th>Daily hrs</th><th>Weekly hrs</th><th>Regular</th><th>OT</th><th>Est. pay</th><th>Flags</th></tr>
-              </thead>
-              <tbody id="overtimeBody"></tbody>
-            </table>
-          </div>
+        <div class="card-body" id="alertHistoryBody">
+          <p class="muted">Loading…</p>
         </div>
       </section>
 
@@ -239,36 +222,28 @@
         <div class="card-body">
           <div class="manager-pin-grid">
             <article class="manager-subcard">
-              <h3 class="manager-subcard-title">Fabrication</h3>
+              <h3 class="manager-subcard-title">Winding Machine 01</h3>
               <div class="field">
-                <label for="pinAreaA">New PIN</label>
-                <input id="pinAreaA" type="password" inputmode="numeric" maxlength="6" placeholder="4-6 digit PIN" autocomplete="new-password" />
+                <label for="pinWm1">New PIN</label>
+                <input id="pinWm1" type="password" inputmode="numeric" maxlength="6" placeholder="4-6 digit PIN" autocomplete="new-password" />
               </div>
-              <label class="pw-inline manager-checkbox"><input id="showPinA" type="checkbox" /> Show PIN</label>
+              <label class="pw-inline manager-checkbox"><input id="showPinWm1" type="checkbox" /> Show PIN</label>
             </article>
             <article class="manager-subcard">
-              <h3 class="manager-subcard-title">Assembly</h3>
+              <h3 class="manager-subcard-title">Winding Machine 02</h3>
               <div class="field">
-                <label for="pinAreaB">New PIN</label>
-                <input id="pinAreaB" type="password" inputmode="numeric" maxlength="6" placeholder="4-6 digit PIN" autocomplete="new-password" />
+                <label for="pinWm2">New PIN</label>
+                <input id="pinWm2" type="password" inputmode="numeric" maxlength="6" placeholder="4-6 digit PIN" autocomplete="new-password" />
               </div>
-              <label class="pw-inline manager-checkbox"><input id="showPinB" type="checkbox" /> Show PIN</label>
+              <label class="pw-inline manager-checkbox"><input id="showPinWm2" type="checkbox" /> Show PIN</label>
             </article>
             <article class="manager-subcard">
-              <h3 class="manager-subcard-title">QA/QC</h3>
+              <h3 class="manager-subcard-title">Winding Machine 03</h3>
               <div class="field">
-                <label for="pinAreaC">New PIN</label>
-                <input id="pinAreaC" type="password" inputmode="numeric" maxlength="6" placeholder="4-6 digit PIN" autocomplete="new-password" />
+                <label for="pinWm3">New PIN</label>
+                <input id="pinWm3" type="password" inputmode="numeric" maxlength="6" placeholder="4-6 digit PIN" autocomplete="new-password" />
               </div>
-              <label class="pw-inline manager-checkbox"><input id="showPinC" type="checkbox" /> Show PIN</label>
-            </article>
-            <article class="manager-subcard">
-              <h3 class="manager-subcard-title">Shipping &amp; Handling</h3>
-              <div class="field">
-                <label for="pinAreaD">New PIN</label>
-                <input id="pinAreaD" type="password" inputmode="numeric" maxlength="6" placeholder="4-6 digit PIN" autocomplete="new-password" />
-              </div>
-              <label class="pw-inline manager-checkbox"><input id="showPinD" type="checkbox" /> Show PIN</label>
+              <label class="pw-inline manager-checkbox"><input id="showPinWm3" type="checkbox" /> Show PIN</label>
             </article>
           </div>
           <div class="manager-pin-actions">
@@ -295,8 +270,90 @@
     </div>
 
     <script src="/status-styles.js"></script>
-    <script src="/finished-jobs-dashboard.js?v=8"></script>
-    <script src="/manager.js?v=3"></script>
+    <script src="/tank-activity.js"></script>
+    <script src="/session-details.js"></script>
+    <script src="/team-member-picker.js"></script>
+    <script src="/team-member-details.js"></script>
+    <script src="/machine-dashboard.js?v=3"></script>
+    <script src="/team-dashboard.js"></script>
+    <script src="/alert-sound.js"></script>
+    <script src="/manager.js?v=9"></script>
+    <script>
+      document.addEventListener('DOMContentLoaded', () => {
+        if (window.AlertSound) {
+          window.AlertSound.mount();
+        }
+        if (window.MachineDashboard) {
+          window.MachineDashboard.mount('managerMachineCards', {
+            alertStripId: 'managerDashboardAlerts',
+            allowResolve: true,
+          });
+        }
+        if (window.TeamDashboard) {
+          window.TeamDashboard.mount('managerTeamCards', { allowMemberEdit: true, inactiveToggleId: 'showInactiveTeams' });
+        }
+        let lastAlertHistoryHtml = null;
+        async function loadAlertHistory() {
+          const el = document.getElementById('alertHistoryBody');
+          if (!el || !window.MachineDashboard) return;
+          if (lastAlertHistoryHtml === null) el.innerHTML = '<p class="muted">Loading…</p>';
+          try {
+            const alerts = await window.MachineDashboard.fetchOpenAlerts();
+            const allRes = await fetch('/api/manager/alerts?limit=100');
+            const allData = await allRes.json().catch(() => ({}));
+            const history = allData.ok ? allData.alerts || [] : [];
+            const openHtml = alerts.length
+              ? window.MachineDashboard.renderGlobalAlerts(alerts, { allowResolve: true })
+              : '<p class="muted">No open alerts.</p>';
+            const histRows = history
+              .map((a) => {
+                const cls = a.css_class === 'alert-maint' ? 'alert-maint' : 'alert-qa';
+                const st = a.status === 'open' ? 'Open' : 'Resolved';
+                const emailCell = window.MachineDashboard.renderEmailStatus
+                  ? window.MachineDashboard.renderEmailStatus(a)
+                  : '—';
+                return `<tr class="${cls}">
+                  <td>${st}</td>
+                  <td>${a.alert_label || a.alert_type}</td>
+                  <td>${a.machine_name || '—'}</td>
+                  <td>${a.team_name || '—'}</td>
+                  <td>${a.tank_number || '—'}</td>
+                  <td>${a.reported_at ? new Date(a.reported_at).toLocaleString() : '—'}</td>
+                  <td>${emailCell}</td>
+                  <td>${a.resolved_at ? new Date(a.resolved_at).toLocaleString() : '—'}</td>
+                  <td>${a.resolved_by || '—'}</td>
+                </tr>`;
+              })
+              .join('');
+            const nextHtml = `${openHtml}
+              <h3 class="manager-section-heading">Alert history</h3>
+              <div class="table-wrap table-scroll manager-table-wrap"><table class="manager-table">
+                <thead><tr><th>Status</th><th>Type</th><th>Machine</th><th>Team</th><th>Tank</th><th>Reported</th><th>Email</th><th>Resolved</th><th>By</th></tr></thead>
+                <tbody>${histRows || '<tr><td colspan="9" class="muted">No alerts yet.</td></tr>'}</tbody>
+              </table></div>`;
+            if (nextHtml !== lastAlertHistoryHtml) {
+              el.innerHTML = nextHtml;
+              lastAlertHistoryHtml = nextHtml;
+              el.querySelectorAll('.alert-resolve-btn').forEach((btn) => {
+                btn.addEventListener('click', async () => {
+                  const id = btn.getAttribute('data-alert-id');
+                  btn.disabled = true;
+                  await fetch(`/api/manager/alerts/${id}/resolve`, { method: 'PATCH' });
+                  if (window.AlertSound) void window.AlertSound.pollNow();
+                  void loadAlertHistory();
+                });
+              });
+            }
+          } catch (err) {
+            if (lastAlertHistoryHtml === null) el.innerHTML = `<p class="muted">${err.message || 'Could not load alerts.'}</p>`;
+          }
+        }
+        const alertRefresh = document.getElementById('alertHistoryRefresh');
+        if (alertRefresh) alertRefresh.addEventListener('click', () => void loadAlertHistory());
+        void loadAlertHistory();
+        setInterval(() => void loadAlertHistory(), 10000);
+      });
+    </script>
     <script src="/admin-footer.js"></script>
     <script src="/pwa.js"></script>
   </body>

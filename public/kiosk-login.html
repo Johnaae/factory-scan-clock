@@ -364,18 +364,17 @@
           <div class="divider"></div>
         </div>
         <form id="panelKiosk" autocomplete="off">
-          <label for="kioskArea">Area</label>
+          <label for="kioskArea">Winding Machine</label>
           <div class="input-wrap">
             <svg class="field-icon" viewBox="0 0 24 24" fill="none">
               <path d="M12 20.5s7-6.3 7-11.2A7 7 0 1 0 5 9.3c0 4.9 7 11.2 7 11.2Z" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
               <path d="M12 12a2.4 2.4 0 1 0 0-4.8 2.4 2.4 0 0 0 0 4.8Z" stroke-width="1.8"></path>
             </svg>
             <select id="kioskArea" name="area" required>
-              <option value="">Select area...</option>
-              <option value="Fabrication">Fabrication</option>
-              <option value="Assembly">Assembly</option>
-              <option value="QA/QC">QA/QC</option>
-              <option value="Shipping & Handling">Shipping & Handling</option>
+              <option value="">Select machine...</option>
+              <option value="Winding Machine 01">Winding Machine 01</option>
+              <option value="Winding Machine 02">Winding Machine 02</option>
+              <option value="Winding Machine 03">Winding Machine 03</option>
             </select>
           </div>
           <label for="kioskPin">PIN (4-6 digits)</label>
@@ -424,10 +423,25 @@
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data.ok) {
-          hintKiosk.textContent = (data && data.message) || 'Login failed. Check area and PIN.';
+          hintKiosk.textContent = (data && data.message) || 'Login failed. Check machine and PIN.';
           return;
         }
-        window.location.href = data.redirect || '/kiosk';
+        const slugByArea = {
+          'Winding Machine 01': 'winding-machine-01',
+          'Winding Machine 02': 'winding-machine-02',
+          'Winding Machine 03': 'winding-machine-03',
+        };
+        const slug = data.machine_slug || slugByArea[area] || null;
+        try {
+          if (slug) localStorage.setItem('windingKioskSlug', slug);
+          if (area) localStorage.setItem('windingKioskArea', area);
+        } catch (_err) {
+          /* ignore storage errors */
+        }
+        const redirect =
+          data.redirect ||
+          (slug ? '/kiosk/machine/' + encodeURIComponent(slug) : '/kiosk-login');
+        window.location.href = redirect;
       });
     </script>
     <script src="/pwa.js"></script>

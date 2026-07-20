@@ -23,7 +23,26 @@ const {
   resolveBackupDownload,
 } = require('./scripts/pg-backup');
 const { readAppVersion } = require('./scripts/app-version');
+const { createAlertEmailService } = require('./scripts/alert-email');
 const { getSystemHealthSummary, getServerStatus, checkDatabase, checkPm2Status, getDatabaseSize, toIsoTime } = require('./scripts/system-health');
+const {
+  createPhase1ProductionLogic,
+  WINDING_PHASES,
+  ALERT_TYPES,
+  PAUSE_REASONS,
+  RESUME_BARCODES,
+  WINDING_MACHINES,
+  WINDING_MACHINE_AREA_NAMES,
+  WINDING_MACHINE_LEGACY_AREA_ALIASES,
+  normalizeWindingMachineAreaName,
+  isWindingMachineAreaName,
+  CANONICAL_WINDING_MACHINE_CODES,
+  isCanonicalWindingMachineCode,
+  displayMachineName,
+  slugFromMachineName,
+  kioskUrlForSlug,
+  mapMachineForClient,
+} = require('./scripts/phase1-production-logic');
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const app = express();
@@ -168,6 +187,14 @@ async function runPostgresSchema() {
         await migrateStopStatusConstraint();
         await migrateEmployeeBadgeRoleColumn();
         await migrateTankLifecycleColumns();
+        await migrateTankWipColumns();
+        await migrateMachineTeamAssignmentColumns();
+        await migrateAlertEmailColumns();
+        await migrateAlertEmailRecipientsTable();
+        await migrateTeamMembersEmployeeIdColumn();
+        await migrateSessionTeamMembersTable();
+        await migratePartCompleteEventsTable();
+        await backfillPartCompleteEventsFromSessions();
         await backfillFinishJobEventsFromScanLogs();
         console.log('[migration] Postgres schema ready');
       } catch (e) {
@@ -203,12 +230,33 @@ const DEFAULT_KIOSK_PINS = {
   kiosk_area_d: '4444',
 };
 
-/** Production kiosk areas (display names). */
-const KIOSK_PRODUCTION_AREAS = ['Fabrication', 'Assembly', 'QA/QC', 'Shipping & Handling'];
+/** Phase 1 kiosk login areas — one physical kiosk per winding machine. */
+const PHASE1_KIOSK_LOGIN_AREAS = [...WINDING_MACHINE_AREA_NAMES];
+
+/** Production kiosk areas (includes legacy areas for logs / print). */
+const KIOSK_PRODUCTION_AREAS = [
+  ...WINDING_MACHINE_AREA_NAMES,
+  'Assembly',
+  'QA/QC',
+  'Shipping & Handling',
+];
 
 /** Legacy area labels → current production area (logs / filters). */
 const LEGACY_KIOSK_AREA_NAMES = {
-  'Area A': 'Fabrication',
+  'Area A': 'Winding Machine 01',
+  Fabrication: 'Winding Machine 01',
+  'Winding Machine 1': 'Winding Machine 01',
+  'Winding Machine 2': 'Winding Machine 02',
+  'Winding Machine 3': 'Winding Machine 03',
+  'Winding Station 1': 'Winding Machine 01',
+  'Winding Station 2': 'Winding Machine 02',
+  'Winding Station 3': 'Winding Machine 03',
+  'Winding Station 01': 'Winding Machine 01',
+  'Winding Station 02': 'Winding Machine 02',
+  'Winding Station 03': 'Winding Machine 03',
+  'WS-01': 'Winding Machine 01',
+  'WS-02': 'Winding Machine 02',
+  'WS-03': 'Winding Machine 03',
   'Area B': 'Assembly',
   'Area C': 'QA/QC',
 };
@@ -216,12 +264,28 @@ const LEGACY_KIOSK_AREA_NAMES = {
 /** Kiosk user profiles (username stable for existing DBs; area_name is display label). */
 const KIOSK_AREA_PROFILES = [
   {
-    username: 'kiosk_area_a',
+    username: 'kiosk_wm_1',
     passwordKey: 'kiosk_area_a',
     pinKey: 'kiosk_area_a',
-    area_name: 'Fabrication',
-    station_name: 'Fabrication Kiosk',
-    pinField: 'area_a_pin',
+    area_name: 'Winding Machine 01',
+    station_name: 'Winding Machine 01 Kiosk',
+    pinField: 'wm_1_pin',
+  },
+  {
+    username: 'kiosk_wm_2',
+    passwordKey: 'kiosk_area_b',
+    pinKey: 'kiosk_wm_2',
+    area_name: 'Winding Machine 02',
+    station_name: 'Winding Machine 02 Kiosk',
+    pinField: 'wm_2_pin',
+  },
+  {
+    username: 'kiosk_wm_3',
+    passwordKey: 'kiosk_area_c',
+    pinKey: 'kiosk_wm_3',
+    area_name: 'Winding Machine 03',
+    station_name: 'Winding Machine 03 Kiosk',
+    pinField: 'wm_3_pin',
   },
   {
     username: 'kiosk_area_b',
@@ -257,6 +321,11 @@ for (const [legacy, current] of Object.entries(LEGACY_KIOSK_AREA_NAMES)) {
   const username = KIOSK_AREA_TO_USERNAME[current];
   if (username) KIOSK_AREA_TO_USERNAME[legacy] = username;
 }
+for (const [legacy, current] of Object.entries(WINDING_MACHINE_LEGACY_AREA_ALIASES)) {
+  const username = KIOSK_AREA_TO_USERNAME[current];
+  if (username) KIOSK_AREA_TO_USERNAME[legacy] = username;
+}
+KIOSK_AREA_TO_USERNAME.Fabrication = KIOSK_AREA_TO_USERNAME['Winding Machine 01'] || 'kiosk_wm_1';
 
 function normalizeKioskAreaName(area) {
   const s = String(area || '').trim();
@@ -264,15 +333,38 @@ function normalizeKioskAreaName(area) {
 }
 
 function displayKioskAreaName(area) {
-  return normalizeKioskAreaName(area) || area || '-';
+  const normalized = normalizeKioskAreaName(area);
+  if (isWindingMachineAreaName(normalized) || isWindingMachineAreaName(area)) {
+    return displayMachineName(normalized || area);
+  }
+  return normalized || area || '-';
 }
 
 function isQaQcKioskArea(area) {
   return normalizeKioskAreaName(area) === 'QA/QC';
 }
 
+function isWindingMachineKioskArea(area) {
+  return isWindingMachineAreaName(area);
+}
+
+function windingMachineSlugForArea(areaName) {
+  const canonical = normalizeWindingMachineAreaName(String(areaName || '').trim());
+  const spec = WINDING_MACHINES.find((m) => m.areaName === canonical);
+  if (spec && spec.kioskSlug) return spec.kioskSlug;
+  return slugFromMachineName(canonical);
+}
+
+function kioskMachinePathForArea(areaName) {
+  const slug = windingMachineSlugForArea(areaName);
+  return `/kiosk/machine/${encodeURIComponent(slug)}`;
+}
+
 function kioskLandingPathForUser(kioskUser) {
   if (kioskUser && isQaQcKioskArea(kioskUser.area_name)) return '/qa-qc';
+  if (kioskUser && isWindingMachineKioskArea(kioskUser.area_name)) {
+    return kioskMachinePathForArea(kioskUser.area_name);
+  }
   return '/kiosk';
 }
 
@@ -775,6 +867,92 @@ async function migrateEmployeeBadgeRoleColumn() {
   }
 }
 
+async function migratePartCompleteEventsTable() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS part_complete_events (
+        id BIGSERIAL PRIMARY KEY,
+        session_id BIGINT REFERENCES machine_sessions(id) ON DELETE SET NULL,
+        tank_id BIGINT NOT NULL REFERENCES tanks(id) ON DELETE RESTRICT,
+        team_id BIGINT REFERENCES teams(id) ON DELETE SET NULL,
+        team_name TEXT,
+        confirmed_by_employee_id BIGINT REFERENCES employees(id) ON DELETE SET NULL,
+        confirmed_by_employee_name TEXT,
+        completed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_part_complete_events_tank ON part_complete_events(tank_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_part_complete_events_completed ON part_complete_events(completed_at DESC)`);
+  } catch (err) {
+    console.warn('[migration] part_complete_events:', err.message);
+  }
+}
+
+async function backfillPartCompleteEventsFromSessions() {
+  try {
+    const { rowCount } = await pool.query(`
+      INSERT INTO part_complete_events
+        (session_id, tank_id, team_id, team_name, confirmed_by_employee_id, confirmed_by_employee_name, completed_at, created_at)
+      SELECT sub.id, sub.tank_id, sub.team_id, sub.team_name, NULL, NULL, sub.completed_at, sub.completed_at
+      FROM (
+        SELECT DISTINCT ON (ms.tank_id)
+          ms.id, ms.tank_id, ms.team_id, t.name AS team_name,
+          COALESCE(ms.finished_at, ms.updated_at, NOW()) AS completed_at
+        FROM machine_sessions ms
+        JOIN teams t ON t.id = ms.team_id
+        WHERE ms.activity_code = 'PART_COMPLETE'
+          AND ms.status = 'finished'
+        ORDER BY ms.tank_id, ms.finished_at DESC NULLS LAST, ms.id DESC
+      ) sub
+      WHERE NOT EXISTS (SELECT 1 FROM part_complete_events pce WHERE pce.tank_id = sub.tank_id)
+    `);
+    if (rowCount > 0) console.log(`[backfill] part_complete_events: inserted ${rowCount} row(s) from machine_sessions`);
+  } catch (err) {
+    console.warn('[backfill] part_complete_events:', err.message);
+  }
+}
+
+async function migrateSessionTeamMembersTable() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS session_team_members (
+        id BIGSERIAL PRIMARY KEY,
+        session_id BIGINT NOT NULL REFERENCES machine_sessions(id) ON DELETE CASCADE,
+        employee_id BIGINT NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+        team_member_id BIGINT REFERENCES team_members(id) ON DELETE SET NULL,
+        employee_code TEXT,
+        employee_name TEXT,
+        hourly_rate NUMERIC(10, 2),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE(session_id, employee_id)
+      )`);
+    await pool.query(`ALTER TABLE session_team_members ADD COLUMN IF NOT EXISTS employee_code TEXT`);
+    await pool.query(`ALTER TABLE session_team_members ADD COLUMN IF NOT EXISTS employee_name TEXT`);
+    await pool.query(`ALTER TABLE session_team_members ADD COLUMN IF NOT EXISTS hourly_rate NUMERIC(10, 2)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_session_team_members_employee ON session_team_members(employee_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_session_team_members_session ON session_team_members(session_id)`);
+    await pool.query(`
+      UPDATE session_team_members stm
+      SET employee_code = COALESCE(stm.employee_code, e.code),
+          employee_name = COALESCE(stm.employee_name, e.name),
+          hourly_rate = COALESCE(stm.hourly_rate, e.hourly_rate, 0)
+      FROM employees e
+      WHERE e.id = stm.employee_id
+        AND (stm.employee_code IS NULL OR stm.employee_name IS NULL OR stm.hourly_rate IS NULL)`);
+  } catch (err) {
+    console.warn('[migration] session_team_members:', err.message);
+  }
+}
+
+async function migrateTeamMembersEmployeeIdColumn() {
+  try {
+    await pool.query(`ALTER TABLE team_members ADD COLUMN IF NOT EXISTS employee_id BIGINT REFERENCES employees(id) ON DELETE SET NULL`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_team_members_employee_id ON team_members(employee_id)`);
+  } catch (err) {
+    console.warn('[migration] team_members.employee_id:', err.message);
+  }
+}
+
 async function migrateTankLifecycleColumns() {
   try {
     await pool.query(`ALTER TABLE tanks ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ`);
@@ -792,6 +970,59 @@ async function migrateTankLifecycleColumns() {
     `);
   } catch (err) {
     console.warn('[migration] tanks lifecycle:', err.message);
+  }
+}
+
+async function migrateTankWipColumns() {
+  try {
+    await pool.query(`ALTER TABLE tanks ADD COLUMN IF NOT EXISTS paused_reason TEXT`);
+    await pool.query(`ALTER TABLE tanks ADD COLUMN IF NOT EXISTS wip_team_id BIGINT REFERENCES teams(id) ON DELETE SET NULL`);
+    await pool.query(`ALTER TABLE tanks ADD COLUMN IF NOT EXISTS wip_phase_code TEXT`);
+    await pool.query(`ALTER TABLE tanks ADD COLUMN IF NOT EXISTS wip_phase_name TEXT`);
+    await pool.query(`ALTER TABLE tanks ADD COLUMN IF NOT EXISTS wip_machine_id BIGINT REFERENCES machines(id) ON DELETE SET NULL`);
+  } catch (err) {
+    console.warn('[migration] tanks wip:', err.message);
+  }
+}
+
+/** Daily team-to-machine assignment (valid for one workday). */
+async function migrateMachineTeamAssignmentColumns() {
+  try {
+    await pool.query(`ALTER TABLE machines ADD COLUMN IF NOT EXISTS assigned_team_id BIGINT REFERENCES teams(id) ON DELETE SET NULL`);
+    await pool.query(`ALTER TABLE machines ADD COLUMN IF NOT EXISTS assigned_team_day TEXT`);
+    await pool.query(`ALTER TABLE machines ADD COLUMN IF NOT EXISTS assigned_team_at TIMESTAMPTZ`);
+  } catch (err) {
+    console.warn('[migration] machine team assignment:', err.message);
+  }
+}
+
+async function migrateAlertEmailColumns() {
+  try {
+    await pool.query(`ALTER TABLE alert_events ADD COLUMN IF NOT EXISTS email_status TEXT`);
+    await pool.query(`ALTER TABLE alert_events ADD COLUMN IF NOT EXISTS email_error TEXT`);
+    await pool.query(`ALTER TABLE alert_events ADD COLUMN IF NOT EXISTS email_sent_at TIMESTAMPTZ`);
+    await pool.query(`ALTER TABLE alert_events ADD COLUMN IF NOT EXISTS resolve_email_status TEXT`);
+    await pool.query(`ALTER TABLE alert_events ADD COLUMN IF NOT EXISTS resolve_email_error TEXT`);
+    await pool.query(`ALTER TABLE alert_events ADD COLUMN IF NOT EXISTS resolve_email_sent_at TIMESTAMPTZ`);
+  } catch (err) {
+    console.warn('[migration] alert email columns:', err.message);
+  }
+}
+
+async function migrateAlertEmailRecipientsTable() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS alert_email_recipients (
+        id BIGSERIAL PRIMARY KEY,
+        alert_type TEXT NOT NULL CHECK (alert_type IN ('qa_qc', 'maintenance')),
+        email TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (alert_type, email)
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_alert_email_recipients_type ON alert_email_recipients(alert_type)`);
+  } catch (err) {
+    console.warn('[migration] alert email recipients:', err.message);
   }
 }
 
@@ -1821,6 +2052,7 @@ function normalizeTankStatus(raw) {
     .trim()
     .toLowerCase();
   if (s === 'archived' || s === 'completed') return 'archived';
+  if (s === 'paused') return 'paused';
   return 'active';
 }
 
@@ -4050,6 +4282,7 @@ app.get('/api/kiosk/work-config', (req, res) => {
     ok: true,
     area_name: displayKioskAreaName(area),
     production_areas: KIOSK_PRODUCTION_AREAS,
+    phase1_kiosk_login_areas: PHASE1_KIOSK_LOGIN_AREAS,
     activities,
     stop_reasons,
     out_reasons,
@@ -4137,7 +4370,10 @@ app.post('/api/auth/login-kiosk-pin', async (req, res) => {
   }
   const area = String(req.body && req.body.area != null ? req.body.area : '').trim();
   const pinRaw = String(req.body && req.body.pin != null ? req.body.pin : '').trim();
-  const username = KIOSK_AREA_TO_USERNAME[area];
+  const username =
+    KIOSK_AREA_TO_USERNAME[area] ||
+    KIOSK_AREA_TO_USERNAME[normalizeWindingMachineAreaName(area)] ||
+    KIOSK_AREA_TO_USERNAME[normalizeKioskAreaName(area)];
   if (!username || !/^\d{4,6}$/.test(pinRaw)) {
     recordPinFailure(ip);
     return res.status(400).json({ ok: false, error: 'validation', message: 'Select an area and enter a 4–6 digit PIN.' });
@@ -4159,10 +4395,14 @@ app.post('/api/auth/login-kiosk-pin', async (req, res) => {
     station_name: user.station_name || null,
     area_name: user.area_name || null,
   };
+  const machineSlug = isWindingMachineKioskArea(req.session.kiosk_user.area_name)
+    ? windingMachineSlugForArea(req.session.kiosk_user.area_name)
+    : null;
   return res.json({
     ok: true,
     role: ROLE.KIOSK,
     redirect: kioskLandingPathForUser(req.session.kiosk_user),
+    machine_slug: machineSlug,
   });
 });
 
@@ -4180,7 +4420,10 @@ app.post('/api/auth/logout', (req, res) => {
 });
 
 app.post('/api/auth/kiosk-logout', (req, res) => {
-  if (req.session) delete req.session.kiosk_user;
+  if (req.session) {
+    delete req.session.kiosk_user;
+    delete req.session.machine_kiosk;
+  }
   if (req.session && !req.session.manager_user) {
     req.session.save(() => res.json({ ok: true }));
     return;
@@ -4190,6 +4433,954 @@ app.post('/api/auth/kiosk-logout', (req, res) => {
     return;
   }
   res.json({ ok: true });
+});
+
+/** Phase 1 winding production logic */
+const phase1 = createPhase1ProductionLogic({
+  pool,
+  nowIso,
+  normalizeTankNumber,
+  ensureTankExists,
+  normalizeTankStatus,
+  startEndOfLocalDay,
+  localDateString,
+  weekBoundsLocal,
+});
+
+const alertEmail = createAlertEmailService({ pool });
+
+void dbReady.then(async () => {
+  try {
+    await phase1.backfillOpenSessionTeamMembers();
+  } catch (err) {
+    console.warn('[boot] open session team member backfill:', err.message);
+  }
+});
+
+async function windingMachineFromKioskAuth(auth) {
+  if (!auth || !isWindingMachineKioskArea(auth.area_name)) return null;
+  return phase1.getMachineByAreaName(auth.area_name);
+}
+
+function currentMachineKioskFromSession(req) {
+  return req.session && req.session.machine_kiosk ? req.session.machine_kiosk : null;
+}
+
+async function windingMachineFromRequest(req) {
+  const mk = currentMachineKioskFromSession(req);
+  if (mk && mk.machine_id) {
+    return phase1.getMachineById(mk.machine_id);
+  }
+  const auth = currentKioskFromSession(req);
+  return windingMachineFromKioskAuth(auth);
+}
+
+function mapWindingMachineResponse(machine) {
+  if (!machine) return null;
+  return mapMachineForClient(machine);
+}
+
+async function lookupActiveEmployeeByScan(raw) {
+  const code = normalizeCode(raw);
+  if (!code) return null;
+  const { rows } = await pool.query(
+    `SELECT id, code, name FROM employees
+     WHERE is_active = 1 AND REPLACE(UPPER(TRIM(code)), ' ', '') = $1
+     LIMIT 1`,
+    [code]
+  );
+  return rows[0] || null;
+}
+
+function confirmerFromBody(body) {
+  const b = body || {};
+  const c = b.confirmer || b.pending_confirmer || null;
+  if (!c) return null;
+  const id = c.id != null ? Number(c.id) : c.employee_id != null ? Number(c.employee_id) : null;
+  const name = c.name != null ? String(c.name).trim() : c.employee_name != null ? String(c.employee_name).trim() : '';
+  if (!Number.isInteger(id) || id <= 0 || !name) return null;
+  return { id, name, code: c.code ? String(c.code) : null };
+}
+
+const NEED_TEAM_MESSAGE = 'Please scan a Team barcode first.';
+
+async function handleWindingScanAction(machine, body) {
+  const barcode = body.barcode;
+  const pendingIn = body.pending || {};
+  let pending = { tank: pendingIn.tank || null };
+  const parsed = phase1.parseScan(barcode);
+  const session = await phase1.getOpenSession(machine.id);
+  const assignment = await phase1.getMachineAssignment(machine.id);
+
+  // Global session actions (do not require re-scanning team).
+  if (parsed.type === 'pause') {
+    const result = await phase1.pauseSession(machine, parsed.value);
+    if (!result.ok) return result;
+    return { ok: true, status: 200, body: { ok: true, ...result.body, assignment } };
+  }
+
+  if (parsed.type === 'end_shift') {
+    const result = await phase1.endShiftSession(machine);
+    if (!result.ok) return result;
+    return { ok: true, status: 200, body: { ok: true, ...result.body } };
+  }
+
+  if (parsed.type === 'alert') {
+    const result = await phase1.createAlert(machine, barcode, session);
+    if (!result.ok) return result;
+    if (result.body && result.body.alert && result.body.alert.id) {
+      alertEmail.queueNewAlertEmail(result.body.alert.id);
+    }
+    return { ok: true, status: 200, body: { ok: true, action: 'alert', alert: result.body.alert, assignment } };
+  }
+
+  // Team scan: assign the team to this machine for the day.
+  if (parsed.type === 'team') {
+    const team = await phase1.getTeamByBarcode(parsed.value);
+    if (!team || !Number(team.active)) {
+      return { ok: false, status: 404, body: { ok: false, error: 'unknown_team', message: 'Unknown team barcode.' } };
+    }
+    const newAssignment = await phase1.assignTeamToMachine(machine.id, team);
+    return {
+      ok: true,
+      status: 200,
+      body: { ok: true, action: 'team_assigned', assignment: newAssignment, pending: { tank: null } },
+    };
+  }
+
+  // Resume: continue a break/lunch pause, OR (Option 1) resume a paused tank's phase.
+  if (parsed.type === 'resume') {
+    if (session && session.status === 'stopped') {
+      const result = await phase1.resumeSession(machine);
+      if (!result.ok) return result;
+      return { ok: true, status: 200, body: { ok: true, ...result.body, assignment } };
+    }
+    if (!assignment) {
+      return { ok: false, status: 409, body: { ok: false, error: 'need_team', message: NEED_TEAM_MESSAGE } };
+    }
+    if (!pending.tank) {
+      return {
+        ok: false,
+        status: 409,
+        body: { ok: false, error: 'need_tank', message: 'Scan the tank to resume its paused phase.' },
+      };
+    }
+    const result = await phase1.resumePausedTank(machine, pending.tank, {
+      id: assignment.team_id,
+      name: assignment.team_name,
+      barcode: assignment.team_barcode,
+      active: 1,
+    });
+    if (!result.ok) return result;
+    return { ok: true, status: 200, body: { ok: true, ...result.body, assignment, pending: { tank: null } } };
+  }
+
+  // All tank/phase scans require a team assignment.
+  if ((parsed.type === 'tank' || parsed.type === 'phase') && !assignment) {
+    return { ok: false, status: 409, body: { ok: false, error: 'need_team', message: NEED_TEAM_MESSAGE } };
+  }
+
+  if (parsed.type === 'tank') {
+    pending.tank = parsed.value;
+    const pausedTank = await phase1.getPausedTankByNumber(pending.tank);
+    const resumablePhase =
+      pausedTank && pausedTank.wip_phase_name ? pausedTank.wip_phase_name : null;
+    return {
+      ok: true,
+      status: 200,
+      body: {
+        ok: true,
+        action: 'tank_selected',
+        assignment,
+        pending,
+        resumable_phase: resumablePhase,
+      },
+    };
+  }
+
+  if (parsed.type === 'phase') {
+    const ph = phase1.resolvePhase(parsed.value);
+    if (!ph) {
+      return { ok: false, status: 400, body: { ok: false, error: 'validation', message: 'Unknown phase barcode.' } };
+    }
+    // Part Complete finishes the tank.
+    if (ph.completes) {
+      if (!session) {
+        return {
+          ok: false,
+          status: 409,
+          body: { ok: false, error: 'no_session', message: 'Start a phase before Part Complete.' },
+        };
+      }
+      const confirmer = confirmerFromBody(body);
+      const fin = await phase1.finishSession(machine, {
+        confirmedByEmployeeId: confirmer ? confirmer.id : null,
+        confirmedByEmployeeName: confirmer ? confirmer.name : null,
+      });
+      if (!fin.ok) return fin;
+      return { ok: true, status: 200, body: { ok: true, ...fin.body, assignment } };
+    }
+    // Option 2 / phase change: an open session exists -> switch phase automatically.
+    if (session) {
+      const ch = await phase1.changePhase(machine, ph.barcode);
+      if (!ch.ok) return ch;
+      return { ok: true, status: 200, body: { ok: true, ...ch.body, assignment } };
+    }
+    // Option 2 (from paused tank) or Option 3 (new tank): need a tank selected.
+    if (!pending.tank) {
+      return {
+        ok: false,
+        status: 409,
+        body: { ok: false, error: 'need_tank', message: 'Scan a tank before the phase.' },
+      };
+    }
+    const start = await phase1.startSession(machine, {
+      team: { id: assignment.team_id, name: assignment.team_name, barcode: assignment.team_barcode, active: 1 },
+      tankNumber: pending.tank,
+      phaseRaw: ph.barcode,
+    });
+    if (!start.ok) return start;
+    return { ok: true, status: 200, body: { ok: true, ...start.body, assignment, pending: { tank: null } } };
+  }
+
+  const employee = await lookupActiveEmployeeByScan(barcode);
+  if (employee) {
+    return {
+      ok: true,
+      status: 200,
+      body: {
+        ok: true,
+        action: 'confirmer',
+        employee: { id: Number(employee.id), code: employee.code, name: employee.name },
+        assignment,
+      },
+    };
+  }
+
+  return { ok: false, status: 400, body: { ok: false, error: 'unknown_barcode', message: 'Unrecognized barcode.' } };
+}
+
+app.get('/api/kiosk/winding/config', async (req, res) => {
+  try {
+    const machine = await windingMachineFromRequest(req);
+    if (!machine || !Number(machine.active)) {
+      return res.status(403).json({ ok: false, error: 'forbidden', message: 'Open a machine kiosk URL to use this screen.' });
+    }
+    const session = await phase1.getOpenSession(machine.id);
+    const mappedSession = session ? await phase1.mapSession(session) : null;
+    const phaseTimeSummary =
+      session && session.tank_id ? await phase1.fetchTankPhaseTimeSummary(Number(session.tank_id)) : [];
+    const assignment = await phase1.getMachineAssignment(machine.id);
+    const { rows: teams } = await pool.query(`SELECT id, name, barcode FROM teams WHERE active = 1 ORDER BY name ASC`);
+    return res.json({
+      ok: true,
+      workflow: 'winding_production',
+      machine: mapWindingMachineResponse(machine),
+      teams,
+      phases: WINDING_PHASES,
+      alerts: ALERT_TYPES,
+      pause_actions: [PAUSE_REASONS.BREAK, PAUSE_REASONS.LUNCH],
+      end_shift: PAUSE_REASONS.END_SHIFT,
+      resume_barcode: 'RESUME',
+      assignment,
+      session: mappedSession,
+      phase_time_summary: phaseTimeSummary,
+    });
+  } catch (err) {
+    console.error('[winding config]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load winding kiosk.' });
+  }
+});
+
+app.post('/api/kiosk/winding/action', async (req, res) => {
+  try {
+    const machine = await windingMachineFromRequest(req);
+    if (!machine || !Number(machine.active)) {
+      return res.status(403).json({ ok: false, error: 'forbidden', message: 'Open a machine kiosk URL to use this screen.' });
+    }
+    const body = req.body || {};
+    const action = String(body.action || '').trim().toLowerCase();
+    let result;
+    if (action === 'scan') {
+      result = await handleWindingScanAction(machine, body);
+    } else if (action === 'start') {
+      result = await phase1.startSession(machine, {
+        teamBarcode: body.team_barcode,
+        tankNumber: body.tank_number,
+        phaseRaw: body.phase,
+      });
+    } else if (action === 'change_phase') {
+      result = await phase1.changePhase(machine, body.phase);
+    } else if (action === 'part_complete') {
+      const confirmer = confirmerFromBody(body);
+      result = await phase1.finishSession(machine, {
+        confirmedByEmployeeId: confirmer ? confirmer.id : null,
+        confirmedByEmployeeName: confirmer ? confirmer.name : null,
+      });
+    } else if (action === 'pause') {
+      result = await phase1.pauseSession(machine, body.barcode || body.pause);
+    } else if (action === 'resume') {
+      result = await phase1.resumeSession(machine);
+    } else if (action === 'end_shift') {
+      result = await phase1.endShiftSession(machine);
+    } else if (action === 'alert') {
+      const session = await phase1.getOpenSession(machine.id);
+      result = await phase1.createAlert(machine, body.barcode || body.alert, session);
+      if (result.ok && result.body && result.body.alert && result.body.alert.id) {
+        alertEmail.queueNewAlertEmail(result.body.alert.id);
+      }
+    } else {
+      return res.status(400).json({ ok: false, error: 'validation', message: 'Unknown action.' });
+    }
+    if (!result.ok) return res.status(result.status).json(result.body);
+    return res.json(result.body);
+  } catch (err) {
+    console.error('[winding action]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not process action.' });
+  }
+});
+
+app.get('/api/manager/machines', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) {
+    return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Manager login required.' });
+  }
+  try {
+    const machines = await phase1.buildDashboardCards();
+    return res.json({ ok: true, machines });
+  } catch (err) {
+    console.error('[manager machines]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load machines.' });
+  }
+});
+
+app.get('/api/manager/alerts', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) {
+    return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Manager login required.' });
+  }
+  try {
+    const status = req.query.status ? String(req.query.status) : undefined;
+    const rows =
+      status === 'open' ? await phase1.fetchAllOpenAlerts() : await phase1.fetchAlertHistory({ status, limit: req.query.limit });
+    return res.json({ ok: true, alerts: rows });
+  } catch (err) {
+    console.error('[manager alerts]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load alerts.' });
+  }
+});
+
+app.patch('/api/manager/alerts/:id/resolve', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) {
+    return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Manager login required.' });
+  }
+  try {
+    const result = await phase1.resolveAlertById(req.params.id, auth.username || auth.name || 'manager');
+    if (!result.ok) return res.status(result.status).json(result.body);
+    alertEmail.queueResolveAlertEmail(req.params.id);
+    return res.json(result.body);
+  } catch (err) {
+    console.error('[manager alert resolve]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not resolve alert.' });
+  }
+});
+
+app.get('/api/manager/alert-email-recipients', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) {
+    return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Manager login required.' });
+  }
+  try {
+    const recipients = await alertEmail.listRecipients();
+    return res.json({ ok: true, recipients, smtp_configured: Boolean(alertEmail.smtpConfig()) });
+  } catch (err) {
+    console.error('[alert email recipients list]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load alert email settings.' });
+  }
+});
+
+app.post('/api/manager/alert-email-recipients', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) {
+    return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Manager login required.' });
+  }
+  try {
+    const result = await alertEmail.addRecipient(req.body && req.body.alert_type, req.body && req.body.email);
+    if (!result.ok) return res.status(result.status).json({ ok: false, message: result.message });
+    return res.json({ ok: true, recipient: result.recipient });
+  } catch (err) {
+    console.error('[alert email recipient add]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not add recipient.' });
+  }
+});
+
+app.delete('/api/manager/alert-email-recipients/:id', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) {
+    return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Manager login required.' });
+  }
+  try {
+    const result = await alertEmail.removeRecipient(req.params.id);
+    if (!result.ok) return res.status(result.status).json({ ok: false, message: result.message });
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('[alert email recipient remove]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not remove recipient.' });
+  }
+});
+
+app.post('/api/manager/alert-email-recipients/test', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) {
+    return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Manager login required.' });
+  }
+  try {
+    const result = await alertEmail.sendTestEmail(req.body && req.body.alert_type, req.body && req.body.email);
+    if (!result.ok) return res.status(result.status || 500).json({ ok: false, message: result.message });
+    return res.json({ ok: true, message: result.message });
+  } catch (err) {
+    console.error('[alert email test]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not send test email.' });
+  }
+});
+
+app.get('/api/manager/production-history', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) {
+    return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Manager login required.' });
+  }
+  try {
+    const rows = await phase1.fetchProductionHistory({
+      date: req.query.date ? String(req.query.date) : undefined,
+      machine_id: req.query.machine_id ? Number(req.query.machine_id) : undefined,
+      team_id: req.query.team_id ? Number(req.query.team_id) : undefined,
+      tank_number: req.query.tank ? String(req.query.tank) : undefined,
+      limit: req.query.limit,
+    });
+    return res.json({ ok: true, rows });
+  } catch (err) {
+    console.error('[manager production-history]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load production history.' });
+  }
+});
+
+app.get('/api/manager/tank-activity', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) {
+    return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Manager login required.' });
+  }
+  const tank = req.query.tank ? String(req.query.tank) : '';
+  if (!tank) {
+    return res.status(400).json({ ok: false, error: 'validation', message: 'Tank number is required.' });
+  }
+  try {
+    const activity = await phase1.fetchTankActivity(tank);
+    return res.json({ ok: true, ...activity });
+  } catch (err) {
+    console.error('[manager tank-activity]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load tank activity.' });
+  }
+});
+
+app.get('/api/manager/sessions/:id/details', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) {
+    return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Manager login required.' });
+  }
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({ ok: false, error: 'invalid_id', message: 'Invalid session id.' });
+  }
+  try {
+    const details = await phase1.fetchSessionDetails(id);
+    if (!details) {
+      return res.status(404).json({ ok: false, error: 'not_found', message: 'Session not found.' });
+    }
+    return res.json({ ok: true, session: details });
+  } catch (err) {
+    console.error('[manager session details]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load session details.' });
+  }
+});
+
+app.get('/api/manager/teams/dashboard', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) {
+    return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Manager login required.' });
+  }
+  try {
+    const teams = await phase1.buildTeamDashboardCards();
+    return res.json({ ok: true, teams });
+  } catch (err) {
+    console.error('[manager teams dashboard]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load team dashboard.' });
+  }
+});
+
+app.delete('/api/manager/teams/:id', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) return res.status(401).json({ ok: false, error: 'not_authenticated' });
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({ ok: false, error: 'validation', message: 'Invalid team id.' });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const activeSession = await client.query(
+      `SELECT id FROM machine_sessions WHERE team_id = $1 AND status IN ('running', 'stopped') LIMIT 1`,
+      [id]
+    );
+    if (activeSession.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        ok: false,
+        error: 'team_active',
+        message: 'Finish the active production session before deactivating this team.',
+      });
+    }
+    const updated = await client.query(
+      `UPDATE teams SET active = 0, updated_at = $1::timestamptz WHERE id = $2 RETURNING id`,
+      [nowIso(), id]
+    );
+    if (!updated.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'not_found', message: 'Team not found.' });
+    }
+    await client.query(`UPDATE team_members SET active = 0 WHERE team_id = $1`, [id]);
+    await client.query('COMMIT');
+    return res.json({ ok: true });
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch (_rollbackErr) {
+      /* ignore rollback errors */
+    }
+    console.error('[manager team deactivate]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not deactivate team.' });
+  } finally {
+    client.release();
+  }
+});
+
+app.patch('/api/manager/teams/:id/restore', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) return res.status(401).json({ ok: false, error: 'not_authenticated' });
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({ ok: false, error: 'validation', message: 'Invalid team id.' });
+  }
+  try {
+    const updated = await pool.query(
+      `UPDATE teams SET active = 1, updated_at = $1::timestamptz WHERE id = $2 RETURNING id`,
+      [nowIso(), id]
+    );
+    if (!updated.rows.length) {
+      return res.status(404).json({ ok: false, error: 'not_found', message: 'Team not found.' });
+    }
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('[manager team restore]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not restore team.' });
+  }
+});
+
+app.get('/api/manager/employees/search', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) {
+    return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Manager login required.' });
+  }
+  const q = String(req.query.q || req.query.search || '').trim();
+  try {
+    let rows;
+    if (q) {
+      const safe = q.replace(/%/g, '').replace(/_/g, '');
+      const pattern = `%${safe}%`;
+      const r = await pool.query(
+        `SELECT id, code, name FROM employees
+         WHERE is_active = 1 AND (lower(code) LIKE lower($1) OR lower(name) LIKE lower($2))
+         ORDER BY LOWER(name) ASC LIMIT 30`,
+        [pattern, pattern]
+      );
+      rows = r.rows;
+    } else {
+      const r = await pool.query(
+        `SELECT id, code, name FROM employees WHERE is_active = 1 ORDER BY LOWER(name) ASC LIMIT 50`
+      );
+      rows = r.rows;
+    }
+    return res.json({
+      ok: true,
+      employees: rows.map((e) => ({ id: Number(e.id), code: e.code, name: e.name })),
+    });
+  } catch (err) {
+    console.error('[manager employees search]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not search employees.' });
+  }
+});
+
+app.get('/api/manager/teams/full', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) {
+    return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Manager login required.' });
+  }
+  try {
+    const { rows: teams } = await pool.query(`SELECT id, name, barcode, active FROM teams ORDER BY name ASC`);
+    const { rows: members } = await pool.query(
+      `SELECT tm.id, tm.team_id, tm.name, tm.role, tm.active, tm.created_at, tm.employee_id,
+              e.code AS employee_code, e.name AS employee_name
+       FROM team_members tm
+       LEFT JOIN employees e ON e.id = tm.employee_id
+       ORDER BY tm.team_id, COALESCE(e.name, tm.name) ASC`
+    );
+    const byTeam = new Map();
+    for (const t of teams) byTeam.set(Number(t.id), { ...t, members: [] });
+    for (const m of members) {
+      const tid = Number(m.team_id);
+      if (byTeam.has(tid)) byTeam.get(tid).members.push(m);
+    }
+    return res.json({ ok: true, teams: [...byTeam.values()] });
+  } catch (err) {
+    console.error('[manager teams full]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load teams.' });
+  }
+});
+
+app.get('/api/manager/teams', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) {
+    return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Manager login required.' });
+  }
+  try {
+    const { rows } = await pool.query(`SELECT id, name, barcode, active FROM teams WHERE active = 1 ORDER BY name ASC`);
+    return res.json({ ok: true, teams: rows });
+  } catch (err) {
+    console.error('[manager teams]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load teams.' });
+  }
+});
+
+app.post('/api/manager/teams', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) return res.status(401).json({ ok: false, error: 'not_authenticated' });
+  const name = String((req.body && req.body.name) || '').trim();
+  const barcode = phase1.normalizeTeamBarcode((req.body && req.body.barcode) || '');
+  if (!name || !barcode) return res.status(400).json({ ok: false, error: 'validation', message: 'Name and barcode required.' });
+  try {
+    const ts = nowIso();
+    const { rows } = await pool.query(
+      `INSERT INTO teams (name, barcode, active, created_at, updated_at) VALUES ($1,$2,1,$3,$3) RETURNING *`,
+      [name, barcode, ts]
+    );
+    return res.json({ ok: true, team: rows[0] });
+  } catch (err) {
+    if (String(err.message || '').includes('unique')) {
+      return res.status(409).json({ ok: false, error: 'duplicate', message: 'Barcode already exists.' });
+    }
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not create team.' });
+  }
+});
+
+app.put('/api/manager/teams/:id', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) return res.status(401).json({ ok: false, error: 'not_authenticated' });
+  const id = Number(req.params.id);
+  const name = String((req.body && req.body.name) || '').trim();
+  const barcode = phase1.normalizeTeamBarcode((req.body && req.body.barcode) || '');
+  if (!Number.isInteger(id) || id <= 0 || !name || !barcode) {
+    return res.status(400).json({ ok: false, error: 'validation', message: 'Invalid team data.' });
+  }
+  try {
+    await pool.query(`UPDATE teams SET name = $1, barcode = $2, updated_at = $3::timestamptz WHERE id = $4`, [
+      name,
+      barcode,
+      nowIso(),
+      id,
+    ]);
+    return res.json({ ok: true });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not update team.' });
+  }
+});
+
+app.post('/api/manager/teams/:id/members', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) return res.status(401).json({ ok: false, error: 'not_authenticated' });
+  const teamId = Number(req.params.id);
+  const body = req.body || {};
+  const employeeId = body.employee_id != null ? Number(body.employee_id) : null;
+  const role = body.role != null ? String(body.role).trim() : null;
+  const move = !!body.move;
+  if (!Number.isInteger(teamId) || teamId <= 0) {
+    return res.status(400).json({ ok: false, error: 'validation', message: 'Invalid team id.' });
+  }
+  if (!Number.isInteger(employeeId) || employeeId <= 0) {
+    return res.status(400).json({ ok: false, error: 'validation', message: 'Select an employee from the directory.' });
+  }
+  try {
+    const teamCheck = await pool.query(`SELECT id, name FROM teams WHERE id = $1`, [teamId]);
+    if (!teamCheck.rows.length) {
+      return res.status(404).json({ ok: false, error: 'not_found', message: 'Team not found.' });
+    }
+    const empRes = await pool.query(`SELECT id, code, name, is_active FROM employees WHERE id = $1`, [employeeId]);
+    if (!empRes.rows.length) {
+      return res.status(404).json({ ok: false, error: 'not_found', message: 'Employee not found.' });
+    }
+    const emp = empRes.rows[0];
+    if (Number(emp.is_active) === 0) {
+      return res.status(400).json({ ok: false, error: 'inactive_employee', message: 'That employee is inactive in the directory.' });
+    }
+    const dupSame = await pool.query(
+      `SELECT id FROM team_members WHERE team_id = $1 AND employee_id = $2 AND active = 1`,
+      [teamId, employeeId]
+    );
+    if (dupSame.rows.length) {
+      return res.status(409).json({
+        ok: false,
+        error: 'duplicate',
+        message: 'Employee already in this team.',
+      });
+    }
+    const otherRes = await pool.query(
+      `SELECT tm.id, tm.team_id, t.name AS team_name
+       FROM team_members tm
+       JOIN teams t ON t.id = tm.team_id
+       WHERE tm.employee_id = $1 AND tm.active = 1 AND tm.team_id != $2
+       LIMIT 1`,
+      [employeeId, teamId]
+    );
+    if (otherRes.rows.length && !move) {
+      const other = otherRes.rows[0];
+      return res.status(409).json({
+        ok: false,
+        error: 'assigned_elsewhere',
+        other_team_id: Number(other.team_id),
+        other_team_name: other.team_name,
+        message: `This employee is already assigned to ${other.team_name}. Move them to this team?`,
+      });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      if (otherRes.rows.length && move) {
+        await client.query(`UPDATE team_members SET active = 0 WHERE id = $1`, [Number(otherRes.rows[0].id)]);
+      }
+      const inactiveSame = await client.query(
+        `SELECT id FROM team_members WHERE team_id = $1 AND employee_id = $2 AND active = 0`,
+        [teamId, employeeId]
+      );
+      let memberRow;
+      if (inactiveSame.rows.length) {
+        const upd = await client.query(
+          `UPDATE team_members SET active = 1, role = $1, name = $2 WHERE id = $3 RETURNING *`,
+          [role || null, emp.name, Number(inactiveSame.rows[0].id)]
+        );
+        memberRow = upd.rows[0];
+      } else {
+        const ins = await client.query(
+          `INSERT INTO team_members (team_id, name, role, active, employee_id, created_at)
+           VALUES ($1,$2,$3,1,$4,NOW()) RETURNING *`,
+          [teamId, emp.name, role || null, employeeId]
+        );
+        memberRow = ins.rows[0];
+      }
+      await client.query('COMMIT');
+      return res.json({
+        ok: true,
+        member: {
+          ...memberRow,
+          employee_id: Number(memberRow.employee_id),
+          employee_code: emp.code,
+          employee_name: emp.name,
+        },
+      });
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (_rollbackErr) {
+        /* ignore */
+      }
+      throw err;
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    console.error('[manager team member add]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not add team member.' });
+  }
+});
+
+app.delete('/api/manager/teams/:teamId/members/:memberId', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) return res.status(401).json({ ok: false, error: 'not_authenticated' });
+  const memberId = Number(req.params.memberId);
+  if (!Number.isInteger(memberId) || memberId <= 0) {
+    return res.status(400).json({ ok: false, error: 'validation', message: 'Invalid member id.' });
+  }
+  await pool.query(`UPDATE team_members SET active = 0 WHERE id = $1`, [memberId]);
+  return res.json({ ok: true });
+});
+
+app.get('/api/manager/teams/:teamId/members/:memberId/details', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Manager login required.' });
+  const teamId = Number(req.params.teamId);
+  const memberId = Number(req.params.memberId);
+  if (!Number.isInteger(teamId) || teamId <= 0 || !Number.isInteger(memberId) || memberId <= 0) {
+    return res.status(400).json({ ok: false, error: 'validation', message: 'Invalid team or member id.' });
+  }
+  try {
+    const memberRes = await pool.query(
+      `SELECT tm.id, tm.team_id, tm.name, tm.role, tm.active, tm.employee_id,
+              e.code AS employee_code, e.name AS employee_name, e.is_active AS employee_active, e.hourly_rate
+       FROM team_members tm
+       LEFT JOIN employees e ON e.id = tm.employee_id
+       WHERE tm.id = $1 AND tm.team_id = $2`,
+      [memberId, teamId]
+    );
+    if (!memberRes.rows.length) {
+      return res.status(404).json({ ok: false, error: 'not_found', message: 'Team member not found.' });
+    }
+    const m = memberRes.rows[0];
+    const employeeId = m.employee_id != null ? Number(m.employee_id) : null;
+    const rate = Number.isFinite(Number(m.hourly_rate)) ? Number(m.hourly_rate) : 0;
+    const isActive = Number(m.active) !== 0 && (m.employee_active == null || Number(m.employee_active) !== 0);
+
+    let todayHours = 0;
+    let weekHours = 0;
+    let hasTimeData = false;
+
+    if (employeeId) {
+      const todayKey = localDateString();
+      const teamTodayHours = await phase1.computeEmployeeTeamProductionHoursForDay(employeeId, todayKey);
+      const teamWeekHours = await phase1.computeEmployeeTeamProductionWeekHours(employeeId);
+
+      const scanToday = await computeDailyHours(employeeId, todayKey);
+      const scanTodayHours =
+        scanToday && Number.isFinite(Number(scanToday.totalHours)) ? Number(scanToday.totalHours) : 0;
+
+      let scanWeekHours = 0;
+      const week = weekBoundsLocal();
+      if (week) {
+        const cursor = new Date(week.startIso);
+        const todayEnd = startEndOfLocalDay(todayKey);
+        const weekEndMs = todayEnd ? new Date(todayEnd.endIso).getTime() : Date.now();
+        while (cursor.getTime() <= weekEndMs) {
+          const dayKey = localDateString(cursor);
+          const daily = await computeDailyHours(employeeId, dayKey);
+          const hrs = daily && Number.isFinite(Number(daily.totalHours)) ? Number(daily.totalHours) : 0;
+          scanWeekHours += hrs;
+          if (dayKey === todayKey) break;
+          cursor.setDate(cursor.getDate() + 1);
+        }
+      }
+
+      todayHours = roundHours2(teamTodayHours + scanTodayHours);
+      weekHours = roundHours2(teamWeekHours + scanWeekHours);
+      hasTimeData = todayHours > 0 || weekHours > 0;
+    }
+
+    return res.json({
+      ok: true,
+      member: {
+        id: Number(m.id),
+        team_id: Number(m.team_id),
+        employee_id: employeeId,
+        name: m.employee_name || m.name || '—',
+        code: m.employee_code || null,
+        role: m.role || null,
+        active: isActive,
+        has_time_data: hasTimeData,
+        hourly_rate: roundMoney2(rate),
+        today_hours: roundHours2(todayHours),
+        week_hours: weekHours,
+        estimated_pay_today: roundMoney2(todayHours * rate),
+        estimated_pay_week: roundMoney2(weekHours * rate),
+      },
+    });
+  } catch (err) {
+    console.error('[manager team member details]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load member details.' });
+  }
+});
+
+app.get('/api/manager/machine-areas', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) return res.status(401).json({ ok: false, error: 'not_authenticated' });
+  try {
+    const rows = await phase1.fetchManagedWindingMachines();
+    return res.json({ ok: true, machines: rows.map(mapMachineForClient) });
+  } catch (err) {
+    console.error('[manager machine-areas]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load machines.' });
+  }
+});
+
+app.post('/api/manager/machine-areas', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) return res.status(401).json({ ok: false, error: 'not_authenticated' });
+  const body = req.body || {};
+  const name = String(body.name || '').trim();
+  if (!name) return res.status(400).json({ ok: false, error: 'validation', message: 'Machine name is required.' });
+  let slug = slugFromMachineName(name);
+  const ts = nowIso();
+  try {
+    const dup = await pool.query(`SELECT id FROM machines WHERE LOWER(TRIM(kiosk_slug)) = $1 LIMIT 1`, [slug]);
+    if (dup.rows.length) slug = `${slug}-${Date.now()}`;
+    const sortRes = await pool.query(`SELECT COALESCE(MAX(sort_order), 0) + 1 AS next_sort FROM machines`);
+    const sortOrder = sortRes.rows[0] ? Number(sortRes.rows[0].next_sort) : 1;
+    const internalCode = slug;
+    const { rows } = await pool.query(
+      `INSERT INTO machines (name, code, barcode, kiosk_slug, sort_order, active, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,1,$6,$6) RETURNING *`,
+      [name, internalCode, null, slug, sortOrder, ts]
+    );
+    return res.json({ ok: true, machine: mapMachineForClient(rows[0]) });
+  } catch (err) {
+    console.error('[manager machine-areas create]', err);
+    if (String(err.message || '').includes('unique')) {
+      return res.status(409).json({ ok: false, error: 'duplicate', message: 'A machine with that name already exists.' });
+    }
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not create machine.' });
+  }
+});
+
+app.put('/api/manager/machine-areas/:id', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) return res.status(401).json({ ok: false, error: 'not_authenticated' });
+  const id = Number(req.params.id);
+  const body = req.body || {};
+  const name = String(body.name || '').trim();
+  if (!Number.isInteger(id) || id <= 0 || !name) {
+    return res.status(400).json({ ok: false, error: 'validation', message: 'Invalid machine data.' });
+  }
+  const sortOrder = body.sort_order != null ? Number(body.sort_order) : null;
+  const active = body.active != null ? (body.active ? 1 : 0) : null;
+  try {
+    const { rows: existing } = await pool.query(`SELECT id FROM machines WHERE id = $1`, [id]);
+    if (!existing.length) {
+      return res.status(404).json({ ok: false, error: 'not_found', message: 'Machine not found.' });
+    }
+    await pool.query(
+      `UPDATE machines SET
+         name = $1,
+         sort_order = COALESCE($2, sort_order),
+         active = COALESCE($3, active),
+         updated_at = $4::timestamptz
+       WHERE id = $5`,
+      [name, sortOrder, active, nowIso(), id]
+    );
+    const { rows } = await pool.query(
+      `SELECT id, name, code, barcode, kiosk_slug, sort_order, active FROM machines WHERE id = $1`,
+      [id]
+    );
+    return res.json({ ok: true, machine: mapMachineForClient(rows[0]) });
+  } catch (err) {
+    console.error('[manager machine-areas update]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not update machine.' });
+  }
 });
 
 app.use((req, res, next) => {
@@ -4205,7 +5396,20 @@ app.use((req, res, next) => {
   ) {
     return next();
   }
-  if (p === '/kiosk' || p === '/ipad-scan' || p === '/qa-qc') return requireKiosk(req, res, next);
+  if (p === '/kiosk' || p === '/ipad-scan' || p === '/qa-qc') {
+    return requireKiosk(req, res, next);
+  }
+  if (
+    p === '/winding-kiosk' ||
+    p === '/winding-kiosk.html' ||
+    p === '/machine-kiosk.js' ||
+    /^\/kiosk\/machine\/[^/]+$/.test(p)
+  ) {
+    return next();
+  }
+  if (p === '/teams' || p === '/teams.html' || p === '/teams.js' || p === '/machine-areas' || p === '/machine-areas.html' || p === '/machine-areas.js' || p === '/alert-email-settings' || p === '/alert-email-settings.html' || p === '/alert-email-settings.js') {
+    return requireManager(req, res, next);
+  }
   if (
     p === '/scan' ||
     p === '/scan/' ||
@@ -4232,6 +5436,9 @@ app.use((req, res, next) => {
   ) {
     return requireManager(req, res, next);
   }
+  if (p.startsWith('/api/kiosk/winding/')) {
+    return next();
+  }
   if (p.startsWith('/api/kiosk/')) {
     return requireKiosk(req, res, next);
   }
@@ -4249,7 +5456,7 @@ app.use((req, res, next) => {
     p.startsWith('/api/status') ||
     p.startsWith('/api/logs') ||
     p.startsWith('/api/scan_logs') ||
-    p.startsWith('/api/dashboard/finished-jobs') ||
+    p.startsWith('/api/dashboard') ||
     p.startsWith('/api/admin/') ||
     p.startsWith('/api/system/')
   ) {
@@ -4852,6 +6059,117 @@ app.get('/api/dashboard/finished-jobs', async (req, res) => {
   }
 });
 
+app.get('/api/dashboard/team-activity', async (req, res) => {
+  const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
+  try {
+    const { rows } = await pool.query(
+      `WITH activity AS (
+         SELECT ms.started_at AS event_time,
+                t.name AS team_name,
+                m.name AS machine_name,
+                tk.tank_number,
+                ms.activity_name AS phase_name,
+                ms.status,
+                'Started production' AS note,
+                ms.id AS sort_id
+         FROM machine_sessions ms
+         JOIN teams t ON t.id = ms.team_id
+         JOIN machines m ON m.id = ms.machine_id
+         JOIN tanks tk ON tk.id = ms.tank_id
+         UNION ALL
+         SELECT ms.finished_at AS event_time,
+                t.name AS team_name,
+                m.name AS machine_name,
+                tk.tank_number,
+                ms.activity_name AS phase_name,
+                'finished' AS status,
+                'Part complete' AS note,
+                ms.id AS sort_id
+         FROM machine_sessions ms
+         JOIN teams t ON t.id = ms.team_id
+         JOIN machines m ON m.id = ms.machine_id
+         JOIN tanks tk ON tk.id = ms.tank_id
+         WHERE ms.finished_at IS NOT NULL
+         UNION ALL
+         SELECT ae.reported_at AS event_time,
+                t.name AS team_name,
+                m.name AS machine_name,
+                tk.tank_number,
+                COALESCE(ms.activity_name, '') AS phase_name,
+                ae.status,
+                CASE ae.alert_type WHEN 'qa_qc' THEN 'QA/QC Alert' ELSE 'Maintenance/Tooling Alert' END AS note,
+                ae.id AS sort_id
+         FROM alert_events ae
+         LEFT JOIN machine_sessions ms ON ms.id = ae.session_id
+         LEFT JOIN teams t ON t.id = ae.team_id
+         LEFT JOIN machines m ON m.id = ae.machine_id
+         LEFT JOIN tanks tk ON tk.id = ae.tank_id
+         UNION ALL
+         SELECT sl.scanned_at AS event_time,
+                NULL AS team_name,
+                COALESCE(sl.station_name, sl.area_name) AS machine_name,
+                sl.tank_number,
+                CASE WHEN sl.note_category = 'WORK' THEN sl.note_value ELSE NULL END AS phase_name,
+                sl.status,
+                COALESCE(sl.note, sl.note_value, sl.note_category, 'Manual scan') AS note,
+                sl.id AS sort_id
+         FROM scan_logs sl
+       )
+       SELECT event_time, team_name, machine_name, tank_number, phase_name, status, note
+       FROM activity
+       WHERE event_time IS NOT NULL
+       ORDER BY event_time DESC, sort_id DESC
+       LIMIT $1`,
+      [limit]
+    );
+    return res.json({
+      ok: true,
+      logs: rows.map((r) => ({
+        time: r.event_time,
+        team: r.team_name || '—',
+        machine: r.machine_name ? displayMachineName(r.machine_name) : '—',
+        tank: r.tank_number || '—',
+        phase: r.phase_name || '—',
+        status: r.status || '—',
+        note: r.note || '',
+      })),
+    });
+  } catch (err) {
+    console.error('[dashboard team activity]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load team scan activity.' });
+  }
+});
+
+app.post('/api/dashboard/manual-scan', async (req, res) => {
+  const raw = String(req.body && req.body.barcode != null ? req.body.barcode : '').trim();
+  if (!raw) return res.status(400).json({ ok: false, error: 'validation', message: 'Enter a barcode.' });
+  try {
+    const parsed = phase1.parseScan(raw);
+    let label = 'Unknown barcode';
+    let detail = parsed.value || raw;
+    if (parsed.type === 'team') {
+      const team = await phase1.getTeamByBarcode(parsed.value);
+      label = team ? 'Team barcode' : 'Team barcode not found';
+      detail = team ? team.name : parsed.value;
+    } else if (parsed.type === 'tank') {
+      label = 'Tank barcode';
+      detail = parsed.value;
+    } else if (parsed.type === 'phase') {
+      const phase = phase1.resolvePhase(parsed.value);
+      label = 'Phase barcode';
+      detail = phase ? phase.label : parsed.value;
+    } else if (parsed.type === 'alert') {
+      const alert = phase1.resolveAlert(parsed.value);
+      label = 'Alert barcode';
+      detail = alert ? alert.label : parsed.value;
+    }
+    return res.json({ ok: true, type: parsed.type, label, detail });
+  } catch (err) {
+    console.error('[dashboard manual scan]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not read barcode.' });
+  }
+});
+
 app.get('/api/dashboard', async (_req, res) => {
   const [status, payroll] = await Promise.all([
     (async () => {
@@ -5411,7 +6729,7 @@ app.get('/api/tanks', async (req, res) => {
   const params = [];
   let n = 1;
   if (statusFilter === 'active') {
-    sql += ` AND (LOWER(TRIM(COALESCE(status, ''))) = 'active' OR TRIM(COALESCE(status, '')) = '')`;
+    sql += ` AND LOWER(TRIM(COALESCE(status, ''))) IN ('active', 'paused', '')`;
   } else if (statusFilter === 'archived') {
     sql += ` AND LOWER(TRIM(status)) = 'archived'`;
   } else if (statusFilter === 'all') {
@@ -5539,6 +6857,29 @@ app.get('/api/tanks/:id/report', async (req, res) => {
   }
   const report = computeTankLaborReport(tank.tank_number, logsAsc, employeesByCode, Date.now());
   const finishedJobs = await fetchFinishJobEvents({ tankNumber: tank.tank_number, limit: 50 });
+  let teamCompletion = phase1.emptyTankTeamCompletion();
+  let teamProduction = null;
+  try {
+    teamCompletion = await phase1.fetchTankTeamCompletion(id);
+  } catch (err) {
+    console.error('[tank report] team_completion:', err);
+    teamCompletion = phase1.emptyTankTeamCompletion();
+  }
+  try {
+    teamProduction = await phase1.fetchTankProductionLabor(id);
+  } catch (err) {
+    console.error('[tank report] team_production:', err);
+    teamProduction = null;
+  }
+  let phaseTimeSummary = [];
+  try {
+    phaseTimeSummary = await phase1.fetchTankPhaseTimeSummary(id);
+  } catch (err) {
+    console.error('[tank report] phase_time_summary:', err);
+  }
+  if (teamProduction && (!teamProduction.phase_time_summary || !teamProduction.phase_time_summary.length)) {
+    teamProduction.phase_time_summary = phaseTimeSummary;
+  }
   res.json({
     ok: true,
     tank: {
@@ -5557,6 +6898,9 @@ app.get('/api/tanks/:id/report', async (req, res) => {
     activityBreakdown: report.activityBreakdown,
     sessions: report.sessions,
     finished_jobs: finishedJobs,
+    team_completion: teamCompletion,
+    team_production: teamProduction,
+    phase_time_summary: phaseTimeSummary,
   });
 });
 
@@ -5927,7 +7271,7 @@ app.patch('/api/manager/kiosk-pins', async (req, res) => {
     return res.status(400).json({
       ok: false,
       error: 'validation',
-      message: 'Provide at least one PIN (area_a_pin, area_b_pin, area_c_pin, or area_d_pin).',
+      message: 'Provide at least one PIN (wm_1_pin, wm_2_pin, or wm_3_pin).',
     });
   }
   const ts = nowIso();
@@ -6174,9 +7518,77 @@ app.get('/kiosk', (req, res) => {
   if (auth && isQaQcKioskArea(auth.area_name)) {
     return res.redirect(302, '/qa-qc');
   }
+  if (auth && isWindingMachineKioskArea(auth.area_name)) {
+    return res.redirect(302, kioskMachinePathForArea(auth.area_name));
+  }
   scanKioskCacheHeaders(res);
   res.type('html');
   res.sendFile(path.join(PUBLIC_DIR, 'scan.html'));
+});
+
+app.get('/winding-kiosk', (_req, res) => {
+  scanKioskCacheHeaders(res);
+  res.type('html');
+  res.sendFile(path.join(PUBLIC_DIR, 'winding-kiosk-redirect.html'));
+});
+
+app.get('/winding-kiosk.js', (_req, res) => {
+  scanKioskCacheHeaders(res);
+  res.type('application/javascript');
+  res.sendFile(path.join(PUBLIC_DIR, 'machine-kiosk.js'));
+});
+
+app.get('/kiosk/machine/:slug', async (req, res) => {
+  try {
+    const slug = String(req.params.slug || '')
+      .trim()
+      .toLowerCase();
+    const machine = await phase1.getMachineBySlug(slug);
+    if (!machine || !Number(machine.active)) {
+      return res.status(404).type('html').send('<p>Machine kiosk not found.</p>');
+    }
+    req.session.machine_kiosk = {
+      machine_id: Number(machine.id),
+      slug: String(machine.kiosk_slug || slug).toLowerCase(),
+      machine_name: machine.name,
+    };
+    req.session.save((err) => {
+      if (err) console.error('[machine kiosk session]', err);
+      scanKioskCacheHeaders(res);
+      res.type('html');
+      res.sendFile(path.join(PUBLIC_DIR, 'machine-kiosk.html'));
+    });
+  } catch (err) {
+    console.error('[kiosk/machine]', err);
+    res.status(500).type('html').send('<p>Could not open machine kiosk.</p>');
+  }
+});
+
+app.get('/teams', (_req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'teams.html'));
+});
+
+app.get('/teams.js', (_req, res) => {
+  res.type('application/javascript');
+  res.sendFile(path.join(PUBLIC_DIR, 'teams.js'));
+});
+
+app.get('/machine-areas', (_req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'machine-areas.html'));
+});
+
+app.get('/machine-areas.js', (_req, res) => {
+  res.type('application/javascript');
+  res.sendFile(path.join(PUBLIC_DIR, 'machine-areas.js'));
+});
+
+app.get('/alert-email-settings', (_req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'alert-email-settings.html'));
+});
+
+app.get('/alert-email-settings.js', (_req, res) => {
+  res.type('application/javascript');
+  res.sendFile(path.join(PUBLIC_DIR, 'alert-email-settings.js'));
 });
 
 app.get('/qa-qc', (req, res) => {
@@ -6214,6 +7626,12 @@ app.get('/scan.js', (_req, res) => {
   scanKioskCacheHeaders(res);
   res.type('application/javascript');
   res.sendFile(path.join(PUBLIC_DIR, 'scan.js'));
+});
+
+app.get('/machine-kiosk.js', (_req, res) => {
+  scanKioskCacheHeaders(res);
+  res.type('application/javascript');
+  res.sendFile(path.join(PUBLIC_DIR, 'machine-kiosk.js'));
 });
 
 app.get('/scan.html', (_req, res) => {
@@ -6321,7 +7739,7 @@ h1 { font-size: 26px; font-weight: 800; margin: 0 0 6px; letter-spacing: 0.02em;
 </head><body>
 <div class="page-head">
   <h1>Production Activities by Area</h1>
-  <p class="instr">Scan employee badge, tank, then activity. Each section lists activities for one production area. Laminate and keep at the kiosk station.</p>
+  <p class="instr">Scan employee badge, tank, then activity. Each section lists activities for one production area. Laminate and keep at the machine kiosk.</p>
 </div>
 ${sections}
 <script>${scripts.join('')}window.setTimeout(()=>window.print(),450);</script>
@@ -6496,10 +7914,147 @@ svg{max-width:100%;height:120px}
 </body></html>`;
 }
 
+async function renderTeamBarcodesPrintPage() {
+  const { rows } = await pool.query(`SELECT name, barcode FROM teams WHERE active = 1 ORDER BY name ASC`);
+  let bcIndex = 0;
+  const scripts = [];
+  const cards = rows
+    .map((t) => {
+      const safeTitle = String(t.name).replace(/</g, '&lt;');
+      const safeVal = String(t.barcode).replace(/</g, '&lt;');
+      const esc = String(t.barcode).replace(/'/g, "\\'");
+      const id = `bc${bcIndex++}`;
+      scripts.push(`JsBarcode('#${id}','${esc}',{format:'CODE128',displayValue:false,height:110,margin:10,width:2.5});`);
+      return `<div class="card"><p class="title">${safeTitle}</p><p class="sub">Team Badge</p><svg id="${id}"></svg><p class="value">${safeVal}</p></div>`;
+    })
+    .join('');
+  return `<!doctype html><html><head><meta charset="utf-8" /><title>Team Barcodes</title>
+<style>body{font-family:Arial,sans-serif;margin:20px;color:#0f172a}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:20px}.card{border:2px solid #cbd5e1;border-radius:12px;padding:20px;text-align:center}.title{font-size:28px;font-weight:800;margin:0 0 6px}.sub{font-size:13px;color:#64748b;margin:0 0 12px;text-transform:uppercase}.value{font-family:monospace;font-size:18px;margin-top:10px;font-weight:700}svg{height:110px;width:100%}</style>
+<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script></head><body>
+<h1>Team Barcodes</h1><div class="grid">${cards || '<p>No teams.</p>'}</div>
+<script>${scripts.join('')}window.setTimeout(()=>window.print(),400);</script></body></html>`;
+}
+
+function renderPhaseBarcodesPrintPage() {
+  let bcIndex = 0;
+  const scripts = [];
+  const cards = WINDING_PHASES.map((a) => {
+    const safeTitle = String(a.label).replace(/</g, '&lt;');
+    const safeVal = String(a.barcode).replace(/</g, '&lt;');
+    const esc = String(a.barcode).replace(/'/g, "\\'");
+    const id = `bc${bcIndex++}`;
+    scripts.push(`JsBarcode('#${id}','${esc}',{format:'CODE128',displayValue:false,height:110,margin:10,width:2.5});`);
+    return `<div class="card"><p class="title">${safeTitle}</p><p class="sub">Production Phase</p><svg id="${id}"></svg><p class="value">${safeVal}</p></div>`;
+  }).join('');
+  return `<!doctype html><html><head><meta charset="utf-8" /><title>Phase Barcodes</title>
+<style>body{font-family:Arial,sans-serif;margin:20px}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:20px}.card{border:2px solid #cbd5e1;border-radius:12px;padding:20px;text-align:center}.title{font-size:22px;font-weight:800;margin:0 0 6px}.sub{font-size:12px;color:#64748b;text-transform:uppercase}.value{font-family:monospace;font-size:14px;margin-top:10px;font-weight:700;word-break:break-all}svg{height:110px;width:100%}</style>
+<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script></head><body>
+<h1>Winding Machine Phase Barcodes</h1><div class="grid">${cards}</div>
+<script>${scripts.join('')}window.setTimeout(()=>window.print(),400);</script></body></html>`;
+}
+
+function renderAlertBarcodesPrintPage() {
+  let bcIndex = 0;
+  const scripts = [];
+  const cards = ALERT_TYPES.map((a) => {
+    const safeTitle = String(a.label).replace(/</g, '&lt;');
+    const safeVal = String(a.barcode).replace(/</g, '&lt;');
+    const esc = String(a.barcode).replace(/'/g, "\\'");
+    const id = `bc${bcIndex++}`;
+    scripts.push(`JsBarcode('#${id}','${esc}',{format:'CODE128',displayValue:false,height:110,margin:10,width:2.5});`);
+    return `<div class="card"><p class="title">${safeTitle}</p><p class="sub">Alert Barcode</p><svg id="${id}"></svg><p class="value">${safeVal}</p></div>`;
+  }).join('');
+  return `<!doctype html><html><head><meta charset="utf-8" /><title>Alert Barcodes</title>
+<style>body{font-family:Arial,sans-serif;margin:20px}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:20px}.card{border:3px solid #cbd5e1;border-radius:12px;padding:20px;text-align:center}.title{font-size:24px;font-weight:800}.sub{font-size:12px;color:#64748b;text-transform:uppercase}.value{font-family:monospace;font-size:16px;margin-top:10px;font-weight:700}svg{height:110px;width:100%}</style>
+<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script></head><body>
+<h1>Alert Barcodes</h1><div class="grid">${cards}</div>
+<script>${scripts.join('')}window.setTimeout(()=>window.print(),400);</script></body></html>`;
+}
+
+async function renderMachineBarcodesPrintPage() {
+  const codes = CANONICAL_WINDING_MACHINE_CODES.map((c) => c.toUpperCase());
+  const { rows } = await pool.query(
+    `SELECT name, code, barcode FROM machines
+     WHERE active = 1 AND UPPER(TRIM(code)) = ANY($1::text[])
+     ORDER BY sort_order ASC, code ASC`,
+    [codes]
+  );
+  let bcIndex = 0;
+  const scripts = [];
+  const cards = rows
+    .map((m) => {
+      const bc = m.barcode || m.code;
+      const safeTitle = String(m.name).replace(/</g, '&lt;');
+      const safeVal = String(bc).replace(/</g, '&lt;');
+      const esc = String(bc).replace(/'/g, "\\'");
+      const id = `bc${bcIndex++}`;
+      scripts.push(`JsBarcode('#${id}','${esc}',{format:'CODE128',displayValue:false,height:110,margin:10,width:2.5});`);
+      return `<div class="card"><p class="title">${safeTitle}</p><p class="sub">${String(m.code).replace(/</g, '&lt;')}</p><svg id="${id}"></svg><p class="value">${safeVal}</p></div>`;
+    })
+    .join('');
+  return `<!doctype html><html><head><meta charset="utf-8" /><title>Machine Barcodes</title>
+<style>body{font-family:Arial,sans-serif;margin:20px}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:20px}.card{border:2px solid #cbd5e1;border-radius:12px;padding:20px;text-align:center}.title{font-size:24px;font-weight:800}.sub{font-size:14px;color:#475569;font-weight:700}.value{font-family:monospace;font-size:18px;margin-top:10px;font-weight:700}svg{height:110px;width:100%}</style>
+<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script></head><body>
+<h1>Winding Machine Barcodes</h1><div class="grid">${cards || '<p>No machines.</p>'}</div>
+<script>${scripts.join('')}window.setTimeout(()=>window.print(),400);</script></body></html>`;
+}
+
+async function renderTankBarcodesIndexPrintPage() {
+  const { rows } = await pool.query(
+    `SELECT tank_number FROM tanks WHERE LOWER(TRIM(COALESCE(status,''))) IN ('active','') ORDER BY tank_number ASC LIMIT 48`
+  );
+  if (!rows.length) {
+    return `<!doctype html><html><body><p>No active tanks to print.</p></body></html>`;
+  }
+  let bcIndex = 0;
+  const scripts = [];
+  const cards = rows
+    .map((t) => {
+      const tank = String(t.tank_number).replace(/</g, '&lt;');
+      const barcode = `TANK_${t.tank_number}`;
+      const esc = barcode.replace(/'/g, "\\'");
+      const id = `bc${bcIndex++}`;
+      scripts.push(`JsBarcode('#${id}','${esc}',{format:'CODE128',displayValue:false,height:100,margin:8,width:2});`);
+      return `<div class="card"><p class="title">Tank ${tank}</p><svg id="${id}"></svg><p class="value">${barcode.replace(/</g, '&lt;')}</p></div>`;
+    })
+    .join('');
+  return `<!doctype html><html><head><meta charset="utf-8" /><title>Tank Barcodes</title>
+<style>body{font-family:Arial,sans-serif;margin:16px}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}.card{border:1.5px solid #cbd5e1;border-radius:10px;padding:12px;text-align:center;break-inside:avoid}.title{font-size:18px;font-weight:800;margin:0 0 8px}.value{font-family:monospace;font-size:13px;margin-top:6px}svg{height:90px;width:100%}</style>
+<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script></head><body>
+<h1 style="font-size:22px">Active Tank Barcodes</h1>
+<div class="grid">${cards}</div>
+<script>${scripts.join('')}window.setTimeout(()=>window.print(),500);</script></body></html>`;
+}
+
 app.get('/manager/command-print', (req, res) => {
   const type = String(req.query.type || '').toLowerCase();
   if (type === 'activities') {
     return res.type('html').send(renderActivitiesByAreaPrintPage());
+  }
+  if (type === 'teams') {
+    return renderTeamBarcodesPrintPage()
+      .then((html) => res.type('html').send(html))
+      .catch((err) => {
+        console.error('[print teams]', err);
+        res.status(500).send('Could not generate team barcodes.');
+      });
+  }
+  if (type === 'phases' || type === 'winding-activities' || type === 'machine-activities') {
+    return res.type('html').send(renderPhaseBarcodesPrintPage());
+  }
+  if (type === 'alerts' || type === 'alert') {
+    return res.type('html').send(renderAlertBarcodesPrintPage());
+  }
+  if (type === 'machines' || type === 'machine-barcodes') {
+    return res.status(410).send('Machine barcode printing has been removed. Each kiosk uses its permanent machine URL instead.');
+  }
+  if (type === 'tanks') {
+    return renderTankBarcodesIndexPrintPage()
+      .then((html) => res.type('html').send(html))
+      .catch((err) => {
+        console.error('[print tanks]', err);
+        res.status(500).send('Could not generate tank barcode print page.');
+      });
   }
   if (type === 'areas') {
     return res.status(410).send('Area barcode printing has been removed. Use Print Activities by Area instead.');

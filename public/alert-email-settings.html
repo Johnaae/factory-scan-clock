@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Alert Email Settings — Factory Manager</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand-text">
+          <div class="brand-title">Alert Email Settings</div>
+          <div class="brand-sub">Production alert notification recipients</div>
+        </div>
+        <nav class="nav">
+          <a href="/manager-dashboard">Manager</a>
+          <a href="/">Dashboard</a>
+        </nav>
+        <button id="logoutBtn" class="btn btn-sm" type="button">Logout</button>
+      </div>
+    </header>
+    <main class="container manager-layout">
+      <section class="card manager-card manager-smtp-card">
+        <div class="card-body manager-smtp-body">
+          <div class="manager-smtp-status">
+            <span class="manager-smtp-label">SMTP Status</span>
+            <p id="smtpStatus" class="manager-smtp-value muted">Checking SMTP configuration…</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="card manager-card" id="qaQcSection">
+        <div class="card-header">
+          <div class="card-header-main">
+            <h2 class="card-title">QA/QC Alert Recipients</h2>
+            <p class="card-kicker">Notified immediately when a QA/QC alert barcode is scanned.</p>
+          </div>
+        </div>
+        <div class="card-body manager-form-stack">
+          <div class="manager-email-add-row">
+            <div class="field manager-email-field">
+              <label for="qaQcEmail">Email Address</label>
+              <input id="qaQcEmail" type="email" placeholder="qa@example.com" autocomplete="off" />
+            </div>
+            <button id="btnAddQaQc" class="btn btn-primary manager-email-add-btn" type="button">Add</button>
+            <button id="btnTestQaQc" class="btn manager-email-test-btn" type="button">Send Test Email</button>
+          </div>
+          <div class="toastline manager-alert" id="qaQcHint"></div>
+        </div>
+        <div class="card-body card-body--flush">
+          <div class="table-wrap table-scroll manager-table-wrap">
+            <table class="manager-table">
+              <thead>
+                <tr><th>Email</th><th>Added</th><th></th></tr>
+              </thead>
+              <tbody id="qaQcBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="card manager-card" id="maintSection">
+        <div class="card-header">
+          <div class="card-header-main">
+            <h2 class="card-title">Maintenance/Tooling Alert Recipients</h2>
+            <p class="card-kicker">Notified immediately when a Maintenance/Tooling alert barcode is scanned.</p>
+          </div>
+        </div>
+        <div class="card-body manager-form-stack">
+          <div class="manager-email-add-row">
+            <div class="field manager-email-field">
+              <label for="maintEmail">Email Address</label>
+              <input id="maintEmail" type="email" placeholder="maintenance@example.com" autocomplete="off" />
+            </div>
+            <button id="btnAddMaint" class="btn btn-primary manager-email-add-btn" type="button">Add</button>
+            <button id="btnTestMaint" class="btn manager-email-test-btn" type="button">Send Test Email</button>
+          </div>
+          <div class="toastline manager-alert" id="maintHint"></div>
+        </div>
+        <div class="card-body card-body--flush">
+          <div class="table-wrap table-scroll manager-table-wrap">
+            <table class="manager-table">
+              <thead>
+                <tr><th>Email</th><th>Added</th><th></th></tr>
+              </thead>
+              <tbody id="maintBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+    <script src="/alert-email-settings.js?v=2"></script>
+  </body>
+</html>

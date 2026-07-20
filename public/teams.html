@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Teams — Factory Manager</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand-text">
+          <div class="brand-title">Teams</div>
+          <div class="brand-sub">Winding production teams &amp; members</div>
+        </div>
+        <nav class="nav">
+          <a href="/manager-dashboard">Manager</a>
+          <a href="/">Dashboard</a>
+        </nav>
+        <button id="logoutBtn" class="btn btn-sm" type="button">Logout</button>
+      </div>
+    </header>
+    <main class="container manager-layout">
+      <section class="card manager-card">
+        <div class="card-header">
+          <div class="card-header-main">
+            <h2 class="card-title">Add team</h2>
+            <p class="card-kicker">Teams are scanned at the winding kiosk (e.g. TEAM-WINDER-1).</p>
+          </div>
+        </div>
+        <div class="card-body manager-form-grid manager-form-grid-2">
+          <div class="field">
+            <label for="newTeamName">Team name</label>
+            <input id="newTeamName" type="text" placeholder="e.g. Winder 2" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label for="newTeamBarcode">Barcode</label>
+            <input id="newTeamBarcode" type="text" placeholder="e.g. TEAM-WINDER-2" autocomplete="off" />
+          </div>
+          <button id="btnAddTeam" class="btn btn-primary manager-form-action-btn" type="button">Add team</button>
+        </div>
+        <div class="toastline manager-alert" id="teamHint"></div>
+      </section>
+      <section class="card manager-card">
+        <div class="card-header">
+          <div class="card-header-main">
+            <h2 class="card-title">Teams &amp; members</h2>
+          </div>
+          <div class="toolbar">
+            <label class="manager-inline-check">
+              <input id="showInactiveTeams" type="checkbox" />
+              Show inactive teams
+            </label>
+          </div>
+        </div>
+        <div class="card-body" id="teamsBody">
+          <p class="muted">Loading…</p>
+        </div>
+      </section>
+    </main>
+    <script src="/team-member-picker.js"></script>
+    <script src="/teams.js"></script>
+  </body>
+</html>
