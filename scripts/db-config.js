@@ -103,11 +103,20 @@ function createPoolOptions() {
       .replace(/[?&]$/, '')
       .replace(/\?&/, '?');
   }
+  const statementTimeoutMs =
+    Number(process.env.PG_STATEMENT_TIMEOUT_MS) > 0
+      ? Number(process.env.PG_STATEMENT_TIMEOUT_MS)
+      : process.env.VERCEL
+        ? 15000
+        : 30000;
   const opts = {
     connectionString,
     max: Number.isFinite(envMax) && envMax > 0 ? envMax : defaultMax,
-    connectionTimeoutMillis: 10000,
+    connectionTimeoutMillis: process.env.VERCEL ? 8000 : 10000,
     idleTimeoutMillis: process.env.VERCEL ? 10000 : 30000,
+    // Abort hung queries so API handlers cannot hang forever.
+    statement_timeout: statementTimeoutMs,
+    query_timeout: statementTimeoutMs,
   };
   if (ssl !== undefined) {
     opts.ssl = ssl;

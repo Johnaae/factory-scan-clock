@@ -405,17 +405,58 @@ async function runOptionalBackfills(client, log = console) {
   }
 }
 
+async function allRequiredTablesExist(client) {
+  const status = await listRequiredTableStatus(client);
+  return status.every((row) => row.ok);
+}
+
 /**
  * Run full required schema migration. Throws on required failure.
- * Uses pg_advisory_lock so concurrent serverless cold starts serialize.
+ * Fast-path: if all required tables already exist, skip lock + DDL + backfills.
+ * Uses lock_timeout so serverless invocations cannot wait forever on advisory lock.
  */
 async function runSchemaMigration(client, options = {}) {
   const log = options.log || console;
   const skipBackfills = Boolean(options.skipBackfills);
+  const forceFull = Boolean(options.forceFull);
+
+  if (!forceFull && (await allRequiredTablesExist(client))) {
+    // Light additive column pass only (idempotent, no advisory lock).
+    try {
+      await client.query(ADD_COLUMNS_SQL);
+    } catch (err) {
+      log.warn('[migration] additive columns (noncritical):', err.message);
+    }
+    log.log('[migration] schema already present — skipped full migrate');
+    return { skipped: true };
+  }
 
   log.log('[migration] acquiring schema lock');
-  await client.query('SELECT pg_advisory_lock($1)', [SCHEMA_LOCK_KEY]);
+  await client.query(`SELECT set_config('lock_timeout', '8000', true)`);
+  await client.query(`SELECT set_config('statement_timeout', '20000', true)`);
+
+  let locked = false;
   try {
+    const lockRes = await client.query('SELECT pg_try_advisory_lock($1) AS ok', [SCHEMA_LOCK_KEY]);
+    locked = Boolean(lockRes.rows[0] && lockRes.rows[0].ok);
+    if (!locked) {
+      // Another invoker is migrating — wait briefly, then accept existing schema.
+      for (let i = 0; i < 20; i += 1) {
+        await new Promise((r) => setTimeout(r, 500));
+        if (await allRequiredTablesExist(client)) {
+          log.log('[migration] schema became ready while waiting for lock');
+          return { skipped: true, waited: true };
+        }
+      }
+      throw new Error('Could not acquire schema lock within timeout; schema not ready.');
+    }
+
+    // Re-check under lock (another process may have finished).
+    if (await allRequiredTablesExist(client)) {
+      log.log('[migration] schema already present under lock — skipped full migrate');
+      return { skipped: true };
+    }
+
     log.log('[migration] creating base tables');
     await client.query('BEGIN');
     try {
@@ -446,17 +487,20 @@ async function runSchemaMigration(client, options = {}) {
     }
 
     log.log('[migration] schema complete');
+    return { skipped: false };
   } finally {
-    await client.query('SELECT pg_advisory_unlock($1)', [SCHEMA_LOCK_KEY]).catch(() => {});
+    await client.query(`SELECT set_config('lock_timeout', '0', true)`).catch(() => {});
+    await client.query(`SELECT set_config('statement_timeout', '0', true)`).catch(() => {});
+    if (locked) {
+      await client.query('SELECT pg_advisory_unlock($1)', [SCHEMA_LOCK_KEY]).catch(() => {});
+    }
   }
 }
 
 async function runSchemaMigrationWithPool(pool, options = {}) {
-  const log = (options && options.log) || console;
-  log.log('[db] connecting');
   const client = await pool.connect();
   try {
-    await runSchemaMigration(client, options);
+    return await runSchemaMigration(client, options);
   } finally {
     client.release();
   }
@@ -474,4 +518,5 @@ module.exports = {
   runOptionalBackfills,
   verifyRequiredTables,
   listRequiredTableStatus,
+  allRequiredTablesExist,
 };

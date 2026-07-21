@@ -274,8 +274,8 @@
     <script src="/session-details.js"></script>
     <script src="/team-member-picker.js"></script>
     <script src="/team-member-details.js"></script>
-    <script src="/machine-dashboard.js?v=3"></script>
-    <script src="/team-dashboard.js"></script>
+    <script src="/machine-dashboard.js?v=4"></script>
+    <script src="/team-dashboard.js?v=2"></script>
     <script src="/alert-sound.js"></script>
     <script src="/manager.js?v=9"></script>
     <script>
@@ -297,9 +297,14 @@
           const el = document.getElementById('alertHistoryBody');
           if (!el || !window.MachineDashboard) return;
           if (lastAlertHistoryHtml === null) el.innerHTML = '<p class="muted">Loading…</p>';
+          const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+          const timer = controller ? setTimeout(() => controller.abort(), 20000) : null;
           try {
             const alerts = await window.MachineDashboard.fetchOpenAlerts();
-            const allRes = await fetch('/api/manager/alerts?limit=100');
+            const allRes = await fetch('/api/manager/alerts?limit=100', {
+              cache: 'no-store',
+              signal: controller ? controller.signal : undefined,
+            });
             const allData = await allRes.json().catch(() => ({}));
             const history = allData.ok ? allData.alerts || [] : [];
             const openHtml = alerts.length
@@ -345,7 +350,19 @@
               });
             }
           } catch (err) {
-            if (lastAlertHistoryHtml === null) el.innerHTML = `<p class="muted">${err.message || 'Could not load alerts.'}</p>`;
+            const msg =
+              err && err.name === 'AbortError'
+                ? 'Request timed out. The server may still be starting — please retry.'
+                : err.message || 'Could not load alerts.';
+            lastAlertHistoryHtml = null;
+            el.innerHTML = `<div class="manager-load-error" role="alert">
+              <p class="manager-load-error-msg">${msg}</p>
+              <button type="button" class="btn btn-sm btn-primary" id="btnRetryAlerts">Retry</button>
+            </div>`;
+            const retry = document.getElementById('btnRetryAlerts');
+            if (retry) retry.addEventListener('click', () => void loadAlertHistory());
+          } finally {
+            if (timer) clearTimeout(timer);
           }
         }
         const alertRefresh = document.getElementById('alertHistoryRefresh');

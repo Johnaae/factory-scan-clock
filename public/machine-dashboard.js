@@ -4,6 +4,7 @@
 (function initMachineDashboard(root) {
   const POLL_MS = 8000;
   const ALERT_POLL_MS = 5000;
+  const FETCH_TIMEOUT_MS = 20000;
 
   function escapeHtml(s) {
     return String(s)
@@ -11,6 +12,37 @@
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
+  }
+
+  async function fetchJson(url, opts) {
+    const options = opts || {};
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = controller
+      ? setTimeout(() => controller.abort(), options.timeoutMs || FETCH_TIMEOUT_MS)
+      : null;
+    try {
+      const res = await fetch(url, {
+        cache: 'no-store',
+        ...options,
+        signal: controller ? controller.signal : undefined,
+      });
+      const data = await res.json().catch(() => ({}));
+      return { res, data };
+    } catch (err) {
+      if (err && err.name === 'AbortError') {
+        throw new Error('Request timed out. The server may still be starting — please retry.');
+      }
+      throw new Error((err && err.message) || 'Network error');
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  function renderLoadError(message, retryAttr) {
+    return `<div class="manager-load-error" role="alert">
+      <p class="manager-load-error-msg">${escapeHtml(message || 'Could not load data.')}</p>
+      <button type="button" class="btn btn-sm btn-primary" data-retry="${escapeHtml(retryAttr || 'refresh')}">Retry</button>
+    </div>`;
   }
 
   function fmtTime(iso) {
@@ -236,22 +268,19 @@
   }
 
   async function fetchMachines() {
-    const res = await fetch('/api/manager/machines', { cache: 'no-store' });
-    const data = await res.json().catch(() => ({}));
+    const { res, data } = await fetchJson('/api/manager/machines');
     if (!res.ok || !data.ok) throw new Error((data && data.message) || 'Could not load machines');
     return data.machines || [];
   }
 
   async function fetchOpenAlerts() {
-    const res = await fetch('/api/manager/alerts?status=open', { cache: 'no-store' });
-    const data = await res.json().catch(() => ({}));
+    const { res, data } = await fetchJson('/api/manager/alerts?status=open');
     if (!res.ok || !data.ok) throw new Error((data && data.message) || 'Could not load alerts');
     return data.alerts || [];
   }
 
   async function resolveAlert(id) {
-    const res = await fetch(`/api/manager/alerts/${Number(id)}/resolve`, { method: 'PATCH' });
-    const data = await res.json().catch(() => ({}));
+    const { res, data } = await fetchJson(`/api/manager/alerts/${Number(id)}/resolve`, { method: 'PATCH' });
     if (!res.ok || !data.ok) throw new Error((data && data.message) || 'Could not resolve alert');
   }
 
@@ -331,9 +360,13 @@
         syncCards(machines);
         if (options.showAlertsOnCards !== false) await refreshAlerts();
       } catch (err) {
-        if (!el.querySelector('.machine-card-grid-wrap')) {
-          el.innerHTML = `<p class="muted machine-card-error">${escapeHtml(err.message || 'Load failed')}</p>`;
-        }
+        el.dataset.machineSignature = '';
+        el.innerHTML = renderLoadError(err.message || 'Could not load machines', 'machines');
+        const btn = el.querySelector('[data-retry]');
+        if (btn) btn.addEventListener('click', () => {
+          el.innerHTML = '<p class="muted">Loading machines…</p>';
+          void refresh();
+        });
       }
     }
 

@@ -3,9 +3,12 @@ self.addEventListener('install', () => {
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(self.clients.claim());
-});
-
-self.addEventListener('fetch', () => {
-  // Intentionally no offline cache yet; production-safe no-op SW.
+  event.waitUntil(
+    (async () => {
+      // Drop any previously cached shells so an old blank PWA cannot stick.
+      const keys = await caches.keys();
+      await Promise.all(keys.map((k) => caches.delete(k)));
+      await self.clients.claim();
+    })()
+  );
 });

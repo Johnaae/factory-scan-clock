@@ -3,6 +3,7 @@
 /** Team-centric production cards with collapsible member rosters. */
 (function initTeamDashboard(root) {
   const POLL_MS = 8000;
+  const FETCH_TIMEOUT_MS = 20000;
 
   function escapeHtml(s) {
     return String(s)
@@ -10,6 +11,37 @@
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
+  }
+
+  async function fetchJson(url, opts) {
+    const options = opts || {};
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = controller
+      ? setTimeout(() => controller.abort(), options.timeoutMs || FETCH_TIMEOUT_MS)
+      : null;
+    try {
+      const res = await fetch(url, {
+        cache: 'no-store',
+        ...options,
+        signal: controller ? controller.signal : undefined,
+      });
+      const data = await res.json().catch(() => ({}));
+      return { res, data };
+    } catch (err) {
+      if (err && err.name === 'AbortError') {
+        throw new Error('Request timed out. The server may still be starting — please retry.');
+      }
+      throw new Error((err && err.message) || 'Network error');
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  function renderLoadError(message) {
+    return `<div class="manager-load-error" role="alert">
+      <p class="manager-load-error-msg">${escapeHtml(message || 'Could not load data.')}</p>
+      <button type="button" class="btn btn-sm btn-primary" data-retry="teams">Retry</button>
+    </div>`;
   }
 
   function statusLabel(st, statusLabelText) {
@@ -225,8 +257,7 @@
   }
 
   async function fetchTeams() {
-    const res = await fetch('/api/manager/teams/dashboard', { cache: 'no-store' });
-    const data = await res.json().catch(() => ({}));
+    const { res, data } = await fetchJson('/api/manager/teams/dashboard');
     if (!res.ok || !data.ok) throw new Error((data && data.message) || 'Could not load teams');
     return data.teams || [];
   }
@@ -357,9 +388,13 @@
         }
         syncTeams(visibleTeams);
       } catch (err) {
-        if (!el.querySelector('.team-dashboard-grid-wrap')) {
-          el.innerHTML = `<p class="muted team-dashboard-error">${escapeHtml(err.message || 'Load failed')}</p>`;
-        }
+        el.dataset.teamSignature = '';
+        el.innerHTML = renderLoadError(err.message || 'Could not load teams');
+        const btn = el.querySelector('[data-retry]');
+        if (btn) btn.addEventListener('click', () => {
+          el.innerHTML = '<p class="muted">Loading teams…</p>';
+          void refresh();
+        });
       }
     }
 

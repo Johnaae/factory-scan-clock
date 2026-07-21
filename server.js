@@ -95,14 +95,17 @@ async function runPostgresSchema() {
   await withDbRetry(
     async () => {
       await runSchemaMigrationWithPool(pool);
-      try {
-        await backfillFinishJobEventsFromScanLogs();
-      } catch (err) {
-        console.warn('[migration] finish job events backfill (noncritical):', err.message);
-      }
     },
-    { label: 'schema', maxAttempts: 5, delayMs: 2000 }
+    { label: 'schema', maxAttempts: 3, delayMs: 1000 }
   );
+}
+
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 const ROLE = {
@@ -2660,13 +2663,7 @@ async function seedWindingDefaults() {
     await pool.query(
       `INSERT INTO machines (name, code, barcode, kiosk_slug, sort_order, active, created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5, 1, $6::timestamptz, $7::timestamptz)
-       ON CONFLICT (code) DO UPDATE SET
-         name = EXCLUDED.name,
-         barcode = EXCLUDED.barcode,
-         kiosk_slug = EXCLUDED.kiosk_slug,
-         sort_order = EXCLUDED.sort_order,
-         active = 1,
-         updated_at = EXCLUDED.updated_at`,
+       ON CONFLICT (code) DO NOTHING`,
       [m.areaName, m.code, m.barcode, m.kioskSlug, m.sortOrder, ts, ts]
     );
   }
@@ -2676,38 +2673,65 @@ async function seedWindingDefaults() {
      ON CONFLICT (barcode) DO NOTHING`,
     ['Winder 1', 'TEAM-WINDER-1', ts, ts]
   );
-  await pool.query(
-    `UPDATE machines
-     SET active = 0, updated_at = $1::timestamptz
-     WHERE UPPER(TRIM(code)) LIKE 'WS-%'
-        OR name ILIKE 'Winding Station%'`,
-    [ts]
-  );
 }
+
+async function isCoreSeedPresent() {
+  try {
+    const users = await pool.query(`SELECT 1 FROM users WHERE username = 'manager' LIMIT 1`);
+    const machines = await pool.query(`SELECT 1 FROM machines WHERE code = 'WM-01' LIMIT 1`);
+    return users.rows.length > 0 && machines.rows.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+async function runSeedIfNeeded() {
+  const already = await isCoreSeedPresent();
+  if (already) {
+    // Fill missing PIN hashes only — never rewrite profiles every request.
+    await ensureKioskDefaultPins();
+    return { skipped: true };
+  }
+  await seedIfEmpty();
+  await seedDefaultUsers();
+  await ensureKioskAreaProfiles();
+  await ensureKioskDefaultPins();
+  await seedWindingDefaults();
+  return { skipped: false };
+}
+
+const DB_INIT_TIMEOUT_MS = Number(process.env.DB_INIT_TIMEOUT_MS) > 0 ? Number(process.env.DB_INIT_TIMEOUT_MS) : 25000;
 
 async function initializeDatabase() {
-  console.log('[db] connecting');
-  await runPostgresSchema();
-  await withDbRetry(
-    async () => {
-      await seedIfEmpty();
-      await seedDefaultUsers();
-      await ensureKioskAreaProfiles();
-      await ensureKioskDefaultPins();
-      await seedWindingDefaults();
-    },
-    { label: 'seed', maxAttempts: 3, delayMs: 1500 }
+  console.log('[db-init] starting');
+  await withTimeout(runPostgresSchema(), DB_INIT_TIMEOUT_MS, 'schema init');
+  console.log('[db-init] schema complete');
+  await withTimeout(
+    withDbRetry(runSeedIfNeeded, { label: 'seed', maxAttempts: 2, delayMs: 800 }),
+    DB_INIT_TIMEOUT_MS,
+    'seed'
   );
-  console.log('[seed] seed complete');
+  console.log('[db-init] seed complete');
+  console.log('[db-init] ready');
 }
 
-const dbReady = initializeDatabase().catch((err) => {
-  console.error('\n' + formatDbError(err) + '\n');
-  if (!process.env.VERCEL) {
-    process.exit(1);
-  }
-  throw err;
-});
+/** Process-level singleton so concurrent Vercel requests share one init promise. */
+function ensureDatabaseReady() {
+  const g = globalThis;
+  if (g.__factoryScanDbInitPromise) return g.__factoryScanDbInitPromise;
+  g.__factoryScanDbInitPromise = initializeDatabase().catch((err) => {
+    g.__factoryScanDbInitPromise = null;
+    console.error('[db-init] failed:', err && err.message ? err.message : err);
+    if (!process.env.VERCEL) {
+      console.error('\n' + formatDbError(err) + '\n');
+      process.exit(1);
+    }
+    throw err;
+  });
+  return g.__factoryScanDbInitPromise;
+}
+
+const dbReady = ensureDatabaseReady();
 
 async function getEmployeeByCode(code) {
   const n = normalizeCode(code);
@@ -4151,14 +4175,14 @@ const requireScanRole = requireRoles([ROLE.MANAGER, ROLE.KIOSK], currentAuthFrom
 
 app.use(async (req, res, next) => {
   try {
-    await dbReady;
+    await withTimeout(ensureDatabaseReady(), DB_INIT_TIMEOUT_MS + 5000, 'database ready');
     next();
   } catch (err) {
     console.error('[boot] database unavailable:', formatDbError(err));
     res.status(503).json({
       ok: false,
       error: 'database_unavailable',
-      message: 'Database connection failed. Check DATABASE_URL and PostgreSQL service.',
+      message: 'Database is still starting or unavailable. Please retry in a moment.',
     });
   }
 });
@@ -4380,7 +4404,7 @@ const phase1 = createPhase1ProductionLogic({
 
 const alertEmail = createAlertEmailService({ pool });
 
-void dbReady.then(async () => {
+void ensureDatabaseReady().then(async () => {
   try {
     await phase1.backfillOpenSessionTeamMembers();
   } catch (err) {

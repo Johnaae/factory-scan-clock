@@ -3187,6 +3187,20 @@ textarea:focus-visible,
   line-height: 1.5;
 }
 
+.manager-load-error {
+  display: grid;
+  gap: 10px;
+  justify-items: start;
+  padding: 12px 0;
+}
+
+.manager-load-error-msg {
+  margin: 0;
+  color: #991b1b;
+  font-size: 14px;
+  font-weight: 600;
+}
+
 .manager-layout .team-card,
 .manager-layout .team-dashboard-card {
   border-radius: var(--radius-xs);
