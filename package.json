@@ -7,6 +7,8 @@
     "dev": "node server.js",
     "start": "node server.js",
     "migrate": "node scripts/migrate.js",
+    "db:init": "node scripts/init-database.js",
+    "db:verify": "node scripts/verify-database.js",
     "seed": "node scripts/seed.js",
     "backup": "node scripts/backup.js",
     "backup:daily": "node scripts/backup.js --daily",

@@ -8,3 +8,7 @@ npm-debug.log*
 .env
 .env*.local
 backups/
+installer-assets/app-staging/
+installer-assets/**/app-staging/
+installer-assets/**/*.tmp
+**/installer-assets/app-staging/**

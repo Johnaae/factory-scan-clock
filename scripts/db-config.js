@@ -90,13 +90,25 @@ function getPoolSslConfig() {
 }
 
 function createPoolOptions() {
-  const opts = {
-    connectionString: process.env.DATABASE_URL,
-    max: Number(process.env.PG_POOL_MAX) > 0 ? Number(process.env.PG_POOL_MAX) : 10,
-    connectionTimeoutMillis: 10000,
-    idleTimeoutMillis: 30000,
-  };
+  const envMax = Number(process.env.PG_POOL_MAX);
+  const defaultMax = process.env.VERCEL ? 3 : 10;
+  let connectionString = String(process.env.DATABASE_URL || '').trim();
   const ssl = getPoolSslConfig();
+  // Avoid pg sslmode / explicit-ssl double-config warnings; we set ssl ourselves for Neon/LAN.
+  if (ssl !== undefined && connectionString) {
+    connectionString = connectionString
+      .replace(/([?&])sslmode=[^&]*/gi, '$1')
+      .replace(/([?&])channel_binding=[^&]*/gi, '$1')
+      .replace(/\?&/, '?')
+      .replace(/[?&]$/, '')
+      .replace(/\?&/, '?');
+  }
+  const opts = {
+    connectionString,
+    max: Number.isFinite(envMax) && envMax > 0 ? envMax : defaultMax,
+    connectionTimeoutMillis: 10000,
+    idleTimeoutMillis: process.env.VERCEL ? 10000 : 30000,
+  };
   if (ssl !== undefined) {
     opts.ssl = ssl;
   }

@@ -1,0 +1,19 @@
+
+============================================================
+[2026-07-20] Scheduled backup started
+Backups folder: C:\factory-scan-clock\backups
+============================================================
+Running npm run backup:pg ...
+
+> factory-scan-clock@1.0.0 backup:pg
+> node scripts/pg-backup.js
+
+[pg-backup] failed: pg_dump: error: query failed: server closed the connection unexpectedly
+	This probably means the server terminated abnormally
+	before or while processing the request.
+server closed the connection unexpectedly
+	This probably means the server terminated abnormally
+	before or while processing the request.
+pg_dump: detail: Query was: SELECT inhrelid, inhparent FROM pg_inherits
+ERROR: backup:pg failed
+FAILED — scheduled backup did not complete
