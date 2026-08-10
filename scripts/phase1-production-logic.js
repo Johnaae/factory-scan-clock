@@ -8,9 +8,12 @@ const WINDING_PHASES = [
   { code: 'DOME_INSTALL', label: 'Dome Install', barcode: 'PHASE:DOME_INSTALL' },
   { code: 'WIND', label: 'Wind', barcode: 'PHASE:WIND' },
   { code: 'HOT_COAT', label: 'Hot Coat', barcode: 'PHASE:HOT_COAT' },
+  { code: 'LINER', label: 'Liner', barcode: 'PHASE:LINER' },
   { code: 'CORRECTIONS', label: 'Corrections', barcode: 'PHASE:CORRECTIONS' },
   { code: 'SPACER_GLASS', label: 'Spacer Glass', barcode: 'PHASE:SPACER_GLASS' },
   { code: 'PART_COMPLETE', label: 'Part Complete', barcode: 'PHASE:PART_COMPLETE', completes: true },
+  { code: 'PIECE_COMPLETE', label: 'Piece Complete', barcode: 'PHASE:PIECE_COMPLETE', piece_complete: true },
+  { code: 'TANK_COMPLETE', label: 'Tank Complete', barcode: 'PHASE:TANK_COMPLETE', completes: true },
 ];
 
 /** Production phases included in Tank Total Running Time (excludes Prep/Clean up). */
@@ -20,6 +23,7 @@ const TANK_TOTAL_RUNNING_PHASE_CODES = new Set([
   'DOME_INSTALL',
   'WIND',
   'HOT_COAT',
+  'LINER',
   'CORRECTIONS',
   'SPACER_GLASS',
 ]);
@@ -46,16 +50,35 @@ const ALERT_TYPES = [
 ];
 
 const PAUSE_REASONS = {
-  BREAK: { code: 'BREAK', label: 'Break', barcode: 'STOP:BREAK', stop_reason: 'break', resumable: true },
-  LUNCH: { code: 'LUNCH', label: 'Lunch', barcode: 'STOP:LUNCH', stop_reason: 'lunch', resumable: true },
+  BREAK: { code: 'BREAK', label: 'Break', barcode: 'STOP:BREAK', stop_reason: 'break', resumable: true, winder_level: true },
+  LUNCH: { code: 'LUNCH', label: 'Lunch', barcode: 'STOP:LUNCH', stop_reason: 'lunch', resumable: true, winder_level: true },
+  DOWNTIME: {
+    code: 'DOWNTIME',
+    label: 'Downtime',
+    barcode: 'STOP:DOWNTIME',
+    stop_reason: 'downtime',
+    resumable: true,
+    winder_level: false,
+    tank_specific: true,
+  },
   END_SHIFT: {
     code: 'END_SHIFT',
     label: 'End Shift',
     barcode: 'REASON:END_SHIFT',
     stop_reason: 'end_shift',
     resumable: false,
+    winder_level: true,
   },
 };
+
+const DOWNTIME_REASON_OPTIONS = [
+  { code: 'mold_issue', label: 'Mold issue' },
+  { code: 'material_unavailable', label: 'Material unavailable' },
+  { code: 'equipment_issue', label: 'Equipment issue' },
+  { code: 'quality_inspection', label: 'Quality inspection' },
+  { code: 'waiting_for_cure', label: 'Waiting for cure' },
+  { code: 'other', label: 'Other' },
+];
 
 const RESUME_BARCODES = new Set(['RESUME', 'STOP:RESUME', 'ACTION:RESUME']);
 
@@ -162,12 +185,31 @@ function createPhase1ProductionLogic(deps) {
     pool,
     nowIso,
     normalizeTankNumber,
-    ensureTankExists,
     normalizeTankStatus,
     startEndOfLocalDay,
     localDateString,
     weekBoundsLocal,
   } = deps;
+  // Production passes validateTankExists (lookup only). Test scripts may pass ensureTankExists that creates temp tanks.
+  const validateTankExists = deps.validateTankExists || deps.ensureTankExists;
+  const TANK_NOT_FOUND_MESSAGE =
+    deps.tankNotFoundMessage || 'Tank not found. Please contact your supervisor.';
+
+  const { createTeamMembershipAndLabor } = require('./team-membership-labor');
+  let membershipApi = null;
+  function getMembershipApi() {
+    if (!membershipApi) {
+      membershipApi = createTeamMembershipAndLabor(pool, {
+        nowIso,
+        sessionElapsedMs,
+        isProductionPhaseCode,
+        roundHours2,
+        formatDurationSummary,
+        displayMachineName,
+      });
+    }
+    return membershipApi;
+  }
 
   function normalizeTeamBarcode(raw) {
     if (raw === undefined || raw === null) return '';
@@ -230,9 +272,18 @@ function createPhase1ProductionLogic(deps) {
     if (!s) return null;
     const code = s.replace(/^STOP[:_]/, '');
     for (const def of Object.values(PAUSE_REASONS)) {
-      if (!def.resumable) continue;
+      if (!def.resumable || def.tank_specific) continue;
       if (def.barcode === s || def.code === code || def.code === s) return def;
     }
+    return null;
+  }
+
+  function resolveDowntimeReason(raw) {
+    const s = String(raw || '').trim().toUpperCase();
+    if (!s) return null;
+    const code = s.replace(/^STOP[:_]/, '');
+    const def = PAUSE_REASONS.DOWNTIME;
+    if (def.barcode === s || def.code === code || def.code === s) return def;
     return null;
   }
 
@@ -250,9 +301,22 @@ function createPhase1ProductionLogic(deps) {
     return RESUME_BARCODES.has(s);
   }
 
-  function isResumableStopReason(reason) {
+  /** Winder-level resumable pauses (not tank-specific Downtime or QA/QC). */
+  function isWinderResumableStopReason(reason) {
     const r = normalizeStopReason(reason);
-    return r === 'break' || r === 'lunch' || r === 'qa_qc' || r === 'maintenance';
+    return r === 'break' || r === 'lunch' || r === 'maintenance';
+  }
+
+  function isDowntimeStopReason(reason) {
+    return normalizeStopReason(reason) === 'downtime';
+  }
+
+  function isQaQcStopReason(reason) {
+    return normalizeStopReason(reason) === 'qa_qc';
+  }
+
+  function isResumableStopReason(reason) {
+    return isWinderResumableStopReason(reason) || isDowntimeStopReason(reason) || isQaQcStopReason(reason);
   }
 
   function sessionStatusLabelFromRow(row) {
@@ -262,9 +326,12 @@ function createPhase1ProductionLogic(deps) {
     if (status === 'finished') return 'Completed';
     if (status === 'stopped') {
       const reason = normalizeStopReason(row.stop_reason);
-      if (reason === 'break') return 'Paused - Break';
-      if (reason === 'lunch') return 'Paused - Lunch';
-      if (reason === 'end_shift') return 'Paused - End Shift';
+      if (reason === 'break') return 'Break';
+      if (reason === 'lunch') return 'Lunch';
+      if (reason === 'downtime') return 'Downtime';
+      if (reason === 'end_shift') return 'End Shift';
+      if (reason === 'qa_qc') return 'QA/QC';
+      if (reason === 'maintenance') return 'Maintenance';
       return 'Paused';
     }
     return 'Idle';
@@ -342,17 +409,54 @@ function createPhase1ProductionLogic(deps) {
     return idx >= 0 ? idx : 999;
   }
 
-  async function fetchTankPhaseTimeSummary(tankId) {
+  async function fetchTankPhaseTimeSummary(tankId, opts = {}) {
     const tid = Number(tankId);
     if (!Number.isInteger(tid) || tid <= 0) return [];
+    const pieceFilter =
+      opts.pieceNumber != null && Number.isFinite(Number(opts.pieceNumber)) ? Number(opts.pieceNumber) : null;
+    const pieceIdFilter =
+      opts.pieceId != null && Number.isFinite(Number(opts.pieceId)) ? Number(opts.pieceId) : null;
+
+    const params = [tid];
+    let pieceClause = '';
+    if (pieceIdFilter != null) {
+      params.push(pieceIdFilter);
+      pieceClause = ' AND (ms.piece_id = $' + params.length + ' OR (ms.piece_id IS NULL AND COALESCE(ms.piece_number, 1) = (SELECT tp.piece_number FROM tank_pieces tp WHERE tp.id = $' + params.length + ')))';
+    } else if (pieceFilter != null) {
+      params.push(pieceFilter);
+      pieceClause = ' AND COALESCE(ms.piece_number, 1) = $' + params.length;
+    }
+
     const { rows } = await pool.query(
-      `SELECT ms.id, ms.activity_code, ms.activity_name, ms.status, ms.started_at, ms.stopped_at, ms.finished_at
-       FROM machine_sessions ms
-       WHERE ms.tank_id = $1
-       ORDER BY ms.started_at ASC, ms.id ASC`,
-      [tid]
+      'SELECT ms.id, ms.activity_code, ms.activity_name, ms.status, ms.started_at, ms.stopped_at, ms.finished_at, ms.notes,\n' +
+        '              ms.piece_number, ms.piece_id\n' +
+        '       FROM machine_sessions ms\n' +
+        '       WHERE ms.tank_id = $1' +
+        pieceClause +
+        '\n       ORDER BY ms.started_at ASC, ms.id ASC',
+      params
     );
-    const productionPhases = WINDING_PHASES.filter((p) => !p.completes);
+    let noteRows = [];
+    try {
+      const noteParams = [tid];
+      let notePieceClause = '';
+      if (pieceFilter != null) {
+        noteParams.push(pieceFilter);
+        notePieceClause = ' AND piece_number = $' + noteParams.length;
+      }
+      const noteRes = await pool.query(
+        'SELECT phase_code, body, note_type, created_at, piece_number\n' +
+          '         FROM production_notes\n' +
+          '         WHERE tank_id = $1' +
+          notePieceClause +
+          '\n         ORDER BY created_at ASC',
+        noteParams
+      );
+      noteRows = noteRes.rows;
+    } catch (_err) {
+      noteRows = [];
+    }
+    const productionPhases = WINDING_PHASES.filter((p) => !p.completes && !p.piece_complete);
     const sessionsByCode = new Map();
     for (const p of productionPhases) sessionsByCode.set(p.code, []);
     for (const row of rows) {
@@ -364,7 +468,26 @@ function createPhase1ProductionLogic(deps) {
     return productionPhases.map((p) => {
       const phaseSessions = sessionsByCode.get(p.code) || [];
       let totalMs = 0;
-      for (const s of phaseSessions) totalMs += sessionElapsedMs(s);
+      let completedAt = null;
+      const noteParts = [];
+      for (const s of phaseSessions) {
+        totalMs += sessionElapsedMs(s);
+        if (s.finished_at) {
+          const finMs = new Date(s.finished_at).getTime();
+          if (!Number.isNaN(finMs) && (completedAt == null || finMs > completedAt)) {
+            completedAt = finMs;
+          }
+        }
+        if (s.notes && String(s.notes).trim()) {
+          noteParts.push(String(s.notes).trim());
+        }
+      }
+      for (const n of noteRows) {
+        if (String(n.phase_code || '').trim().toUpperCase() === p.code && n.body) {
+          const prefix = n.note_type === 'correction' ? 'Correction: ' : '';
+          noteParts.push(prefix + String(n.body).trim());
+        }
+      }
       const hasRunning = phaseSessions.some((s) => s.status === 'running');
       const hasPaused = phaseSessions.some((s) => s.status === 'stopped');
       const hasFinished = phaseSessions.some((s) => s.status === 'finished');
@@ -374,28 +497,251 @@ function createPhase1ProductionLogic(deps) {
       else if (hasFinished || totalMs > 0) status = 'completed';
 
       const dur = formatDurationSummary(totalMs);
-      let summaryLine = `${p.label}: not started`;
-      if (status === 'running') summaryLine = `${p.label}: ${dur} running`;
-      else if (status === 'paused') summaryLine = `${p.label}: ${dur} paused`;
-      else if (status === 'completed') summaryLine = `${p.label}: ${dur} completed`;
+      let summaryLine = p.label + ': not started';
+      if (status === 'running') summaryLine = p.label + ': ' + dur + ' running';
+      else if (status === 'paused') summaryLine = p.label + ': ' + dur + ' paused';
+      else if (status === 'completed') summaryLine = p.label + ': ' + dur + ' completed';
+
+      const statusLabelMap = {
+        not_started: 'Not Started',
+        running: 'Running',
+        paused: 'Paused',
+        completed: 'Completed',
+      };
 
       return {
         phase_code: p.code,
+        phase_id: p.code,
         phase_name: p.label,
         status,
-        status_label: sessionStatusLabel(status === 'not_started' ? null : status),
+        status_label: statusLabelMap[status] || sessionStatusLabel(status === 'not_started' ? null : status),
         total_duration_ms: totalMs,
         total_duration_display: dur,
         summary_line: summaryLine,
         session_count: phaseSessions.length,
         counts_toward_tank_total: isTankTotalRunningPhaseCode(p.code),
+        completed_at: status === 'completed' && completedAt != null ? new Date(completedAt).toISOString() : null,
+        notes: noteParts.length ? noteParts.join(' · ') : null,
       };
     });
   }
 
+  async function fetchPhaseEditorPayload(tankId, opts = {}) {
+    const tid = Number(tankId);
+    if (!Number.isInteger(tid) || tid <= 0) {
+      return { ok: false, status: 400, body: { ok: false, error: 'invalid_id', message: 'Invalid tank id.' } };
+    }
+    const tankRes = await pool.query(
+      `SELECT id, tank_number, status, piece_count, current_piece_number, customer, model
+       FROM tanks WHERE id = $1 LIMIT 1`,
+      [tid]
+    );
+    if (!tankRes.rows[0]) {
+      return { ok: false, status: 404, body: { ok: false, error: 'not_found', message: 'Tank not found.' } };
+    }
+    const tankRow = tankRes.rows[0];
+    const pieceCount = Math.min(4, Math.max(1, Number(tankRow.piece_count) || 1));
+    await ensureTankPieces(tid, pieceCount);
+    const pieces = (await getTankPieces(tid)).filter((p) => Number(p.piece_number) <= pieceCount);
+
+    const requestedPiece =
+      opts.pieceNumber != null && Number.isFinite(Number(opts.pieceNumber))
+        ? Number(opts.pieceNumber)
+        : opts.pieceId != null
+          ? Number((pieces.find((p) => Number(p.id) === Number(opts.pieceId)) || {}).piece_number)
+          : null;
+
+    // Do not permanently default to Piece 1 when multiple pieces exist.
+    let selectedPieceNumber = requestedPiece;
+    if (selectedPieceNumber == null && pieceCount === 1) selectedPieceNumber = 1;
+    if (
+      selectedPieceNumber != null &&
+      !pieces.some((p) => Number(p.piece_number) === Number(selectedPieceNumber))
+    ) {
+      selectedPieceNumber = null;
+    }
+
+    const selectedPiece = pieces.find((p) => Number(p.piece_number) === Number(selectedPieceNumber)) || null;
+    const productionPhases = WINDING_PHASES.filter((p) => !p.completes && !p.piece_complete);
+
+    let phase_summaries = [];
+    let sessions = [];
+    let selected_phase_code = opts.phaseCode ? String(opts.phaseCode).trim().toUpperCase() : null;
+
+    if (selectedPieceNumber != null) {
+      const { rows } = await pool.query(
+        `SELECT ms.*, t.name AS team_name, m.name AS machine_name, tk.tank_number
+         FROM machine_sessions ms
+         JOIN teams t ON t.id = ms.team_id
+         JOIN machines m ON m.id = ms.machine_id
+         JOIN tanks tk ON tk.id = ms.tank_id
+         WHERE ms.tank_id = $1
+           AND COALESCE(ms.piece_number, 1) = $2
+         ORDER BY ms.started_at ASC, ms.id ASC`,
+        [tid, selectedPieceNumber]
+      );
+
+      const sessionsByCode = new Map();
+      for (const p of productionPhases) sessionsByCode.set(p.code, []);
+      for (const row of rows) {
+        const code = String(row.activity_code || '').trim().toUpperCase();
+        if (!isProductionPhaseCode(code) || !sessionsByCode.has(code)) continue;
+        sessionsByCode.get(code).push(row);
+      }
+
+      for (const p of productionPhases) {
+        const phaseSessions = sessionsByCode.get(p.code) || [];
+        let totalMs = 0;
+        const mappedSessions = [];
+        for (const s of phaseSessions) {
+          const ms = sessionElapsedMs(s);
+          totalMs += ms;
+          const endIso = s.finished_at || s.stopped_at || null;
+          let edits = [];
+          try {
+            edits = await getMembershipApi().listSessionEdits(Number(s.id));
+          } catch (_err) {
+            edits = [];
+          }
+          mappedSessions.push({
+            id: Number(s.id),
+            tank_id: tid,
+            piece_id: s.piece_id != null ? Number(s.piece_id) : selectedPiece ? Number(selectedPiece.id) : null,
+            piece_number: Number(s.piece_number) || selectedPieceNumber,
+            phase_code: s.activity_code,
+            phase_name: s.activity_name || p.label,
+            team_name: s.team_name,
+            machine_name: displayMachineName(s.machine_name),
+            started_at: s.started_at,
+            ended_at: endIso,
+            finished_at: s.finished_at || null,
+            stopped_at: s.stopped_at || null,
+            status: s.status,
+            status_label: sessionStatusLabelFromRow(s),
+            duration_ms: ms,
+            duration_display: formatDurationSummary(ms),
+            duration_clock: formatElapsedDisplay(ms),
+            is_edited: edits.length > 0,
+            latest_edit_reason: edits[0] ? edits[0].edit_reason : null,
+            edits,
+          });
+        }
+        const hasRunning = phaseSessions.some((x) => x.status === 'running');
+        const hasPaused = phaseSessions.some((x) => x.status === 'stopped');
+        const hasFinished = phaseSessions.some((x) => x.status === 'finished');
+        let status = 'not_started';
+        if (hasRunning) status = 'running';
+        else if (hasPaused) status = 'paused';
+        else if (hasFinished || totalMs > 0) status = 'completed';
+        const statusLabelMap = {
+          not_started: 'Not Started',
+          running: 'Running',
+          paused: 'Paused',
+          completed: 'Completed',
+        };
+        phase_summaries.push({
+          phase_code: p.code,
+          phase_id: p.code,
+          phase_name: p.label,
+          status,
+          status_label: statusLabelMap[status],
+          total_duration_ms: totalMs,
+          total_duration_display: formatDurationSummary(totalMs),
+          total_duration_clock: formatElapsedDisplay(totalMs),
+          session_count: mappedSessions.length,
+          has_recorded_activity: mappedSessions.length > 0,
+          sessions: mappedSessions,
+          summary_line:
+            p.label +
+            ' — ' +
+            statusLabelMap[status] +
+            (totalMs > 0 ? ' — ' + formatDurationSummary(totalMs) : ''),
+        });
+      }
+
+      if (selected_phase_code) {
+        const match = phase_summaries.find((p) => p.phase_code === selected_phase_code);
+        sessions = match ? match.sessions : [];
+      } else {
+        const firstWithActivity = phase_summaries.find((p) => p.has_recorded_activity);
+        if (firstWithActivity) {
+          selected_phase_code = firstWithActivity.phase_code;
+          sessions = firstWithActivity.sessions;
+        }
+      }
+    }
+
+    const selectedPhase = phase_summaries.find((p) => p.phase_code === selected_phase_code) || null;
+
+    return {
+      ok: true,
+      body: {
+        ok: true,
+        tank: {
+          id: tid,
+          tank_number: tankRow.tank_number,
+          status: tankRow.status,
+          piece_count: pieceCount,
+          customer: tankRow.customer || null,
+          model: tankRow.model || null,
+        },
+        pieces: pieces.map((p) => ({
+          id: Number(p.id),
+          piece_number: Number(p.piece_number),
+          status: p.status,
+        })),
+        phases: productionPhases.map((p) => ({
+          code: p.code,
+          name: p.label,
+          barcode: p.barcode,
+        })),
+        selected_piece_number: selectedPieceNumber,
+        selected_piece_id: selectedPiece ? Number(selectedPiece.id) : null,
+        selected_phase_code: selected_phase_code,
+        selected_phase: selectedPhase,
+        phase_summaries,
+        sessions,
+        phase_total_ms: selectedPhase ? selectedPhase.total_duration_ms : 0,
+        phase_total_display: selectedPhase ? selectedPhase.total_duration_display : '0m',
+        phase_total_clock: selectedPhase ? selectedPhase.total_duration_clock : '00:00',
+      },
+    };
+  }
+
+  async function fetchPieceReports(tankId) {
+    const tid = Number(tankId);
+    const tankRes = await pool.query('SELECT piece_count FROM tanks WHERE id = $1', [tid]);
+    const pieceCount = Math.min(4, Math.max(1, Number(tankRes.rows[0] && tankRes.rows[0].piece_count) || 1));
+    await ensureTankPieces(tid, pieceCount);
+    const pieces = await getTankPieces(tid);
+    const reports = [];
+    for (const piece of pieces.filter((p) => Number(p.piece_number) <= pieceCount)) {
+      const phase_time_summary = await fetchTankPhaseTimeSummary(tid, {
+        pieceNumber: piece.piece_number,
+        pieceId: piece.id,
+      });
+      const total_ms = phase_time_summary.reduce((sum, row) => {
+        if (row.counts_toward_tank_total === false) return sum;
+        return sum + (Number(row.total_duration_ms) || 0);
+      }, 0);
+      reports.push({
+        piece_id: piece.id,
+        piece_number: piece.piece_number,
+        status: piece.status,
+        started_at: piece.started_at,
+        completed_at: piece.completed_at,
+        operator_name: piece.operator_name || null,
+        total_duration_ms: total_ms,
+        total_duration_display: formatDurationSummary(total_ms),
+        phase_time_summary,
+      });
+    }
+    return reports;
+  }
+
   async function getMachineById(id) {
     const { rows } = await pool.query(
-      `SELECT id, name, code, barcode, kiosk_slug, active FROM machines WHERE id = $1 LIMIT 1`,
+      `SELECT id, name, code, barcode, kiosk_slug, active, active_tank_id FROM machines WHERE id = $1 LIMIT 1`,
       [Number(id)]
     );
     return rows[0] || null;
@@ -405,7 +751,7 @@ function createPhase1ProductionLogic(deps) {
     const c = normalizeMachineBarcode(code);
     if (!c) return null;
     const { rows } = await pool.query(
-      `SELECT id, name, code, barcode, kiosk_slug, active FROM machines
+      `SELECT id, name, code, barcode, kiosk_slug, active, active_tank_id FROM machines
        WHERE UPPER(TRIM(code)) = $1 OR UPPER(TRIM(COALESCE(barcode, ''))) = $1 LIMIT 1`,
       [c]
     );
@@ -418,7 +764,7 @@ function createPhase1ProductionLogic(deps) {
       .toLowerCase();
     if (!s) return null;
     const { rows } = await pool.query(
-      `SELECT id, name, code, barcode, kiosk_slug, sort_order, active FROM machines
+      `SELECT id, name, code, barcode, kiosk_slug, sort_order, active, active_tank_id FROM machines
        WHERE LOWER(TRIM(kiosk_slug)) = $1 LIMIT 1`,
       [s]
     );
@@ -450,27 +796,220 @@ function createPhase1ProductionLogic(deps) {
     return rows[0] || null;
   }
 
-  async function getOpenSession(machineId) {
+  async function getOpenSession(machineId, tankIdOptional) {
+    const params = [machineId];
+    let tankClause = '';
+    if (tankIdOptional != null && Number.isFinite(Number(tankIdOptional))) {
+      tankClause = ' AND ms.tank_id = $2';
+      params.push(Number(tankIdOptional));
+    } else {
+      // Prefer the machine's active tank when multiple sessions are open.
+      tankClause = ` AND (
+        m.active_tank_id IS NULL
+        OR ms.tank_id = m.active_tank_id
+        OR NOT EXISTS (
+          SELECT 1 FROM machine_sessions ms2
+          WHERE ms2.machine_id = ms.machine_id
+            AND ms2.status IN ('running', 'stopped')
+            AND ms2.tank_id = m.active_tank_id
+        )
+      )`;
+    }
     const { rows } = await pool.query(
       `SELECT ms.*,
               t.name AS team_name, t.barcode AS team_barcode,
               tk.tank_number,
-              m.name AS machine_name, m.code AS machine_code, m.barcode AS machine_barcode
+              m.name AS machine_name, m.code AS machine_code, m.barcode AS machine_barcode,
+              m.active_tank_id
+       FROM machine_sessions ms
+       JOIN teams t ON t.id = ms.team_id
+       JOIN tanks tk ON tk.id = ms.tank_id
+       JOIN machines m ON m.id = ms.machine_id
+       WHERE ms.machine_id = $1 AND ms.status IN ('running', 'stopped')${tankClause}
+       ORDER BY
+         CASE WHEN m.active_tank_id IS NOT NULL AND ms.tank_id = m.active_tank_id THEN 0 ELSE 1 END,
+         ms.started_at DESC, ms.id DESC
+       LIMIT 1`,
+      params
+    );
+    return rows[0] || null;
+  }
+
+  async function getOpenSessionsForMachine(machineId) {
+    const { rows } = await pool.query(
+      `SELECT ms.*,
+              t.name AS team_name, t.barcode AS team_barcode,
+              tk.tank_number,
+              m.name AS machine_name, m.code AS machine_code
        FROM machine_sessions ms
        JOIN teams t ON t.id = ms.team_id
        JOIN tanks tk ON tk.id = ms.tank_id
        JOIN machines m ON m.id = ms.machine_id
        WHERE ms.machine_id = $1 AND ms.status IN ('running', 'stopped')
-       ORDER BY ms.started_at DESC, ms.id DESC LIMIT 1`,
+       ORDER BY ms.started_at DESC, ms.id DESC`,
       [machineId]
     );
-    return rows[0] || null;
+    return rows;
   }
 
-  /**
-   * Daily team-to-machine assignment. A team is assigned to a machine for the
-   * current workday only. It is cleared on End Shift and expires overnight.
-   */
+  async function setMachineActiveTank(machineId, tankId) {
+    await pool.query(`UPDATE machines SET active_tank_id = $1 WHERE id = $2`, [
+      tankId != null ? Number(tankId) : null,
+      Number(machineId),
+    ]);
+  }
+
+  async function ensureTankPieces(tankId, pieceCount, opts = {}) {
+    const count = Math.min(4, Math.max(1, Number(pieceCount) || 1));
+    const tid = Number(tankId);
+    for (let n = 1; n <= count; n += 1) {
+      await pool.query(
+        "INSERT INTO tank_pieces (tank_id, piece_number, status, created_at, updated_at)\n" +
+          "         VALUES ($1, $2, 'pending', NOW(), NOW())\n" +
+          '         ON CONFLICT (tank_id, piece_number) DO NOTHING',
+        [tid, n]
+      );
+    }
+    await pool.query('UPDATE tanks SET piece_count = $1 WHERE id = $2', [count, tid]);
+    if (opts.pruneExtras) {
+      await pool.query(
+        'DELETE FROM tank_pieces\n' +
+          '         WHERE tank_id = $1\n' +
+          '           AND piece_number > $2\n' +
+          "           AND status = 'pending'\n" +
+          '           AND started_at IS NULL\n' +
+          '           AND completed_at IS NULL\n' +
+          '           AND NOT EXISTS (\n' +
+          '             SELECT 1 FROM machine_sessions ms\n' +
+          '             WHERE ms.tank_id = tank_pieces.tank_id\n' +
+          '               AND (ms.piece_id = tank_pieces.id OR ms.piece_number = tank_pieces.piece_number)\n' +
+          '           )',
+        [tid, count]
+      );
+    }
+    return getTankPieces(tid);
+  }
+
+  async function getTankPieces(tankId) {
+    const { rows } = await pool.query(
+      'SELECT * FROM tank_pieces WHERE tank_id = $1 ORDER BY piece_number ASC',
+      [Number(tankId)]
+    );
+    return rows.map((r) => ({
+      id: Number(r.id),
+      tank_id: Number(r.tank_id),
+      piece_number: Number(r.piece_number),
+      status: r.status,
+      started_at: r.started_at || null,
+      completed_at: r.completed_at || null,
+      machine_id: r.machine_id != null ? Number(r.machine_id) : null,
+      team_id: r.team_id != null ? Number(r.team_id) : null,
+      operator_name: r.operator_name || null,
+      notes: r.notes || null,
+    }));
+  }
+
+  async function getTankPieceByNumber(tankId, pieceNumber) {
+    const n = Number(pieceNumber);
+    if (!Number.isInteger(n) || n < 1 || n > 4) return null;
+    const { rows } = await pool.query(
+      'SELECT * FROM tank_pieces WHERE tank_id = $1 AND piece_number = $2 LIMIT 1',
+      [Number(tankId), n]
+    );
+    if (!rows[0]) return null;
+    const r = rows[0];
+    return {
+      id: Number(r.id),
+      tank_id: Number(r.tank_id),
+      piece_number: Number(r.piece_number),
+      status: r.status,
+      started_at: r.started_at || null,
+      completed_at: r.completed_at || null,
+      operator_name: r.operator_name || null,
+    };
+  }
+
+  async function resolvePieceForTank(tankId, pieceNumber) {
+    const pieces = await getTankPieces(tankId);
+    const tankRes = await pool.query('SELECT piece_count FROM tanks WHERE id = $1', [Number(tankId)]);
+    const pieceCount = Math.min(
+      4,
+      Math.max(1, Number(tankRes.rows[0] && tankRes.rows[0].piece_count) || pieces.length || 1)
+    );
+    const n = Number(pieceNumber);
+    if (!Number.isInteger(n) || n < 1 || n > pieceCount) {
+      return {
+        ok: false,
+        status: 400,
+        body: {
+          ok: false,
+          error: 'invalid_piece',
+          message: 'Select Piece 1–' + pieceCount + ' for this tank.',
+          piece_count: pieceCount,
+          pieces,
+        },
+      };
+    }
+    let piece = pieces.find((p) => Number(p.piece_number) === n) || null;
+    if (!piece) {
+      await ensureTankPieces(tankId, pieceCount);
+      piece = await getTankPieceByNumber(tankId, n);
+    }
+    if (!piece) {
+      return {
+        ok: false,
+        status: 404,
+        body: { ok: false, error: 'piece_not_found', message: 'Piece not found for this tank.' },
+      };
+    }
+    return { ok: true, piece, piece_count: pieceCount, pieces };
+  }
+
+  async function tankHasProductionActivity(tankId) {
+    const tid = Number(tankId);
+    const { rows: sess } = await pool.query('SELECT 1 FROM machine_sessions WHERE tank_id = $1 LIMIT 1', [tid]);
+    if (sess.length) return true;
+    const { rows: pcs } = await pool.query(
+      "SELECT 1 FROM tank_pieces\n" +
+        '       WHERE tank_id = $1\n' +
+        "         AND (status <> 'pending' OR started_at IS NOT NULL OR completed_at IS NOT NULL)\n" +
+        '       LIMIT 1',
+      [tid]
+    );
+    return pcs.length > 0;
+  }
+
+  async function maxPieceNumberWithActivity(tankId) {
+    const tid = Number(tankId);
+    const { rows } = await pool.query(
+      'SELECT GREATEST(\n' +
+        '         COALESCE((SELECT MAX(piece_number) FROM machine_sessions WHERE tank_id = $1 AND piece_number IS NOT NULL), 0),\n' +
+        '         COALESCE((\n' +
+        '           SELECT MAX(piece_number) FROM tank_pieces\n' +
+        '           WHERE tank_id = $1\n' +
+        "             AND (status <> 'pending' OR started_at IS NOT NULL OR completed_at IS NOT NULL)\n" +
+        '         ), 0)\n' +
+        '       ) AS max_piece',
+      [tid]
+    );
+    return Number(rows[0] && rows[0].max_piece) || 0;
+  }
+
+  function computePieceProgress(pieces, pieceCount) {
+    const count = Math.min(4, Math.max(1, Number(pieceCount) || (pieces && pieces.length) || 1));
+    const configured = (pieces || []).filter((p) => Number(p.piece_number) >= 1 && Number(p.piece_number) <= count);
+    const completed = configured.filter((p) => String(p.status) === 'completed').length;
+    const incomplete = configured.filter((p) => String(p.status) !== 'completed');
+    return {
+      piece_count: count,
+      completed_pieces: completed,
+      remaining_pieces: Math.max(0, count - completed),
+      percent_complete: Math.round((completed / count) * 100),
+      all_pieces_complete: completed >= count && count > 0,
+      incomplete_pieces: incomplete.map((p) => Number(p.piece_number)),
+    };
+  }
+
   async function getMachineAssignment(machineId) {
     const mid = Number(machineId);
     if (!Number.isInteger(mid) || mid <= 0) return null;
@@ -552,6 +1091,9 @@ function createPhase1ProductionLogic(deps) {
       running_time_display: formatElapsedDisplay(elapsedMs),
       stop_reason: row.stop_reason || null,
       status_label: sessionStatusLabelFromRow(row),
+      piece_number: Number(row.piece_number) || 1,
+      piece_id: row.piece_id != null ? Number(row.piece_id) : null,
+      notes: row.notes || null,
     };
   }
 
@@ -602,6 +1144,14 @@ function createPhase1ProductionLogic(deps) {
 
   function mapAlertRow(row) {
     const typeDef = ALERT_TYPES.find((a) => a.alert_type === row.alert_type);
+    const openedMs = row.reported_at ? new Date(row.reported_at).getTime() : NaN;
+    const closedMs = row.resolved_at
+      ? new Date(row.resolved_at).getTime()
+      : row.status === 'open'
+        ? Date.now()
+        : NaN;
+    const durationMs =
+      Number.isNaN(openedMs) || Number.isNaN(closedMs) ? 0 : Math.max(0, closedMs - openedMs);
     return {
       id: Number(row.id),
       machine_id: row.machine_id != null ? Number(row.machine_id) : null,
@@ -612,6 +1162,10 @@ function createPhase1ProductionLogic(deps) {
       tank_id: row.tank_id != null ? Number(row.tank_id) : null,
       tank_number: row.tank_number || null,
       session_id: row.session_id != null ? Number(row.session_id) : null,
+      piece_id: row.piece_id != null ? Number(row.piece_id) : null,
+      piece_number: row.piece_number != null ? Number(row.piece_number) : null,
+      phase_code: row.phase_code || null,
+      phase_name: row.phase_name || null,
       alert_type: row.alert_type,
       alert_code: row.alert_code,
       alert_label: typeDef ? typeDef.label : row.alert_code,
@@ -621,6 +1175,10 @@ function createPhase1ProductionLogic(deps) {
       resolved_at: row.resolved_at || null,
       resolved_by: row.resolved_by || null,
       notes: row.notes || null,
+      issue_note: row.notes || null,
+      resolution_note: row.resolution_note || null,
+      duration_ms: durationMs,
+      duration_display: formatDurationSummary(durationMs),
       email_status: row.email_status || null,
       email_error: row.email_error || null,
       email_sent_at: row.email_sent_at || null,
@@ -630,9 +1188,52 @@ function createPhase1ProductionLogic(deps) {
     };
   }
 
+  async function findOpenQaQcAlert(tankId, pieceNumber) {
+    const tid = Number(tankId);
+    if (!Number.isInteger(tid) || tid <= 0) return null;
+    const piece = pieceNumber != null ? Number(pieceNumber) : null;
+    const params = [tid];
+    let pieceClause = '';
+    if (Number.isInteger(piece) && piece >= 1) {
+      params.push(piece);
+      pieceClause = ` AND COALESCE(ae.piece_number, 1) = $${params.length}`;
+    }
+    const { rows } = await pool.query(
+      `SELECT ae.*, m.name AS machine_name, m.code AS machine_code, t.name AS team_name, tk.tank_number
+       FROM alert_events ae
+       LEFT JOIN machines m ON m.id = ae.machine_id
+       LEFT JOIN teams t ON t.id = ae.team_id
+       LEFT JOIN tanks tk ON tk.id = ae.tank_id
+       WHERE ae.status = 'open'
+         AND ae.alert_type = 'qa_qc'
+         AND ae.tank_id = $1
+         ${pieceClause}
+       ORDER BY ae.reported_at DESC, ae.id DESC
+       LIMIT 1`,
+      params
+    );
+    return rows[0] ? mapAlertRow(rows[0]) : null;
+  }
+
+  async function fetchTankQaQcHistory(tankId) {
+    const tid = Number(tankId);
+    if (!Number.isInteger(tid) || tid <= 0) return [];
+    const { rows } = await pool.query(
+      `SELECT ae.*, m.name AS machine_name, m.code AS machine_code, t.name AS team_name, tk.tank_number
+       FROM alert_events ae
+       LEFT JOIN machines m ON m.id = ae.machine_id
+       LEFT JOIN teams t ON t.id = ae.team_id
+       LEFT JOIN tanks tk ON tk.id = ae.tank_id
+       WHERE ae.tank_id = $1 AND ae.alert_type = 'qa_qc'
+       ORDER BY ae.reported_at DESC, ae.id DESC`,
+      [tid]
+    );
+    return rows.map(mapAlertRow);
+  }
+
   async function fetchActiveWindingMachines() {
     const { rows } = await pool.query(
-      `SELECT id, name, code, barcode, kiosk_slug, sort_order, active
+      `SELECT id, name, code, barcode, kiosk_slug, sort_order, active, active_tank_id
        FROM machines
        WHERE active = 1
          AND NOT (
@@ -646,7 +1247,7 @@ function createPhase1ProductionLogic(deps) {
 
   async function fetchManagedWindingMachines() {
     const { rows } = await pool.query(
-      `SELECT id, name, code, barcode, kiosk_slug, sort_order, active
+      `SELECT id, name, code, barcode, kiosk_slug, sort_order, active, active_tank_id
        FROM machines
        WHERE NOT (
          UPPER(TRIM(COALESCE(code, ''))) LIKE 'WS-%'
@@ -665,51 +1266,98 @@ function createPhase1ProductionLogic(deps) {
     const machines = await fetchCanonicalWindingMachines();
     const cards = [];
     for (const m of machines) {
-      const session = await getOpenSession(m.id);
-      const mapped = session ? await mapSession(session) : null;
-      const labor = session ? await computeSessionLaborForRow(session) : null;
-      const phaseTimeSummary =
-        session && session.tank_id ? await fetchTankPhaseTimeSummary(Number(session.tank_id)) : [];
+      // Source of truth for Manager Dashboard: ALL open sessions on this machine.
+      // Do NOT filter by machines.active_tank_id (kiosk selection only).
+      const openRows = await getOpenSessionsForMachine(m.id);
+      const open_sessions = [];
+      for (const row of openRows) {
+        const mapped = await mapSession(row);
+        const phaseTimeSummary = row.tank_id
+          ? await fetchTankPhaseTimeSummary(Number(row.tank_id))
+          : [];
+        open_sessions.push({
+          ...mapped,
+          phase_time_summary: phaseTimeSummary,
+          tank_total_running_time_ms: computeTankTotalRunningMs(phaseTimeSummary),
+          tank_total_running_time_display: tankTotalRunningTimeDisplay(phaseTimeSummary),
+          piece_number: Number(row.piece_number) || mapped.piece_number || 1,
+        });
+      }
+      open_sessions.sort((a, b) =>
+        String(a.tank_number || '').localeCompare(String(b.tank_number || ''), undefined, {
+          numeric: true,
+          sensitivity: 'base',
+        })
+      );
+
+      // Kiosk selection is separate metadata — never the only tank shown.
+      const selectedTankId = m.active_tank_id != null ? Number(m.active_tank_id) : null;
+      const selectedSession =
+        (selectedTankId != null
+          ? open_sessions.find((s) => Number(s.tank_id) === selectedTankId)
+          : null) || open_sessions[0] || null;
+
       const openAlerts = await fetchOpenAlertsForMachine(m.id);
       const assignment = await getMachineAssignment(m.id);
-      const currentTeam = mapped ? mapped.team_name : assignment ? assignment.team_name : null;
+      const assignedTeam = assignment ? assignment.team_name : null;
+      const currentTeam =
+        assignedTeam ||
+        (open_sessions.length ? open_sessions[0].team_name : null);
+
+      let machineStatus = 'idle';
+      let machineStatusLabel = 'Idle';
+      if (open_sessions.length) {
+        const anyRunning = open_sessions.some((s) => s.status === 'running');
+        machineStatus = anyRunning ? 'running' : 'stopped';
+        machineStatusLabel = anyRunning
+          ? `${open_sessions.length} tank${open_sessions.length > 1 ? 's' : ''} active`
+          : `${open_sessions.length} tank${open_sessions.length > 1 ? 's' : ''} paused`;
+      } else if (assignment) {
+        machineStatus = 'assigned';
+        machineStatusLabel = 'Team Assigned';
+      }
+
       cards.push({
         id: Number(m.id),
         name: displayMachineName(m.name),
         slug: String(m.kiosk_slug || slugFromMachineName(m.name)).toLowerCase(),
         kiosk_url: kioskUrlForSlug(m.kiosk_slug || slugFromMachineName(m.name)),
         current_team: currentTeam,
-        assigned_team: assignment ? assignment.team_name : null,
-        current_tank: mapped ? mapped.tank_number : null,
-        current_phase: mapped ? mapped.phase_name : null,
-        status: mapped ? mapped.status : assignment ? 'assigned' : 'idle',
-        status_label: mapped ? mapped.status_label : assignment ? 'Team Assigned' : 'Idle',
-        started_at: mapped ? mapped.started_at : null,
-        elapsed_display: mapped ? mapped.elapsed_display : '—',
-        running_time_display: mapped ? mapped.running_time_display : '—',
-        session_id: mapped ? mapped.id : null,
-        tank_id: mapped ? mapped.tank_id : null,
-        estimated_labor_cost: labor ? labor.total_estimated_cost : null,
-        phase_time_summary: phaseTimeSummary,
-        tank_total_running_time_ms: computeTankTotalRunningMs(phaseTimeSummary),
-        tank_total_running_time_display: tankTotalRunningTimeDisplay(phaseTimeSummary),
+        assigned_team: assignedTeam,
+        // Selected tank = kiosk focus only (optional highlight), not the sole display.
+        selected_tank_id: selectedSession ? selectedSession.tank_id : null,
+        selected_tank_number: selectedSession ? selectedSession.tank_number : null,
+        // Legacy single-tank fields kept for older UI consumers (prefer open_sessions).
+        current_tank: selectedSession ? selectedSession.tank_number : null,
+        current_phase: selectedSession ? selectedSession.phase_name : null,
+        current_piece: selectedSession ? selectedSession.piece_number || 1 : null,
+        status: machineStatus,
+        status_label: machineStatusLabel,
+        started_at: selectedSession ? selectedSession.started_at : null,
+        elapsed_display: selectedSession ? selectedSession.elapsed_display : '—',
+        running_time_display: selectedSession ? selectedSession.running_time_display : '—',
+        session_id: selectedSession ? selectedSession.id : null,
+        tank_id: selectedSession ? selectedSession.tank_id : null,
+        estimated_labor_cost: null,
+        phase_time_summary: selectedSession ? selectedSession.phase_time_summary || [] : [],
+        tank_total_running_time_ms: selectedSession
+          ? selectedSession.tank_total_running_time_ms || 0
+          : 0,
+        tank_total_running_time_display: selectedSession
+          ? selectedSession.tank_total_running_time_display || '—'
+          : '—',
         finished_tanks_today: await countFinishedToday(m.id),
         open_alerts: openAlerts,
-        session: mapped,
+        open_sessions,
+        active_tank_count: open_sessions.length,
+        pieces: [],
+        session: selectedSession,
       });
     }
     return cards;
   }
 
-  async function startSession(machine, { teamBarcode, team: teamArg, tankNumber, phaseRaw }) {
-    const existing = await getOpenSession(machine.id);
-    if (existing) {
-      return {
-        ok: false,
-        status: 409,
-        body: { ok: false, error: 'session_active', message: 'Machine already has an active session.' },
-      };
-    }
+  async function startSession(machine, { teamBarcode, team: teamArg, tankNumber, phaseRaw, pieceNumber, notes }) {
     const team = teamArg || (await getTeamByBarcode(teamBarcode));
     if (!team || !Number(team.active)) {
       return { ok: false, status: 404, body: { ok: false, error: 'unknown_team', message: 'Unknown team barcode.' } };
@@ -722,49 +1370,167 @@ function createPhase1ProductionLogic(deps) {
     if (!phase) {
       return { ok: false, status: 400, body: { ok: false, error: 'validation', message: 'Phase is required.' } };
     }
-    if (phase.completes) {
+    if (phase.completes || phase.piece_complete) {
       return {
         ok: false,
         status: 400,
-        body: { ok: false, error: 'validation', message: 'Scan Part Complete during an active session to finish.' },
+        body: { ok: false, error: 'validation', message: 'Use Piece Complete or Tank Complete during an active session.' },
       };
     }
-    const tankRow = await ensureTankExists(tankNorm);
-    if (tankRow && normalizeTankStatus(tankRow.status) === 'archived') {
+    const tankRow = await validateTankExists(tankNorm);
+    if (!tankRow) {
+      return {
+        ok: false,
+        status: 404,
+        body: { ok: false, error: 'tank_not_found', message: TANK_NOT_FOUND_MESSAGE },
+      };
+    }
+    if (normalizeTankStatus(tankRow.status) === 'archived') {
       return {
         ok: false,
         status: 403,
         body: { ok: false, error: 'tank_archived', message: 'Tank is completed. Restore before use.' },
       };
     }
+
+    // Multi-tank: block only if THIS tank already has an open session on this machine.
+    const existingForTank = await getOpenSession(machine.id, tankRow.id);
+    if (existingForTank) {
+      return {
+        ok: false,
+        status: 409,
+        body: {
+          ok: false,
+          error: 'session_active',
+          message: 'This tank already has an active session on this machine. Scan a phase to continue, or switch tanks.',
+        },
+      };
+    }
+
+    const pieceCount = Math.min(4, Math.max(1, Number(tankRow.piece_count) || 1));
+    await ensureTankPieces(tankRow.id, pieceCount);
+    const requestedPiece = pieceNumber != null ? Number(pieceNumber) : null;
+    if (requestedPiece == null || !Number.isInteger(requestedPiece)) {
+      return {
+        ok: false,
+        status: 409,
+        body: {
+          ok: false,
+          error: 'need_piece',
+          message: 'Select a piece before starting a phase.',
+          piece_count: pieceCount,
+          pieces: await getTankPieces(tankRow.id),
+        },
+      };
+    }
+    const resolved = await resolvePieceForTank(tankRow.id, requestedPiece);
+    if (!resolved.ok) return resolved;
+    if (String(resolved.piece.status) === 'completed') {
+      return {
+        ok: false,
+        status: 409,
+        body: {
+          ok: false,
+          error: 'piece_completed',
+          message: 'Piece ' + requestedPiece + ' is already completed. Select another piece.',
+          pieces: resolved.pieces,
+        },
+      };
+    }
+    const pieceNum = resolved.piece.piece_number;
+    const pieceId = resolved.piece.id;
+
+    // Same piece cannot have two active sessions (any winder/team).
+    const conflict = await getMembershipApi().findOpenPieceSession(tankRow.id, pieceNum, null);
+    if (conflict && Number(conflict.machine_id) !== Number(machine.id)) {
+      return {
+        ok: false,
+        status: 409,
+        body: {
+          ok: false,
+          error: 'piece_in_use',
+          message: `Piece ${pieceNum} is currently being worked on by ${conflict.team_name || 'another team'} / ${displayMachineName(conflict.machine_name) || 'another winder'}.`,
+          conflicting_team: conflict.team_name,
+          conflicting_machine: displayMachineName(conflict.machine_name),
+          piece_number: pieceNum,
+        },
+      };
+    }
+    if (conflict && Number(conflict.machine_id) === Number(machine.id)) {
+      return {
+        ok: false,
+        status: 409,
+        body: {
+          ok: false,
+          error: 'session_active',
+          message: 'This tank already has an active session on this machine. Scan a phase to continue, or switch tanks.',
+        },
+      };
+    }
+
     const ts = nowIso();
     await pool.query(
       `UPDATE tanks
        SET status = 'active',
+           first_scanned_at = COALESCE(first_scanned_at, $5::timestamptz),
            paused_reason = NULL,
            wip_team_id = $1,
            wip_phase_code = $2,
            wip_phase_name = $3,
            wip_machine_id = $4,
+           current_piece_number = $6,
            updated_at = $5::timestamptz
-       WHERE id = $6`,
-      [team.id, phase.code, phase.label, machine.id, ts, tankRow.id]
+       WHERE id = $7`,
+      [team.id, phase.code, phase.label, machine.id, ts, pieceNum, tankRow.id]
+    );
+    await pool.query(
+      `UPDATE tank_pieces
+       SET status = CASE WHEN status = 'completed' THEN status ELSE 'in_progress' END,
+           started_at = COALESCE(started_at, $1::timestamptz),
+           machine_id = $2,
+           team_id = $3,
+           updated_at = $1::timestamptz
+       WHERE id = $4`,
+      [ts, machine.id, team.id, pieceId]
     );
     const insertRes = await pool.query(
       `INSERT INTO machine_sessions
-         (machine_id, team_id, tank_id, activity_code, activity_name, status, started_at, created_at, updated_at)
-       VALUES ($1,$2,$3,$4,$5,'running',$6::timestamptz,$6::timestamptz,$6::timestamptz)
+         (machine_id, team_id, tank_id, activity_code, activity_name, status, started_at, created_at, updated_at, piece_number, piece_id, notes)
+       VALUES ($1,$2,$3,$4,$5,'running',$6::timestamptz,$6::timestamptz,$6::timestamptz,$7,$8,$9)
        RETURNING id`,
-      [machine.id, team.id, tankRow.id, phase.code, phase.label, ts]
+      [machine.id, team.id, tankRow.id, phase.code, phase.label, ts, pieceNum, pieceId, notes || null]
     );
     const sessionId = insertRes.rows[0] ? Number(insertRes.rows[0].id) : null;
     if (sessionId) await snapshotSessionTeamMembers(sessionId, team.id);
-    const session = await getOpenSession(machine.id);
-    return { ok: true, body: { ok: true, action: 'start', session: await mapSession(session) } };
+    await setMachineActiveTank(machine.id, tankRow.id);
+
+    if (phase.code === 'CORRECTIONS' && notes) {
+      await pool.query(
+        `INSERT INTO production_notes
+           (note_type, body, tank_id, tank_number, piece_number, machine_id, team_id, team_name, session_id, phase_code, phase_name, created_at)
+         VALUES ('correction', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::timestamptz)`,
+        [String(notes).slice(0, 2000), tankRow.id, tankNorm, pieceNum, machine.id, team.id, team.name, sessionId, phase.code, phase.label, ts]
+      );
+    }
+
+    const session = await getOpenSession(machine.id, tankRow.id);
+    return {
+      ok: true,
+      body: {
+        ok: true,
+        action: 'start',
+        session: await mapSession(session),
+        require_correction_note: phase.code === 'CORRECTIONS' && !notes,
+        pieces: await getTankPieces(tankRow.id),
+        current_piece: pieceNum,
+      },
+    };
   }
 
-  async function changePhase(machine, phaseRaw) {
-    const session = await getOpenSession(machine.id);
+  async function changePhase(machine, phaseRaw, opts = {}) {
+    const tankIdHint = opts.tankId != null ? Number(opts.tankId) : null;
+    let session = tankIdHint ? await getOpenSession(machine.id, tankIdHint) : null;
+    if (!session) session = await getOpenSession(machine.id);
     if (!session) {
       return { ok: false, status: 409, body: { ok: false, error: 'no_session', message: 'No active session.' } };
     }
@@ -772,31 +1538,164 @@ function createPhase1ProductionLogic(deps) {
     if (!phase) {
       return { ok: false, status: 400, body: { ok: false, error: 'validation', message: 'Unknown phase.' } };
     }
+    if (phase.piece_complete) {
+      return finishPiece(machine, { ...opts, session });
+    }
     if (phase.completes) {
-      return finishSession(machine);
+      return finishSession(machine, {
+        ...opts,
+        session,
+        forceTankComplete: phase.code === 'TANK_COMPLETE' || phase.code === 'PART_COMPLETE',
+      });
+    }
+    if (phase.code === 'CORRECTIONS' && !opts.notes) {
+      return {
+        ok: true,
+        body: {
+          ok: true,
+          action: 'need_correction_note',
+          require_correction_note: true,
+          phase: phase.label,
+          session: await mapSession(session),
+        },
+      };
     }
     const ts = nowIso();
-    if (session.activity_code === phase.code && session.status === 'running') {
-      await finalizeSessionBeforeTransition(session, ts);
-      const newSession = await spawnContinuationSession(session, phase, ts);
-      return { ok: true, body: { ok: true, action: 'change_phase', session: await mapSession(newSession) } };
-    }
     await finalizeSessionBeforeTransition(session, ts);
-    const newSession = await spawnContinuationSession(session, phase, ts);
+    const newSession = await spawnContinuationSession(session, phase, ts, {
+      notes: opts.notes || null,
+      pieceNumber: opts.pieceNumber || session.piece_number,
+    });
+    if (phase.code === 'CORRECTIONS' && opts.notes) {
+      await pool.query(
+        `INSERT INTO production_notes
+           (note_type, body, tank_id, tank_number, piece_number, machine_id, team_id, team_name, session_id, phase_code, phase_name, created_at)
+         VALUES ('correction', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::timestamptz)`,
+        [
+          String(opts.notes).slice(0, 2000),
+          Number(session.tank_id),
+          session.tank_number,
+          session.piece_number || 1,
+          machine.id,
+          Number(session.team_id),
+          session.team_name,
+          newSession ? Number(newSession.id) : null,
+          phase.code,
+          phase.label,
+          ts,
+        ]
+      );
+    }
+    await setMachineActiveTank(machine.id, session.tank_id);
     return { ok: true, body: { ok: true, action: 'change_phase', session: await mapSession(newSession) } };
   }
 
-  async function finishSession(machine, opts = {}) {
-    const session = await getOpenSession(machine.id);
+  /**
+   * Piece Complete: finish the current piece/session only.
+   * Never archives the tank — Tank Complete (or PART_COMPLETE) is required.
+   */
+  async function finishPiece(machine, opts = {}) {
+    const session = opts.session || (await getOpenSession(machine.id));
     if (!session) {
-      return { ok: false, status: 409, body: { ok: false, error: 'no_session', message: 'No active session to complete.' } };
+      return { ok: false, status: 409, body: { ok: false, error: 'no_session', message: 'No active session.' } };
     }
     const ts = nowIso();
+    const pieceNum = Number(session.piece_number) || 1;
     const endTs = session.status === 'stopped' && session.stopped_at ? session.stopped_at : ts;
+
+    const pieceCountRes = await pool.query(`SELECT piece_count FROM tanks WHERE id = $1`, [session.tank_id]);
+    const pieceCount = Math.min(
+      4,
+      Math.max(1, Number(pieceCountRes.rows[0] && pieceCountRes.rows[0].piece_count) || 1)
+    );
+    await ensureTankPieces(session.tank_id, pieceCount);
+
     await pool.query(
       `UPDATE machine_sessions SET status = 'finished', finished_at = $1::timestamptz, updated_at = $2::timestamptz WHERE id = $3`,
       [endTs, ts, session.id]
     );
+    await pool.query(
+      `UPDATE tank_pieces
+       SET status = 'completed', completed_at = $1::timestamptz, updated_at = $1::timestamptz,
+           machine_id = $2, team_id = $3, operator_name = $4
+       WHERE tank_id = $5 AND piece_number = $6`,
+      [ts, machine.id, session.team_id, opts.confirmedByEmployeeName || null, session.tank_id, pieceNum]
+    );
+    try {
+      await pool.query(
+        `INSERT INTO part_complete_events
+           (session_id, tank_id, team_id, team_name, confirmed_by_employee_id, confirmed_by_employee_name, completed_at, created_at, piece_number, piece_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7::timestamptz,$7::timestamptz,$8,$9)`,
+        [
+          Number(session.id),
+          Number(session.tank_id),
+          Number(session.team_id),
+          session.team_name,
+          opts.confirmedByEmployeeId || null,
+          opts.confirmedByEmployeeName || null,
+          ts,
+          pieceNum,
+          session.piece_id || null,
+        ]
+      );
+    } catch (err) {
+      console.error('[finishPiece] part_complete_events insert failed:', err.message);
+      throw err;
+    }
+
+    const pieces = await getTankPieces(session.tank_id);
+    const progress = computePieceProgress(pieces, pieceCount);
+    const allPiecesComplete = progress.all_pieces_complete;
+    const nextPiece = pieces.find(
+      (p) => Number(p.piece_number) <= pieceCount && p.status !== 'completed'
+    );
+    const nextPieceNum = nextPiece ? Number(nextPiece.piece_number) : pieceNum;
+
+    // Keep tank Active. Clear WIP phase fields; do NOT set status=archived.
+    await pool.query(
+      `UPDATE tanks
+       SET status = CASE
+             WHEN LOWER(TRIM(COALESCE(status, ''))) = 'archived' THEN status
+             ELSE 'active'
+           END,
+           current_piece_number = $1,
+           paused_reason = NULL,
+           wip_team_id = NULL,
+           wip_phase_code = NULL,
+           wip_phase_name = NULL,
+           wip_machine_id = NULL,
+           completed_at = NULL,
+           updated_at = $2::timestamptz
+       WHERE id = $3`,
+      [nextPieceNum, ts, session.tank_id]
+    );
+
+    // Keep this tank selectable on the machine without forcing archive.
+    await setMachineActiveTank(machine.id, session.tank_id);
+
+    return {
+      ok: true,
+      body: {
+        ok: true,
+        action: 'piece_complete',
+        piece_number: pieceNum,
+        pieces,
+        tank_complete: false,
+        all_pieces_complete: allPiecesComplete,
+        next_piece: nextPiece ? nextPiece.piece_number : null,
+        tank_id: Number(session.tank_id),
+        tank_number: session.tank_number,
+        confirmation_line: allPiecesComplete
+          ? `Piece ${pieceNum} complete — all pieces done. Scan Tank Complete to finish the tank.`
+          : `Piece ${pieceNum} complete${nextPiece ? ` — continue with Piece ${nextPiece.piece_number}` : ''}`,
+        message: allPiecesComplete
+          ? 'All pieces are complete. Status is Ready to Complete — scan Tank Complete to mark the tank Completed.'
+          : null,
+      },
+    };
+  }
+
+  async function finishTankArchive(machine, session, opts, ts) {
     await pool.query(
       `UPDATE tanks
        SET status = 'archived',
@@ -810,78 +1709,153 @@ function createPhase1ProductionLogic(deps) {
        WHERE id = $2`,
       [ts, session.tank_id]
     );
-    const { rows } = await pool.query(
-      `SELECT ms.*, t.name AS team_name, t.barcode AS team_barcode, tk.tank_number,
-              m.name AS machine_name, m.code AS machine_code
-       FROM machine_sessions ms
-       JOIN teams t ON t.id = ms.team_id
-       JOIN tanks tk ON tk.id = ms.tank_id
-       JOIN machines m ON m.id = ms.machine_id
-       WHERE ms.id = $1`,
-      [session.id]
-    );
-    const finishedRow = rows[0];
-    const teamName = finishedRow ? finishedRow.team_name : null;
-    const confirmedByEmployeeId =
-      opts && opts.confirmedByEmployeeId != null ? Number(opts.confirmedByEmployeeId) : null;
-    const confirmedByEmployeeName =
-      opts && opts.confirmedByEmployeeName != null ? String(opts.confirmedByEmployeeName).trim() : null;
-    if (finishedRow) {
-      try {
-        await pool.query(
-          `INSERT INTO part_complete_events
-             (session_id, tank_id, team_id, team_name, confirmed_by_employee_id, confirmed_by_employee_name, completed_at, created_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7::timestamptz,$7::timestamptz)`,
-          [
-            Number(finishedRow.id),
-            Number(finishedRow.tank_id),
-            Number(finishedRow.team_id),
-            teamName,
-            Number.isInteger(confirmedByEmployeeId) && confirmedByEmployeeId > 0 ? confirmedByEmployeeId : null,
-            confirmedByEmployeeName || null,
-            ts,
-          ]
-        );
-      } catch (err) {
-        console.error('[finishSession] part_complete_events insert failed:', err.message);
-        throw err;
-      }
+    await setMachineActiveTank(machine.id, null);
+    let mapped = null;
+    try {
+      if (session && session.id) mapped = await mapSession(session);
+    } catch (_err) {
+      mapped = null;
     }
-    const confirmationLine =
-      confirmedByEmployeeName && teamName
-        ? `${confirmedByEmployeeName} confirmed Part Complete for ${teamName}`
-        : confirmedByEmployeeName
-          ? `${confirmedByEmployeeName} confirmed Part Complete`
-          : teamName
-            ? `Part Complete recorded for ${teamName}`
-            : 'Part Complete recorded';
     return {
       ok: true,
       body: {
         ok: true,
-        action: 'part_complete',
-        session: await mapSession(finishedRow),
-        confirmation_line: confirmationLine,
-        team_name: teamName,
-        confirmed_by_employee_name: confirmedByEmployeeName || null,
+        action: 'tank_complete',
+        tank_complete: true,
+        session: mapped,
+        tank_number: session.tank_number || null,
+        confirmation_line: opts.confirmedByEmployeeName
+          ? `${opts.confirmedByEmployeeName} confirmed Tank Complete`
+          : 'Tank Complete recorded',
+        team_name: session.team_name,
+        confirmed_by_employee_name: opts.confirmedByEmployeeName || null,
       },
     };
   }
 
-  async function createAlert(machine, alertRaw, sessionOptional) {
+  /**
+   * Tank Complete / Part Complete: archive the tank.
+   * Without forceTankComplete, delegates to Piece Complete (never archives).
+   */
+  async function finishSession(machine, opts = {}) {
+    const session = opts.session || (await getOpenSession(machine.id));
+    if (!session) {
+      return { ok: false, status: 409, body: { ok: false, error: 'no_session', message: 'No active session to complete.' } };
+    }
+    if (!opts.forceTankComplete) {
+      return finishPiece(machine, { ...opts, session });
+    }
+    const pieceCountRes = await pool.query('SELECT piece_count FROM tanks WHERE id = $1', [session.tank_id]);
+    const pieceCount = Math.min(
+      4,
+      Math.max(1, Number(pieceCountRes.rows[0] && pieceCountRes.rows[0].piece_count) || 1)
+    );
+    await ensureTankPieces(session.tank_id, pieceCount);
+    const piecesBeforeComplete = await getTankPieces(session.tank_id);
+    const progress = computePieceProgress(piecesBeforeComplete, pieceCount);
+    if (!progress.all_pieces_complete) {
+      const incomplete = progress.incomplete_pieces;
+      return {
+        ok: false,
+        status: 409,
+        body: {
+          ok: false,
+          error: 'pieces_incomplete',
+          message:
+            'Complete all pieces before Tank Complete. Still needed: Piece ' + incomplete.join(', Piece ') + '.',
+          incomplete_pieces: incomplete,
+          pieces: piecesBeforeComplete,
+          piece_count: pieceCount,
+          percent_complete: progress.percent_complete,
+        },
+      };
+    }
+    const ts = nowIso();
+    const endTs = session.status === 'stopped' && session.stopped_at ? session.stopped_at : ts;
+    await pool.query(
+      `UPDATE machine_sessions SET status = 'finished', finished_at = $1::timestamptz, updated_at = $2::timestamptz WHERE id = $3`,
+      [endTs, ts, session.id]
+    );
+    await pool.query(
+      `UPDATE tank_pieces
+       SET updated_at = $1::timestamptz
+       WHERE tank_id = $2 AND status = 'completed'`,
+      [ts, session.tank_id]
+    );
+    try {
+      await pool.query(
+        `INSERT INTO part_complete_events
+           (session_id, tank_id, team_id, team_name, confirmed_by_employee_id, confirmed_by_employee_name, completed_at, created_at, piece_number)
+         VALUES ($1,$2,$3,$4,$5,$6,$7::timestamptz,$7::timestamptz,$8)`,
+        [
+          Number(session.id),
+          Number(session.tank_id),
+          Number(session.team_id),
+          session.team_name,
+          opts.confirmedByEmployeeId || null,
+          opts.confirmedByEmployeeName || null,
+          ts,
+          session.piece_number || null,
+        ]
+      );
+    } catch (err) {
+      console.error('[finishSession] part_complete_events insert failed:', err.message);
+      throw err;
+    }
+    return finishTankArchive(machine, session, opts, ts);
+  }
+
+  async function createAlert(machine, alertRaw, sessionOptional, opts = {}) {
     const alertDef = resolveAlert(alertRaw);
     if (!alertDef) {
       return { ok: false, status: 400, body: { ok: false, error: 'validation', message: 'Unknown alert barcode.' } };
     }
     const session = sessionOptional || (machine ? await getOpenSession(machine.id) : null);
+    if (alertDef.alert_type === 'qa_qc' && !session) {
+      return {
+        ok: false,
+        status: 409,
+        body: { ok: false, error: 'no_session', message: 'Select an active tank/piece before scanning QA/QC.' },
+      };
+    }
+    const pieceNumber = session ? Number(session.piece_number) || 1 : null;
+    if (alertDef.alert_type === 'qa_qc') {
+      const existing = await findOpenQaQcAlert(session.tank_id, pieceNumber);
+      if (existing) {
+        return {
+          ok: false,
+          status: 409,
+          body: {
+            ok: false,
+            error: 'qa_qc_open',
+            message: `Piece ${pieceNumber} already has an open QA/QC issue.`,
+            open_qa_qc: existing,
+          },
+        };
+      }
+    }
     const ts = nowIso();
-    if (session && session.status === 'running') {
+    const issueNote =
+      opts.notes != null
+        ? String(opts.notes).trim().slice(0, 1000)
+        : opts.issue_note != null
+          ? String(opts.issue_note).trim().slice(0, 1000)
+          : null;
+    if (session && alertDef.alert_type === 'qa_qc') {
+      if (session.status === 'running') {
+        await stopSessionForWait(session, ts, 'qa_qc');
+      } else if (session.status === 'stopped' && !isQaQcStopReason(session.stop_reason)) {
+        await stopSessionForWait(session, ts, 'qa_qc');
+      }
+    } else if (session && session.status === 'running' && alertDef.alert_type === 'maintenance') {
+      // Maintenance alert notifies managers; keep prior pause behavior for tooling.
       await stopSessionForWait(session, ts, alertDef.alert_type);
     }
     const { rows } = await pool.query(
       `INSERT INTO alert_events
-         (machine_id, team_id, tank_id, session_id, alert_type, alert_code, status, reported_at, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,'open',$7::timestamptz,$7::timestamptz)
+         (machine_id, team_id, tank_id, session_id, alert_type, alert_code, status, reported_at, created_at,
+          piece_id, piece_number, phase_code, phase_name, notes)
+       VALUES ($1,$2,$3,$4,$5,$6,'open',$7::timestamptz,$7::timestamptz,$8,$9,$10,$11,$12)
        RETURNING id`,
       [
         machine ? machine.id : session ? session.machine_id : null,
@@ -891,6 +1865,11 @@ function createPhase1ProductionLogic(deps) {
         alertDef.alert_type,
         alertDef.code,
         ts,
+        session && session.piece_id != null ? Number(session.piece_id) : null,
+        pieceNumber,
+        session ? session.activity_code || null : null,
+        session ? session.activity_name || null : null,
+        issueNote || null,
       ]
     );
     const { rows: full } = await pool.query(
@@ -902,20 +1881,82 @@ function createPhase1ProductionLogic(deps) {
        WHERE ae.id = $1`,
       [rows[0].id]
     );
-    return { ok: true, body: { ok: true, action: 'alert', alert: mapAlertRow(full[0]) } };
+    const mappedSession =
+      machine && session
+        ? await mapSession(await getOpenSession(machine.id, session.tank_id))
+        : session
+          ? await mapSession(session)
+          : null;
+    return {
+      ok: true,
+      body: {
+        ok: true,
+        action: 'alert',
+        alert: mapAlertRow(full[0]),
+        open_qa_qc: alertDef.alert_type === 'qa_qc' ? mapAlertRow(full[0]) : null,
+        session: mappedSession,
+        confirmation_line:
+          alertDef.alert_type === 'qa_qc'
+            ? `QA/QC opened for Tank ${session.tank_number} Piece ${pieceNumber}. ${session.activity_name || 'Phase'} paused.`
+            : `${alertDef.label} reported — manager notified.`,
+      },
+    };
   }
 
-  async function resolveAlertById(id, resolvedBy) {
+  async function resumeSessionAfterQaQc(sessionRow, ts) {
+    if (!sessionRow) return null;
+    if (sessionRow.status === 'stopped' && isQaQcStopReason(sessionRow.stop_reason)) {
+      await withTransaction(async (client) => {
+        await resumeSingleOpenSession(sessionRow, ts, client);
+      });
+      return getSessionById(sessionRow.id);
+    }
+    return sessionRow;
+  }
+
+  async function resolveAlertById(id, resolvedBy, opts = {}) {
     const ts = nowIso();
+    const resolutionNote =
+      opts.resolution_note != null
+        ? String(opts.resolution_note).trim().slice(0, 1000)
+        : opts.notes != null
+          ? String(opts.notes).trim().slice(0, 1000)
+          : null;
+    const { rows: before } = await pool.query(`SELECT * FROM alert_events WHERE id = $1`, [Number(id)]);
+    if (!before.length) {
+      return { ok: false, status: 404, body: { ok: false, error: 'not_found', message: 'Alert not found.' } };
+    }
+    const prior = before[0];
+    if (String(prior.status) !== 'open') {
+      return {
+        ok: false,
+        status: 409,
+        body: { ok: false, error: 'already_resolved', message: 'Alert is already resolved.' },
+      };
+    }
     const { rows } = await pool.query(
-      `UPDATE alert_events SET status = 'resolved', resolved_at = $1::timestamptz, resolved_by = $2
-       WHERE id = $3 AND status = 'open'
+      `UPDATE alert_events
+       SET status = 'resolved',
+           resolved_at = $1::timestamptz,
+           resolved_by = $2,
+           resolution_note = COALESCE($3, resolution_note)
+       WHERE id = $4 AND status = 'open'
        RETURNING id`,
-      [ts, resolvedBy || null, Number(id)]
+      [ts, resolvedBy || null, resolutionNote, Number(id)]
     );
     if (!rows.length) {
       return { ok: false, status: 404, body: { ok: false, error: 'not_found', message: 'Alert not found or already resolved.' } };
     }
+
+    let resumedSession = null;
+    if (prior.alert_type === 'qa_qc' && prior.session_id) {
+      const sessionRow = await getSessionById(prior.session_id);
+      resumedSession = await resumeSessionAfterQaQc(sessionRow, ts);
+      if (sessionRow && sessionRow.machine_id) {
+        await setMachineActiveTank(sessionRow.machine_id, sessionRow.tank_id);
+      }
+    }
+
     const { rows: full } = await pool.query(
       `SELECT ae.*, m.name AS machine_name, m.code AS machine_code, t.name AS team_name, tk.tank_number
        FROM alert_events ae
@@ -925,7 +1966,55 @@ function createPhase1ProductionLogic(deps) {
        WHERE ae.id = $1`,
       [rows[0].id]
     );
-    return { ok: true, body: { ok: true, id: Number(rows[0].id), alert: mapAlertRow(full[0]) } };
+    return {
+      ok: true,
+      body: {
+        ok: true,
+        id: Number(rows[0].id),
+        alert: mapAlertRow(full[0]),
+        session: resumedSession ? await mapSession(resumedSession) : null,
+        action: prior.alert_type === 'qa_qc' ? 'qa_qc_resolved' : 'alert_resolved',
+        confirmation_line:
+          prior.alert_type === 'qa_qc'
+            ? `QA/QC resolved${prior.piece_number ? ` for Piece ${prior.piece_number}` : ''}${
+                resumedSession && resumedSession.activity_name
+                  ? ` — resumed ${resumedSession.activity_name}`
+                  : ''
+              }.`
+            : 'Alert resolved.',
+      },
+    };
+  }
+
+  async function resolveQaQcForMachine(machine, opts = {}) {
+    const session =
+      opts.session ||
+      (opts.tank_id != null
+        ? await getOpenSession(machine.id, Number(opts.tank_id))
+        : await getOpenSession(machine.id));
+    if (!session) {
+      return {
+        ok: false,
+        status: 409,
+        body: { ok: false, error: 'no_session', message: 'No open QA/QC issue for this piece.' },
+      };
+    }
+    const pieceNumber = Number(session.piece_number) || 1;
+    const open = await findOpenQaQcAlert(session.tank_id, pieceNumber);
+    if (!open) {
+      return {
+        ok: false,
+        status: 409,
+        body: {
+          ok: false,
+          error: 'no_open_qa_qc',
+          message: 'No open QA/QC issue for this piece.',
+        },
+      };
+    }
+    return resolveAlertById(open.id, opts.resolved_by || opts.resolvedBy || 'kiosk', {
+      resolution_note: opts.resolution_note || opts.notes || null,
+    });
   }
 
   async function fetchProductionHistory(filters = {}) {
@@ -1041,10 +2130,70 @@ function createPhase1ProductionLogic(deps) {
         s.total_estimated_cost = labor.total_estimated_cost;
       }
     }
+    let tankId = null;
+    if (sessionRows[0] && sessionRows[0].tank_id != null) {
+      tankId = Number(sessionRows[0].tank_id);
+    } else {
+      const tankLookup = await pool.query(
+        `SELECT id FROM tanks WHERE UPPER(TRIM(tank_number)) = $1 LIMIT 1`,
+        [normalized]
+      );
+      if (tankLookup.rows[0]) tankId = Number(tankLookup.rows[0].id);
+    }
+    const phase_time_summary = tankId ? await fetchTankPhaseTimeSummary(tankId) : [];
+    let downtime_intervals = [];
+    let downtime_total_ms = 0;
+    if (tankId) {
+      try {
+        const { rows: dtRows } = await pool.query(
+          `SELECT id, started_at, ended_at, duration_ms, reason_code, reason_note,
+                  phase_code, phase_name, piece_number, team_name, tank_number
+           FROM downtime_intervals
+           WHERE tank_id = $1
+           ORDER BY started_at DESC, id DESC`,
+          [tankId]
+        );
+        downtime_intervals = dtRows.map((r) => {
+          const startMs = new Date(r.started_at).getTime();
+          const endMs = r.ended_at ? new Date(r.ended_at).getTime() : Date.now();
+          const ms =
+            r.duration_ms != null
+              ? Number(r.duration_ms)
+              : Number.isNaN(startMs) || Number.isNaN(endMs)
+                ? 0
+                : Math.max(0, endMs - startMs);
+          downtime_total_ms += ms;
+          const opt = DOWNTIME_REASON_OPTIONS.find((o) => o.code === r.reason_code);
+          return {
+            id: Number(r.id),
+            started_at: r.started_at,
+            ended_at: r.ended_at || null,
+            duration_ms: ms,
+            duration_display: formatElapsedDisplay(ms),
+            reason_code: r.reason_code || null,
+            reason_label: opt ? opt.label : r.reason_code || null,
+            reason_note: r.reason_note || null,
+            phase_name: r.phase_name || null,
+            piece_number: r.piece_number != null ? Number(r.piece_number) : null,
+            team_name: r.team_name || null,
+            open: !r.ended_at,
+          };
+        });
+      } catch (err) {
+        console.warn('[fetchTankActivity] downtime_intervals query failed:', err.message);
+      }
+    }
     return {
       tank_number: sessionRows[0] ? sessionRows[0].tank_number : normalized,
+      tank_id: tankId,
       sessions,
       alerts: alertRows.map(mapAlertRow),
+      phase_time_summary,
+      tank_total_running_time_ms: computeTankTotalRunningMs(phase_time_summary),
+      tank_total_running_time_display: tankTotalRunningTimeDisplay(phase_time_summary),
+      downtime_intervals,
+      downtime_total_ms,
+      downtime_total_display: formatElapsedDisplay(downtime_total_ms),
     };
   }
 
@@ -1088,6 +2237,8 @@ function createPhase1ProductionLogic(deps) {
       return { type: 'tank', value: normalizeTankNumber(s.replace(/^TANK[_:]/, '')) };
     }
     if (s.startsWith('STOP:') || s.startsWith('STOP_')) {
+      const downtime = resolveDowntimeReason(s);
+      if (downtime) return { type: 'downtime', value: downtime.barcode };
       const pause = resolvePauseReason(s);
       if (pause) return { type: 'pause', value: pause.barcode };
     }
@@ -1095,12 +2246,28 @@ function createPhase1ProductionLogic(deps) {
       const endShift = resolveEndShift(s);
       if (endShift) return { type: 'end_shift', value: endShift.barcode };
     }
+    if (s.startsWith('PIECE:') || s.startsWith('PIECE_') || /^PIECE\s*[1-4]$/.test(s)) {
+      const num = Number(String(s).replace(/^PIECE[_:\s]*/i, '').trim());
+      if (Number.isInteger(num) && num >= 1 && num <= 4) {
+        return { type: 'piece', value: num };
+      }
+    }
     if (s.startsWith('PHASE:') || s.startsWith('PHASE_') || s.startsWith('ACTIVITY:')) {
       return { type: 'phase', value: s };
+    }
+    if (
+      s === 'QA_QC_RESOLVE' ||
+      s === 'RESOLVE_QA_QC' ||
+      s === 'RESOLVE:QA_QC' ||
+      s === 'ALERT:QA_QC_RESOLVE'
+    ) {
+      return { type: 'qa_qc_resolve', value: 'QA_QC_RESOLVE' };
     }
     if (s.startsWith('ALERT:') || s.startsWith('ALERT_')) return { type: 'alert', value: s };
     const endShift = resolveEndShift(s);
     if (endShift) return { type: 'end_shift', value: endShift.barcode };
+    const downtime = resolveDowntimeReason(s);
+    if (downtime) return { type: 'downtime', value: downtime.barcode };
     const pause = resolvePauseReason(s);
     if (pause) return { type: 'pause', value: pause.barcode };
     const phase = resolvePhase(s);
@@ -1300,145 +2467,470 @@ function createPhase1ProductionLogic(deps) {
     return rows[0] || null;
   }
 
-  async function finalizeSessionBeforeTransition(sessionRow, ts) {
+  async function withTransaction(work) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await work(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (_rollbackErr) {
+        /* ignore */
+      }
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  async function finalizeSessionBeforeTransition(sessionRow, ts, client = pool) {
     if (!sessionRow || sessionRow.status === 'finished') return;
     const id = Number(sessionRow.id);
     if (sessionRow.status === 'stopped' && sessionRow.stopped_at) {
-      await pool.query(
+      await client.query(
         `UPDATE machine_sessions SET status = 'finished', finished_at = stopped_at, updated_at = $1::timestamptz WHERE id = $2`,
         [ts, id]
       );
     } else {
-      await pool.query(
+      await client.query(
         `UPDATE machine_sessions SET status = 'finished', finished_at = $1::timestamptz, updated_at = $1::timestamptz WHERE id = $2`,
         [ts, id]
       );
     }
   }
 
-  async function stopSessionForWait(sessionRow, ts, stopReason) {
-    if (!sessionRow || sessionRow.status !== 'running') return;
-    await pool.query(
-      `UPDATE machine_sessions SET status = 'stopped', stopped_at = $1::timestamptz, stop_reason = $2, updated_at = $1::timestamptz WHERE id = $3`,
-      [ts, stopReason || null, Number(sessionRow.id)]
+  async function stopSessionForWait(sessionRow, ts, stopReason, client = pool, notes = undefined) {
+    if (!sessionRow) return;
+    if (sessionRow.status === 'running') {
+      if (notes !== undefined) {
+        await client.query(
+          `UPDATE machine_sessions
+           SET status = 'stopped', stopped_at = $1::timestamptz, stop_reason = $2, notes = $3, updated_at = $1::timestamptz
+           WHERE id = $4`,
+          [ts, stopReason || null, notes, Number(sessionRow.id)]
+        );
+      } else {
+        await client.query(
+          `UPDATE machine_sessions SET status = 'stopped', stopped_at = $1::timestamptz, stop_reason = $2, updated_at = $1::timestamptz WHERE id = $3`,
+          [ts, stopReason || null, Number(sessionRow.id)]
+        );
+      }
+      return;
+    }
+    if (sessionRow.status === 'stopped') {
+      // Already paused (e.g. Break → Lunch): update reason only; keep original stopped_at so elapsed stays correct.
+      if (notes !== undefined) {
+        await client.query(
+          `UPDATE machine_sessions SET stop_reason = $1, notes = $2, updated_at = $3::timestamptz WHERE id = $4`,
+          [stopReason || null, notes, ts, Number(sessionRow.id)]
+        );
+      } else {
+        await client.query(
+          `UPDATE machine_sessions SET stop_reason = $1, updated_at = $2::timestamptz WHERE id = $3`,
+          [stopReason || null, ts, Number(sessionRow.id)]
+        );
+      }
+    }
+  }
+
+  async function closeOpenDowntimeIntervalsForSession(sessionId, ts, client = pool) {
+    const sid = Number(sessionId);
+    if (!Number.isInteger(sid) || sid <= 0) return;
+    const { rows } = await client.query(
+      `SELECT id, started_at FROM downtime_intervals
+       WHERE session_id = $1 AND ended_at IS NULL
+       ORDER BY started_at DESC`,
+      [sid]
     );
+    for (const row of rows) {
+      const startMs = new Date(row.started_at).getTime();
+      const endMs = new Date(ts).getTime();
+      const durationMs = Number.isNaN(startMs) || Number.isNaN(endMs) ? 0 : Math.max(0, endMs - startMs);
+      await client.query(
+        `UPDATE downtime_intervals
+         SET ended_at = $1::timestamptz, duration_ms = $2
+         WHERE id = $3`,
+        [ts, durationMs, Number(row.id)]
+      );
+    }
   }
 
-  async function pauseSession(machine, pauseRaw) {
-    const pauseDef = resolvePauseReason(pauseRaw);
-    if (!pauseDef) {
-      return { ok: false, status: 400, body: { ok: false, error: 'validation', message: 'Unknown pause barcode.' } };
-    }
-    const session = await getOpenSession(machine.id);
-    if (!session) {
-      return { ok: false, status: 409, body: { ok: false, error: 'no_session', message: 'No active session to pause.' } };
-    }
-    if (session.status !== 'running') {
-      return {
-        ok: false,
-        status: 409,
-        body: { ok: false, error: 'not_running', message: 'Session is already paused.' },
-      };
-    }
-    const ts = nowIso();
-    await stopSessionForWait(session, ts, pauseDef.stop_reason);
-    const updated = await getSessionById(Number(session.id));
-    return {
-      ok: true,
-      body: {
-        ok: true,
-        action: 'pause',
-        pause_reason: pauseDef.stop_reason,
-        session: await mapSession(updated),
-      },
-    };
+  function formatDowntimeNotes(reasonCode, reasonNote) {
+    const opt = DOWNTIME_REASON_OPTIONS.find((o) => o.code === reasonCode);
+    const label = opt ? opt.label : reasonCode ? String(reasonCode) : '';
+    const note = reasonNote != null ? String(reasonNote).trim().slice(0, 500) : '';
+    if (label && note) return `${label}: ${note}`;
+    if (label) return label;
+    if (note) return note;
+    return null;
   }
 
-  async function resumeSession(machine) {
-    const session = await getOpenSession(machine.id);
-    if (!session) {
-      return { ok: false, status: 409, body: { ok: false, error: 'no_session', message: 'No paused session to resume.' } };
+  function uniqueTankNumbers(sessions) {
+    const seen = new Set();
+    const out = [];
+    for (const s of sessions || []) {
+      const t = String(s.tank_number || '').trim();
+      if (!t || seen.has(t)) continue;
+      seen.add(t);
+      out.push(t);
     }
-    if (session.status !== 'stopped') {
-      return { ok: false, status: 409, body: { ok: false, error: 'not_paused', message: 'Session is not paused.' } };
-    }
-    if (!isResumableStopReason(session.stop_reason)) {
-      return {
-        ok: false,
-        status: 409,
-        body: {
-          ok: false,
-          error: 'not_resumable',
-          message: 'This pause cannot be resumed. Scan team and tank to continue production.',
-        },
-      };
-    }
-    const ts = nowIso();
-    const priorMs = sessionElapsedMs(session);
+    return out;
+  }
+
+  function formatTankList(tankNumbers) {
+    const list = uniqueTankNumbers(tankNumbers.map((t) => ({ tank_number: t })));
+    if (!list.length) return '';
+    if (list.length === 1) return `Tank ${list[0]}`;
+    if (list.length === 2) return `Tank ${list[0]} and Tank ${list[1]}`;
+    return `${list.slice(0, -1).map((t) => `Tank ${t}`).join(', ')}, and Tank ${list[list.length - 1]}`;
+  }
+
+  async function resumeSingleOpenSession(row, ts, client = pool) {
+    const priorMs = sessionElapsedMs(row);
     const newStartedAt = new Date(Date.now() - priorMs).toISOString();
-    await pool.query(
+    await closeOpenDowntimeIntervalsForSession(row.id, ts, client);
+    await client.query(
       `UPDATE machine_sessions
        SET status = 'running',
            started_at = $1::timestamptz,
            stopped_at = NULL,
            resumed_at = $2::timestamptz,
            stop_reason = NULL,
+           notes = NULL,
            updated_at = $2::timestamptz
        WHERE id = $3`,
-      [newStartedAt, ts, Number(session.id)]
+      [newStartedAt, ts, Number(row.id)]
     );
-    const updated = await getSessionById(Number(session.id));
-    return { ok: true, body: { ok: true, action: 'resume', session: await mapSession(updated) } };
   }
 
-  async function endShiftSession(machine) {
-    const session = await getOpenSession(machine.id);
-    if (!session) {
-      const assignment = await getMachineAssignment(machine.id);
+  /**
+   * Winder-level Break / Lunch: pause EVERY open session on this machine immediately.
+   */
+  async function pauseSession(machine, pauseRaw, opts = {}) {
+    void opts;
+    const pauseDef = resolvePauseReason(pauseRaw);
+    if (!pauseDef) {
+      return { ok: false, status: 400, body: { ok: false, error: 'validation', message: 'Unknown pause barcode.' } };
+    }
+    const openRows = await getOpenSessionsForMachine(machine.id);
+    const eligible = openRows.filter((s) => s.status === 'running' || s.status === 'stopped');
+    if (!eligible.length) {
+      return { ok: false, status: 409, body: { ok: false, error: 'no_session', message: 'No active tanks to pause on this Winder.' } };
+    }
+    const tankNumbers = uniqueTankNumbers(eligible);
+    const label = pauseDef.label || 'Break';
+    const ts = nowIso();
+    await withTransaction(async (client) => {
+      for (const row of eligible) {
+        await closeOpenDowntimeIntervalsForSession(row.id, ts, client);
+        await stopSessionForWait(row, ts, pauseDef.stop_reason, client);
+      }
+    });
+
+    const refreshed = await getOpenSessionsForMachine(machine.id);
+    const sessions = [];
+    for (const row of refreshed) sessions.push(await mapSession(row));
+    const listText = formatTankList(tankNumbers);
+    return {
+      ok: true,
+      body: {
+        ok: true,
+        action: 'pause',
+        winder_level: true,
+        pause_reason: pauseDef.stop_reason,
+        pause_label: label,
+        tank_count: tankNumbers.length,
+        tank_numbers: tankNumbers,
+        sessions,
+        session: sessions[0] || null,
+        confirmation_line: `${label} applied to ${listText}.`,
+        message: `${label} applied to ${listText}.`,
+      },
+    };
+  }
+
+  /**
+   * Tank-specific Downtime: pause only the selected tank's open session.
+   */
+  async function pauseDowntimeSession(machine, opts = {}) {
+    const openRows = await getOpenSessionsForMachine(machine.id);
+    let target = null;
+    const tankId = opts.tank_id != null ? Number(opts.tank_id) : null;
+    const tankNorm = opts.tank_number ? normalizeTankNumber(opts.tank_number) : '';
+    if (Number.isInteger(tankId) && tankId > 0) {
+      target = openRows.find((r) => Number(r.tank_id) === tankId) || null;
+    } else if (tankNorm) {
+      target = openRows.find((r) => String(r.tank_number || '').toUpperCase() === tankNorm) || null;
+    } else {
+      target = await getOpenSession(machine.id);
+    }
+    if (!target) {
+      return {
+        ok: false,
+        status: 409,
+        body: {
+          ok: false,
+          error: 'need_tank',
+          message: 'Select the affected tank first, then press Downtime.',
+        },
+      };
+    }
+    if (target.status !== 'running' && target.status !== 'stopped') {
+      return {
+        ok: false,
+        status: 409,
+        body: { ok: false, error: 'no_session', message: 'Selected tank has no active session to put on Downtime.' },
+      };
+    }
+
+    const reasonCode = opts.reason_code != null ? String(opts.reason_code).trim().slice(0, 60) : '';
+    const reasonNote = opts.reason_note != null ? String(opts.reason_note).trim().slice(0, 500) : '';
+    const notes = formatDowntimeNotes(reasonCode, reasonNote);
+    const ts = nowIso();
+
+    await withTransaction(async (client) => {
+      // If already on downtime, close prior open interval before starting a new one.
+      if (isDowntimeStopReason(target.stop_reason)) {
+        await closeOpenDowntimeIntervalsForSession(target.id, ts, client);
+      }
+      await stopSessionForWait(target, ts, 'downtime', client, notes);
+      await client.query(
+        `INSERT INTO downtime_intervals
+           (machine_id, tank_id, tank_number, session_id, team_id, team_name,
+            phase_code, phase_name, piece_number, reason_code, reason_note, started_at, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::timestamptz, $12::timestamptz)`,
+        [
+          Number(target.machine_id),
+          Number(target.tank_id),
+          String(target.tank_number || ''),
+          Number(target.id),
+          Number(target.team_id),
+          target.team_name || null,
+          target.activity_code || null,
+          target.activity_name || null,
+          Number(target.piece_number) || 1,
+          reasonCode || null,
+          reasonNote || null,
+          ts,
+        ]
+      );
+    });
+
+    await setMachineActiveTank(machine.id, target.tank_id);
+    const refreshed = await getOpenSessionsForMachine(machine.id);
+    const sessions = [];
+    for (const row of refreshed) sessions.push(await mapSession(row));
+    const mapped = sessions.find((s) => Number(s.id) === Number(target.id)) || sessions[0] || null;
+    return {
+      ok: true,
+      body: {
+        ok: true,
+        action: 'downtime',
+        winder_level: false,
+        tank_specific: true,
+        pause_reason: 'downtime',
+        pause_label: 'Downtime',
+        tank_number: target.tank_number,
+        tank_count: 1,
+        tank_numbers: [String(target.tank_number)],
+        reason_code: reasonCode || null,
+        reason_note: reasonNote || null,
+        sessions,
+        session: mapped,
+        confirmation_line: `Downtime started for Tank ${target.tank_number}.`,
+        message: `Downtime started for Tank ${target.tank_number}.`,
+      },
+    };
+  }
+
+  /**
+   * Winder-level Resume: resume EVERY Break/Lunch paused session on this machine.
+   * Each tank keeps its own phase. Does not resume Downtime tanks (those are tank-specific).
+   */
+  async function resumeSession(machine, opts = {}) {
+    void opts;
+    const openRows = await getOpenSessionsForMachine(machine.id);
+    const eligible = openRows.filter(
+      (s) => s.status === 'stopped' && isWinderResumableStopReason(s.stop_reason)
+    );
+    if (!eligible.length) {
+      return {
+        ok: false,
+        status: 409,
+        body: { ok: false, error: 'no_session', message: 'No paused tanks to resume on this Winder.' },
+      };
+    }
+    const tankNumbers = uniqueTankNumbers(eligible);
+    const ts = nowIso();
+    await withTransaction(async (client) => {
+      for (const row of eligible) {
+        await resumeSingleOpenSession(row, ts, client);
+      }
+    });
+
+    const refreshed = await getOpenSessionsForMachine(machine.id);
+    const sessions = [];
+    for (const row of refreshed) sessions.push(await mapSession(row));
+    const listText = formatTankList(tankNumbers);
+    const phaseNames = [
+      ...new Set(eligible.map((s) => String(s.activity_name || s.activity_code || '').trim()).filter(Boolean)),
+    ];
+    return {
+      ok: true,
+      body: {
+        ok: true,
+        action: 'resume',
+        winder_level: true,
+        tank_count: tankNumbers.length,
+        tank_numbers: tankNumbers,
+        sessions,
+        session: sessions[0] || null,
+        resumed_phase: phaseNames.length === 1 ? phaseNames[0] : null,
+        confirmation_line: `Resumed ${listText}.`,
+        message: `Resumed ${listText}.`,
+      },
+    };
+  }
+
+  /**
+   * Resume only the selected tank (typically from Downtime).
+   */
+  async function resumeSelectedSession(machine, opts = {}) {
+    const openRows = await getOpenSessionsForMachine(machine.id);
+    let target = null;
+    const tankId = opts.tank_id != null ? Number(opts.tank_id) : null;
+    const tankNorm = opts.tank_number ? normalizeTankNumber(opts.tank_number) : '';
+    if (Number.isInteger(tankId) && tankId > 0) {
+      target = openRows.find((r) => Number(r.tank_id) === tankId) || null;
+    } else if (tankNorm) {
+      target = openRows.find((r) => String(r.tank_number || '').toUpperCase() === tankNorm) || null;
+    } else {
+      target = await getOpenSession(machine.id);
+    }
+    if (!target || target.status !== 'stopped' || !isResumableStopReason(target.stop_reason)) {
+      return {
+        ok: false,
+        status: 409,
+        body: { ok: false, error: 'no_session', message: 'Selected tank is not paused.' },
+      };
+    }
+    if (isQaQcStopReason(target.stop_reason)) {
+      return {
+        ok: false,
+        status: 409,
+        body: {
+          ok: false,
+          error: 'use_resolve_qa_qc',
+          message: 'This piece is on QA/QC. Scan QA_QC_RESOLVE or tap Resolve QA/QC.',
+        },
+      };
+    }
+    const ts = nowIso();
+    await withTransaction(async (client) => {
+      await resumeSingleOpenSession(target, ts, client);
+    });
+    await setMachineActiveTank(machine.id, target.tank_id);
+    const refreshed = await getOpenSessionsForMachine(machine.id);
+    const sessions = [];
+    for (const row of refreshed) sessions.push(await mapSession(row));
+    const mapped = sessions.find((s) => Number(s.id) === Number(target.id)) || null;
+    return {
+      ok: true,
+      body: {
+        ok: true,
+        action: 'resume',
+        winder_level: false,
+        tank_specific: true,
+        tank_count: 1,
+        tank_numbers: [String(target.tank_number)],
+        tank_number: target.tank_number,
+        sessions,
+        session: mapped,
+        resumed_phase: target.activity_name || target.activity_code || null,
+        confirmation_line: `Resumed Tank ${target.tank_number}.`,
+        message: `Resumed Tank ${target.tank_number}${target.activity_name ? ` — ${target.activity_name}` : ''}.`,
+      },
+    };
+  }
+
+  /**
+   * Winder-level End Shift: stop ALL open sessions, preserve each tank's phase as WIP, clear team assignment.
+   */
+  async function endShiftSession(machine, opts = {}) {
+    void opts;
+    const openRows = await getOpenSessionsForMachine(machine.id);
+    const assignment = await getMachineAssignment(machine.id);
+    const machineName = displayMachineName(machine.name);
+
+    if (!openRows.length) {
       await clearMachineAssignment(machine.id);
       return {
         ok: true,
         body: {
           ok: true,
           action: 'end_shift',
+          winder_level: true,
           tank_number: null,
+          tank_numbers: [],
+          tank_count: 0,
           phase_name: null,
           team_name: assignment ? assignment.team_name : null,
           status_label: 'Shift ended',
+          confirmation_line: `End Shift applied to ${machineName}.`,
+          message: `End Shift applied to ${machineName}.`,
         },
       };
     }
+
+    const tankNumbers = uniqueTankNumbers(openRows);
     const ts = nowIso();
-    await finalizeSessionBeforeTransition(session, ts);
-    await pool.query(
-      `UPDATE tanks
-       SET status = 'paused',
-           paused_reason = 'end_shift',
-           wip_team_id = $1,
-           wip_phase_code = $2,
-           wip_phase_name = $3,
-           wip_machine_id = $4,
-           updated_at = $5::timestamptz
-       WHERE id = $6`,
-      [
-        Number(session.team_id),
-        String(session.activity_code || ''),
-        String(session.activity_name || ''),
-        Number(session.machine_id),
-        ts,
-        Number(session.tank_id),
-      ]
-    );
-    await clearMachineAssignment(Number(session.machine_id));
+    await withTransaction(async (client) => {
+      for (const session of openRows) {
+        await closeOpenDowntimeIntervalsForSession(session.id, ts, client);
+        await finalizeSessionBeforeTransition(session, ts, client);
+        await client.query(
+          `UPDATE tanks
+           SET status = 'paused',
+               paused_reason = 'end_shift',
+               wip_team_id = $1,
+               wip_phase_code = $2,
+               wip_phase_name = $3,
+               wip_machine_id = $4,
+               updated_at = $5::timestamptz
+           WHERE id = $6`,
+          [
+            Number(session.team_id),
+            String(session.activity_code || ''),
+            String(session.activity_name || ''),
+            Number(session.machine_id),
+            ts,
+            Number(session.tank_id),
+          ]
+        );
+      }
+      await client.query(
+        `UPDATE machines SET assigned_team_id = NULL, assigned_team_day = NULL, assigned_team_at = NULL, active_tank_id = NULL WHERE id = $1`,
+        [Number(machine.id)]
+      );
+    });
+
     return {
       ok: true,
       body: {
         ok: true,
         action: 'end_shift',
-        tank_number: session.tank_number,
-        phase_name: session.activity_name,
-        team_name: session.team_name,
-        status_label: 'Paused - End Shift',
+        winder_level: true,
+        tank_number: tankNumbers[0] || null,
+        tank_numbers: tankNumbers,
+        tank_count: tankNumbers.length,
+        phase_name: null,
+        team_name: openRows[0] ? openRows[0].team_name : assignment ? assignment.team_name : null,
+        status_label: 'End Shift',
+        confirmation_line: `End Shift applied to ${machineName}. Stopped ${formatTankList(tankNumbers)}. Phases preserved for next shift.`,
+        message: `End Shift applied to ${machineName}.`,
       },
     };
   }
@@ -1461,13 +2953,78 @@ function createPhase1ProductionLogic(deps) {
     const norm = normalizeTankNumber(tankNumber);
     if (!norm) return null;
     const { rows } = await pool.query(
-      `SELECT id, tank_number, status, paused_reason, wip_team_id, wip_phase_code, wip_phase_name, wip_machine_id
+      `SELECT id, tank_number, status, paused_reason, wip_team_id, wip_phase_code, wip_phase_name, wip_machine_id, current_piece_number
        FROM tanks
        WHERE UPPER(TRIM(tank_number)) = $1 AND LOWER(TRIM(COALESCE(status, ''))) = 'paused'
        LIMIT 1`,
       [norm]
     );
     return rows[0] || null;
+  }
+
+  /**
+   * After End Shift, tanks are paused with WIP (no open session). Resume all WIP tanks on this Winder.
+   */
+  async function resumeAllEndShiftWipTanks(machine, team, opts = {}) {
+    void opts;
+    if (!team) {
+      return { ok: false, status: 409, body: { ok: false, error: 'need_team', message: 'Scan a Team barcode first.' } };
+    }
+    const { rows: pausedTanks } = await pool.query(
+      `SELECT id, tank_number, wip_phase_code, wip_phase_name, paused_reason, current_piece_number
+       FROM tanks
+       WHERE LOWER(TRIM(COALESCE(status, ''))) = 'paused'
+         AND LOWER(TRIM(COALESCE(paused_reason, ''))) = 'end_shift'
+         AND wip_machine_id = $1
+       ORDER BY tank_number ASC`,
+      [Number(machine.id)]
+    );
+    if (!pausedTanks.length) {
+      return {
+        ok: false,
+        status: 409,
+        body: { ok: false, error: 'no_session', message: 'No End Shift paused tanks to resume on this Winder.' },
+      };
+    }
+
+    const sessions = [];
+    const resumed = [];
+    for (const tank of pausedTanks) {
+      const phaseCode = String(tank.wip_phase_code || '').trim().toUpperCase();
+      const phase = resolvePhase(phaseCode);
+      if (!phase) continue;
+      const start = await startSession(machine, {
+        team,
+        tankNumber: tank.tank_number,
+        phaseRaw: phase.barcode,
+        pieceNumber: Number(tank.current_piece_number) || 1,
+      });
+      if (start.ok && start.body && start.body.session) {
+        sessions.push(start.body.session);
+        resumed.push(String(tank.tank_number));
+      }
+    }
+    if (!resumed.length) {
+      return {
+        ok: false,
+        status: 409,
+        body: { ok: false, error: 'no_paused_phase', message: 'Could not resume End Shift tanks — missing saved phases.' },
+      };
+    }
+    return {
+      ok: true,
+      body: {
+        ok: true,
+        action: 'resume',
+        winder_level: true,
+        tank_count: resumed.length,
+        tank_numbers: resumed,
+        sessions,
+        session: sessions[0] || null,
+        confirmation_line: `Resumed ${formatTankList(resumed)} from End Shift.`,
+        message: `Resumed ${formatTankList(resumed)} from End Shift.`,
+      },
+    };
   }
 
   /**
@@ -1496,16 +3053,23 @@ function createPhase1ProductionLogic(deps) {
       team,
       tankNumber: pausedTank.tank_number,
       phaseRaw: phase.barcode,
+      pieceNumber: Number(pausedTank.current_piece_number) || 1,
     });
     if (!start.ok) return start;
     return { ok: true, body: { ok: true, action: 'resume', resumed_phase: phase.label, session: start.body.session } };
   }
 
-  async function spawnContinuationSession(prevSessionRow, phase, ts) {
+  async function spawnContinuationSession(prevSessionRow, phase, ts, opts = {}) {
+    const pieceNum = opts.pieceNumber != null ? Number(opts.pieceNumber) : prevSessionRow.piece_number || 1;
+    let pieceId = opts.pieceId != null ? Number(opts.pieceId) : prevSessionRow.piece_id || null;
+    if (!pieceId) {
+      const pieceRow = await getTankPieceByNumber(prevSessionRow.tank_id, pieceNum);
+      pieceId = pieceRow ? pieceRow.id : null;
+    }
     const insertRes = await pool.query(
       `INSERT INTO machine_sessions
-         (machine_id, team_id, tank_id, activity_code, activity_name, status, started_at, created_at, updated_at)
-       VALUES ($1,$2,$3,$4,$5,'running',$6::timestamptz,$6::timestamptz,$6::timestamptz)
+         (machine_id, team_id, tank_id, activity_code, activity_name, status, started_at, created_at, updated_at, piece_number, piece_id, notes)
+       VALUES ($1,$2,$3,$4,$5,'running',$6::timestamptz,$6::timestamptz,$6::timestamptz,$7,$8,$9)
        RETURNING id`,
       [
         Number(prevSessionRow.machine_id),
@@ -1514,6 +3078,9 @@ function createPhase1ProductionLogic(deps) {
         phase.code,
         phase.label,
         ts,
+        pieceNum,
+        pieceId,
+        opts.notes || null,
       ]
     );
     const newId = insertRes.rows[0] ? Number(insertRes.rows[0].id) : null;
@@ -1631,6 +3198,8 @@ function createPhase1ProductionLogic(deps) {
       machine_name: displayMachineName(row.machine_name),
       phase_code: row.activity_code,
       phase_name: row.activity_name,
+      piece_number: row.piece_number != null ? Number(row.piece_number) : 1,
+      piece_id: row.piece_id != null ? Number(row.piece_id) : null,
       status: row.status,
       status_label: sessionStatusLabelFromRow(row),
       stop_reason: row.stop_reason || null,
@@ -1661,10 +3230,14 @@ function createPhase1ProductionLogic(deps) {
       const phase_time_summary = await fetchTankPhaseTimeSummary(tid);
       return {
         total_hours: 0,
+        total_machine_hours: 0,
         total_estimated_labor_cost: 0,
         phases: [],
         phase_time_summary,
         member_breakdown: [],
+        hours_per_phase: [],
+        hours_per_team: [],
+        hours_per_piece: [],
       };
     }
 
@@ -1693,6 +3266,12 @@ function createPhase1ProductionLogic(deps) {
         });
       }
       const endTs = sessionEndTimestamp(row);
+      let edits = [];
+      try {
+        edits = await getMembershipApi().listSessionEdits(Number(row.id));
+      } catch (_err) {
+        edits = [];
+      }
       const phaseGroup = phaseMap.get(phaseKey);
       phaseGroup.sessions.push({
         id: Number(row.id),
@@ -1700,6 +3279,8 @@ function createPhase1ProductionLogic(deps) {
         machine_name: displayMachineName(row.machine_name),
         phase_name: row.activity_name,
         phase_code: row.activity_code,
+        piece_number: row.piece_number != null ? Number(row.piece_number) : null,
+        piece_id: row.piece_id != null ? Number(row.piece_id) : null,
         started_at: row.started_at,
         finished_at: row.finished_at || null,
         ended_at: endTs,
@@ -1709,6 +3290,9 @@ function createPhase1ProductionLogic(deps) {
         duration_display: labor.duration_display,
         total_estimated_cost: labor.total_estimated_cost,
         members: labor.members,
+        is_edited: edits.length > 0,
+        latest_edit_reason: edits[0] ? edits[0].edit_reason : null,
+        edits,
       });
       phaseGroup.phase_total_hours = roundHours2(phaseGroup.phase_total_hours + labor.duration_hours);
       phaseGroup.phase_total_cost = roundMoney(phaseGroup.phase_total_cost + labor.total_estimated_cost);
@@ -1737,12 +3321,52 @@ function createPhase1ProductionLogic(deps) {
       String(a.employee_name || '').localeCompare(String(b.employee_name || ''))
     );
 
+    // Machine hours = sum of session wall-clock duration (not multiplied by headcount).
+    let totalMachineHours = 0;
+    const teamHoursMap = new Map();
+    const pieceHoursMap = new Map();
+    for (const row of sessionRows) {
+      const code = String(row.activity_code || '').trim().toUpperCase();
+      if (!isProductionPhaseCode(code)) continue;
+      const ms = sessionElapsedMs(row);
+      const hours = roundHours2(ms / 3600000);
+      totalMachineHours = roundHours2(totalMachineHours + hours);
+      const teamKey = row.team_name || '—';
+      teamHoursMap.set(teamKey, roundHours2((teamHoursMap.get(teamKey) || 0) + hours));
+      const pieceKey = Number(row.piece_number) || 1;
+      pieceHoursMap.set(pieceKey, roundHours2((pieceHoursMap.get(pieceKey) || 0) + hours));
+    }
+
+    let membershipLabor = null;
+    try {
+      membershipLabor = await getMembershipApi().computeMembershipAwareTankLabor(tid);
+    } catch (err) {
+      console.warn('[fetchTankProductionLabor] membership labor:', err.message);
+    }
+
     return {
-      total_hours: roundHours2(totalHours),
+      total_hours: membershipLabor ? membershipLabor.total_labor_hours : roundHours2(totalHours),
+      total_labor_hours: membershipLabor ? membershipLabor.total_labor_hours : roundHours2(totalHours),
+      total_labor_display: membershipLabor ? membershipLabor.total_labor_display : null,
+      total_machine_hours: membershipLabor ? membershipLabor.total_running_hours : totalMachineHours,
+      total_running_hours: membershipLabor ? membershipLabor.total_running_hours : totalMachineHours,
+      total_running_display: membershipLabor ? membershipLabor.total_running_display : null,
       total_estimated_labor_cost: roundMoney(totalEstimatedCost),
       phases,
       phase_time_summary,
-      member_breakdown,
+      member_breakdown: membershipLabor ? membershipLabor.member_breakdown : member_breakdown,
+      hours_per_phase: phases.map((p) => ({
+        phase_code: p.phase_code,
+        phase_name: p.phase_name,
+        hours: p.phase_total_hours,
+      })),
+      hours_per_team: [...teamHoursMap.entries()].map(([team_name, hours]) => ({ team_name, hours })),
+      hours_per_piece: membershipLabor
+        ? membershipLabor.hours_per_piece
+        : [...pieceHoursMap.entries()]
+            .sort((a, b) => a[0] - b[0])
+            .map(([piece_number, hours]) => ({ piece_number, hours })),
+      labor_source: membershipLabor ? 'membership_history' : 'session_snapshot',
     };
   }
 
@@ -1900,12 +3524,26 @@ function createPhase1ProductionLogic(deps) {
     getMachineByAreaName,
     getTeamByBarcode,
     getOpenSession,
+    getOpenSessionsForMachine,
+    setMachineActiveTank,
+    ensureTankPieces,
+    getTankPieces,
+    getTankPieceByNumber,
+    resolvePieceForTank,
+    tankHasProductionActivity,
+    maxPieceNumberWithActivity,
+    computePieceProgress,
+    fetchPieceReports,
+    fetchPhaseEditorPayload,
+    finishPiece,
+    finishTankArchive,
     getMachineAssignment,
     assignTeamToMachine,
     clearMachineAssignment,
     fetchTeamPausedWip,
     getPausedTankByNumber,
     resumePausedTank,
+    resumeAllEndShiftWipTanks,
     mapSession,
     fetchActiveWindingMachines,
     fetchManagedWindingMachines,
@@ -1917,10 +3555,16 @@ function createPhase1ProductionLogic(deps) {
     changePhase,
     finishSession,
     pauseSession,
+    pauseDowntimeSession,
     resumeSession,
+    resumeSelectedSession,
     endShiftSession,
     createAlert,
     resolveAlertById,
+    resolveQaQcForMachine,
+    findOpenQaQcAlert,
+    fetchTankQaQcHistory,
+    isQaQcStopReason,
     fetchProductionHistory,
     fetchTankActivity,
     fetchAlertHistory,
@@ -1936,6 +3580,15 @@ function createPhase1ProductionLogic(deps) {
     fetchTankProductionLabor,
     fetchSessionDetails,
     fetchTankPhaseTimeSummary,
+    transferEmployeeToTeam: (...args) => getMembershipApi().transferEmployeeToTeam(...args),
+    findOpenPieceSession: (...args) => getMembershipApi().findOpenPieceSession(...args),
+    computeMembershipAwareTankLabor: (...args) => getMembershipApi().computeMembershipAwareTankLabor(...args),
+    editMachineSessionTimes: (...args) => getMembershipApi().editMachineSessionTimes(...args),
+    listSessionEdits: (...args) => getMembershipApi().listSessionEdits(...args),
+    isDowntimeStopReason,
+    isQaQcStopReason,
+    isWinderResumableStopReason,
+    DOWNTIME_REASON_OPTIONS,
     computeSessionLaborForRow,
     emptyTankTeamCompletion: () => ({
       recorded: false,
@@ -1958,6 +3611,7 @@ module.exports = {
   WINDING_PHASES,
   ALERT_TYPES,
   PAUSE_REASONS,
+  DOWNTIME_REASON_OPTIONS,
   RESUME_BARCODES,
   TANK_TOTAL_RUNNING_PHASE_CODES,
   isTankTotalRunningPhaseCode,

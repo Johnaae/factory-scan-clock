@@ -186,6 +186,11 @@ CREATE TABLE IF NOT EXISTS alert_events (
   resolve_email_status TEXT,
   resolve_email_error TEXT,
   resolve_email_sent_at TIMESTAMPTZ,
+  piece_id BIGINT,
+  piece_number INTEGER,
+  phase_code TEXT,
+  phase_name TEXT,
+  resolution_note TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -222,7 +227,119 @@ ALTER TABLE alert_events ADD COLUMN IF NOT EXISTS email_sent_at TIMESTAMPTZ;
 ALTER TABLE alert_events ADD COLUMN IF NOT EXISTS resolve_email_status TEXT;
 ALTER TABLE alert_events ADD COLUMN IF NOT EXISTS resolve_email_error TEXT;
 ALTER TABLE alert_events ADD COLUMN IF NOT EXISTS resolve_email_sent_at TIMESTAMPTZ;
+ALTER TABLE alert_events ADD COLUMN IF NOT EXISTS piece_id BIGINT;
+ALTER TABLE alert_events ADD COLUMN IF NOT EXISTS piece_number INTEGER;
+ALTER TABLE alert_events ADD COLUMN IF NOT EXISTS phase_code TEXT;
+ALTER TABLE alert_events ADD COLUMN IF NOT EXISTS phase_name TEXT;
+ALTER TABLE alert_events ADD COLUMN IF NOT EXISTS resolution_note TEXT;
+ALTER TABLE tanks ADD COLUMN IF NOT EXISTS first_scanned_at TIMESTAMPTZ;
+ALTER TABLE tanks ADD COLUMN IF NOT EXISTS customer TEXT;
+ALTER TABLE tanks ADD COLUMN IF NOT EXISTS model TEXT;
+ALTER TABLE tanks ADD COLUMN IF NOT EXISTS priority TEXT;
+ALTER TABLE tanks ADD COLUMN IF NOT EXISTS due_date DATE;
+ALTER TABLE tanks ADD COLUMN IF NOT EXISTS notes TEXT;
+ALTER TABLE tanks ADD COLUMN IF NOT EXISTS piece_count INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE tanks ADD COLUMN IF NOT EXISTS current_piece_number INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE machines ADD COLUMN IF NOT EXISTS active_tank_id BIGINT;
+ALTER TABLE machine_sessions ADD COLUMN IF NOT EXISTS piece_number INTEGER;
+ALTER TABLE machine_sessions ADD COLUMN IF NOT EXISTS piece_id BIGINT;
+ALTER TABLE machine_sessions ADD COLUMN IF NOT EXISTS notes TEXT;
+ALTER TABLE part_complete_events ADD COLUMN IF NOT EXISTS piece_number INTEGER;
+ALTER TABLE part_complete_events ADD COLUMN IF NOT EXISTS piece_id BIGINT;
+ALTER TABLE machine_session_edits ADD COLUMN IF NOT EXISTS tank_id BIGINT;
+ALTER TABLE machine_session_edits ADD COLUMN IF NOT EXISTS piece_id BIGINT;
+ALTER TABLE machine_session_edits ADD COLUMN IF NOT EXISTS piece_number INTEGER;
+ALTER TABLE machine_session_edits ADD COLUMN IF NOT EXISTS phase_code TEXT;
+ALTER TABLE machine_session_edits ADD COLUMN IF NOT EXISTS phase_name TEXT;
+
+
+CREATE TABLE IF NOT EXISTS employee_team_memberships (
+  id BIGSERIAL PRIMARY KEY,
+  employee_id BIGINT NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+  team_id BIGINT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+  joined_at TIMESTAMPTZ NOT NULL,
+  left_at TIMESTAMPTZ,
+  source TEXT,
+  reason TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS machine_session_edits (
+  id BIGSERIAL PRIMARY KEY,
+  session_id BIGINT NOT NULL REFERENCES machine_sessions(id) ON DELETE CASCADE,
+  tank_id BIGINT,
+  piece_id BIGINT,
+  piece_number INTEGER,
+  phase_code TEXT,
+  phase_name TEXT,
+  original_started_at TIMESTAMPTZ,
+  original_ended_at TIMESTAMPTZ,
+  original_duration_ms BIGINT,
+  edited_started_at TIMESTAMPTZ,
+  edited_ended_at TIMESTAMPTZ,
+  edited_duration_ms BIGINT,
+  edited_by_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+  edited_by_name TEXT,
+  edited_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  edit_reason TEXT NOT NULL
+);
 `;
+
+/** Extended tables for pieces and production notes (created after parents). */
+const EXTENDED_TABLES_SQL = `
+CREATE TABLE IF NOT EXISTS tank_pieces (
+  id BIGSERIAL PRIMARY KEY,
+  tank_id BIGINT NOT NULL REFERENCES tanks(id) ON DELETE CASCADE,
+  piece_number INTEGER NOT NULL CHECK (piece_number >= 1 AND piece_number <= 4),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'completed')),
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  machine_id BIGINT REFERENCES machines(id) ON DELETE SET NULL,
+  team_id BIGINT REFERENCES teams(id) ON DELETE SET NULL,
+  operator_name TEXT,
+  notes TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (tank_id, piece_number)
+);
+
+CREATE TABLE IF NOT EXISTS production_notes (
+  id BIGSERIAL PRIMARY KEY,
+  note_type TEXT NOT NULL DEFAULT 'general'
+    CHECK (note_type IN ('general', 'problem', 'maintenance', 'quality', 'safety', 'correction')),
+  body TEXT NOT NULL,
+  tank_id BIGINT REFERENCES tanks(id) ON DELETE SET NULL,
+  tank_number TEXT,
+  piece_number INTEGER,
+  machine_id BIGINT REFERENCES machines(id) ON DELETE SET NULL,
+  team_id BIGINT REFERENCES teams(id) ON DELETE SET NULL,
+  team_name TEXT,
+  operator_name TEXT,
+  session_id BIGINT REFERENCES machine_sessions(id) ON DELETE SET NULL,
+  phase_code TEXT,
+  phase_name TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS downtime_intervals (
+  id BIGSERIAL PRIMARY KEY,
+  machine_id BIGINT REFERENCES machines(id) ON DELETE SET NULL,
+  tank_id BIGINT NOT NULL REFERENCES tanks(id) ON DELETE CASCADE,
+  tank_number TEXT,
+  session_id BIGINT REFERENCES machine_sessions(id) ON DELETE SET NULL,
+  team_id BIGINT REFERENCES teams(id) ON DELETE SET NULL,
+  team_name TEXT,
+  phase_code TEXT,
+  phase_name TEXT,
+  piece_number INTEGER,
+  reason_code TEXT,
+  reason_note TEXT,
+  started_at TIMESTAMPTZ NOT NULL,
+  ended_at TIMESTAMPTZ,
+  duration_ms BIGINT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+`
 
 /** Stage 4 — indexes. */
 const INDEXES_SQL = `
@@ -253,6 +370,16 @@ CREATE INDEX IF NOT EXISTS idx_alert_events_status ON alert_events(status);
 CREATE INDEX IF NOT EXISTS idx_alert_events_machine_id ON alert_events(machine_id);
 CREATE INDEX IF NOT EXISTS idx_alert_events_reported_at ON alert_events(reported_at DESC);
 CREATE INDEX IF NOT EXISTS idx_alert_email_recipients_type ON alert_email_recipients(alert_type);
+CREATE INDEX IF NOT EXISTS idx_tank_pieces_tank ON tank_pieces(tank_id);
+CREATE INDEX IF NOT EXISTS idx_production_notes_created ON production_notes(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_production_notes_tank ON production_notes(tank_id);
+CREATE INDEX IF NOT EXISTS idx_machine_sessions_tank_id ON machine_sessions(tank_id);
+CREATE INDEX IF NOT EXISTS idx_machine_sessions_piece_id ON machine_sessions(piece_id);
+CREATE INDEX IF NOT EXISTS idx_machine_sessions_tank_piece_phase ON machine_sessions(tank_id, piece_number, activity_code);
+CREATE INDEX IF NOT EXISTS idx_employee_team_memberships_emp ON employee_team_memberships(employee_id, joined_at DESC);
+CREATE INDEX IF NOT EXISTS idx_employee_team_memberships_team ON employee_team_memberships(team_id, joined_at DESC);
+CREATE INDEX IF NOT EXISTS idx_employee_team_memberships_open ON employee_team_memberships(employee_id) WHERE left_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_machine_session_edits_session ON machine_session_edits(session_id, edited_at DESC);
 `;
 
 const REQUIRED_TABLES = [
@@ -269,6 +396,8 @@ const REQUIRED_TABLES = [
   'part_complete_events',
   'alert_events',
   'alert_email_recipients',
+  'tank_pieces',
+  'production_notes',
 ];
 
 async function ensureForeignKey(client, tableName, columnName, refTable, refColumn, onDelete) {
@@ -403,6 +532,27 @@ async function runOptionalBackfills(client, log = console) {
   } catch (err) {
     log.warn('[migration] part_complete_events backfill (noncritical):', err.message);
   }
+
+  try {
+    await client.query(`
+      UPDATE machine_sessions ms
+      SET piece_id = tp.id
+      FROM tank_pieces tp
+      WHERE ms.piece_id IS NULL
+        AND ms.tank_id = tp.tank_id
+        AND ms.piece_number = tp.piece_number
+    `);
+    await client.query(`
+      UPDATE part_complete_events pce
+      SET piece_id = tp.id
+      FROM tank_pieces tp
+      WHERE pce.piece_id IS NULL
+        AND pce.tank_id = tp.tank_id
+        AND pce.piece_number = tp.piece_number
+    `);
+  } catch (err) {
+    log.warn('[migration] piece_id backfill (noncritical):', err.message);
+  }
 }
 
 async function allRequiredTablesExist(client) {
@@ -420,16 +570,69 @@ async function runSchemaMigration(client, options = {}) {
   const skipBackfills = Boolean(options.skipBackfills);
   const forceFull = Boolean(options.forceFull);
 
-  if (!forceFull && (await allRequiredTablesExist(client))) {
-    // Light additive column pass only (idempotent, no advisory lock).
-    try {
-      await client.query(ADD_COLUMNS_SQL);
-    } catch (err) {
-      log.warn('[migration] additive columns (noncritical):', err.message);
+    if (!forceFull && (await allRequiredTablesExist(client))) {
+      // Light additive column + extended table pass only (idempotent).
+      try {
+        await client.query(ADD_COLUMNS_SQL);
+        await client.query(EXTENDED_TABLES_SQL);
+        await client.query(`
+          CREATE INDEX IF NOT EXISTS idx_tank_pieces_tank ON tank_pieces(tank_id);
+          CREATE INDEX IF NOT EXISTS idx_production_notes_created ON production_notes(created_at DESC);
+          CREATE INDEX IF NOT EXISTS idx_production_notes_tank ON production_notes(tank_id);
+          CREATE INDEX IF NOT EXISTS idx_machine_sessions_tank_id ON machine_sessions(tank_id);
+          CREATE INDEX IF NOT EXISTS idx_machine_sessions_piece_id ON machine_sessions(piece_id);
+          CREATE INDEX IF NOT EXISTS idx_machine_sessions_tank_piece_phase ON machine_sessions(tank_id, piece_number, activity_code);
+          CREATE INDEX IF NOT EXISTS idx_downtime_intervals_tank ON downtime_intervals(tank_id);
+          CREATE INDEX IF NOT EXISTS idx_downtime_intervals_started ON downtime_intervals(started_at DESC);
+        `);
+        await client.query(`
+          UPDATE machine_sessions ms
+          SET piece_id = tp.id
+          FROM tank_pieces tp
+          WHERE ms.piece_id IS NULL
+            AND ms.tank_id = tp.tank_id
+            AND ms.piece_number = tp.piece_number
+        `);
+        // Waiting backfill: tanks never scanned stay waiting (only when status still active and no sessions).
+        await client.query(`
+          UPDATE tanks t
+          SET status = 'waiting'
+          WHERE LOWER(TRIM(COALESCE(t.status,''))) = 'active'
+            AND t.first_scanned_at IS NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM machine_sessions ms WHERE ms.tank_id = t.id
+            )
+        `);
+        await client.query(`
+          UPDATE tanks t
+          SET first_scanned_at = sub.first_at
+          FROM (
+            SELECT tank_id, MIN(started_at) AS first_at
+            FROM machine_sessions
+            GROUP BY tank_id
+          ) sub
+          WHERE t.id = sub.tank_id AND t.first_scanned_at IS NULL
+        `);
+      } catch (err) {
+        log.warn('[migration] additive columns (noncritical):', err.message);
+      }
+              try {
+          await client.query(`
+            INSERT INTO employee_team_memberships (employee_id, team_id, joined_at, left_at, source, reason)
+            SELECT tm.employee_id, tm.team_id, COALESCE(tm.created_at, NOW()), NULL, 'migrate', 'Backfill from team_members'
+            FROM team_members tm
+            WHERE tm.active = 1 AND tm.employee_id IS NOT NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM employee_team_memberships m
+                WHERE m.employee_id = tm.employee_id AND m.left_at IS NULL
+              )
+          `);
+        } catch (err) {
+          log.warn('[migration] employee_team_memberships backfill (noncritical):', err.message);
+        }
+        log.log('[migration] schema already present — skipped full migrate');
+      return { skipped: true };
     }
-    log.log('[migration] schema already present — skipped full migrate');
-    return { skipped: true };
-  }
 
   log.log('[migration] acquiring schema lock');
   await client.query(`SELECT set_config('lock_timeout', '8000', true)`);
@@ -467,6 +670,9 @@ async function runSchemaMigration(client, options = {}) {
 
       log.log('[migration] adding columns');
       await client.query(ADD_COLUMNS_SQL);
+
+      log.log('[migration] creating extended tables');
+      await client.query(EXTENDED_TABLES_SQL);
 
       log.log('[migration] creating indexes');
       await client.query(INDEXES_SQL);
@@ -511,6 +717,7 @@ module.exports = {
   REQUIRED_TABLES,
   BASE_TABLES_SQL,
   JUNCTION_TABLES_SQL,
+  EXTENDED_TABLES_SQL,
   ADD_COLUMNS_SQL,
   INDEXES_SQL,
   runSchemaMigration,

@@ -10,6 +10,10 @@ const pg = require('pg');
 const PgSession = require('connect-pg-simple')(session);
 const PDFDocument = require('pdfkit');
 const {
+  buildTankDailySummaryPdfBuffer,
+  buildTankReportPdfBuffer,
+} = require('./scripts/production-report-pdf');
+const {
   createPoolOptions,
   logDatabaseBootInfo,
   withDbRetry,
@@ -31,6 +35,7 @@ const {
   WINDING_PHASES,
   ALERT_TYPES,
   PAUSE_REASONS,
+  DOWNTIME_REASON_OPTIONS,
   RESUME_BARCODES,
   WINDING_MACHINES,
   WINDING_MACHINE_AREA_NAMES,
@@ -710,8 +715,11 @@ async function resumeFromStop({ employee, code, auth, activity: activityOverride
       },
     };
   }
-  const tankRow = await ensureTankExists(tank);
-  if (tankRow && normalizeTankStatus(tankRow.status) === 'archived') {
+  const tankRow = await validateTankExists(tank);
+  if (!tankRow) {
+    return { ok: false, status: 404, body: tankNotFoundBody() };
+  }
+  if (normalizeTankStatus(tankRow.status) === 'archived') {
     return {
       ok: false,
       status: 403,
@@ -1041,8 +1049,11 @@ async function getEmployeeKioskWorkState(code) {
  * Start a production job while employee remains clocked IN (after FINISH / waiting).
  */
 async function performAssignWorkWhileClockedIn({ employee, code, auth, activity, tank }) {
-  const tankRow = await ensureTankExists(tank);
-  if (tankRow && normalizeTankStatus(tankRow.status) === 'archived') {
+  const tankRow = await validateTankExists(tank);
+  if (!tankRow) {
+    return { ok: false, status: 404, body: tankNotFoundBody() };
+  }
+  if (normalizeTankStatus(tankRow.status) === 'archived') {
     return {
       ok: false,
       status: 403,
@@ -1117,7 +1128,7 @@ async function recordFinishJobEvent({ employee, activeIn, outRow, inRow, auth, s
   const activityCode = areaName ? resolveActivityCodeForArea(areaName, activityName) : normalizeActivityCode(activityName);
   let tankId = null;
   if (tankNumber) {
-    const tankRow = await ensureTankExists(tankNumber);
+    const tankRow = await validateTankExists(tankNumber);
     if (tankRow && tankRow.id != null) tankId = Number(tankRow.id);
   }
   const kioskUser = auth && auth.role === ROLE.KIOSK ? auth.username || null : null;
@@ -1637,8 +1648,11 @@ async function performKioskWorkAction(req, res) {
     if (!tankRaw) {
       return res.status(400).json({ ok: false, error: 'validation', message: 'Tank is required to clock in.' });
     }
-    const tankRow = await ensureTankExists(tankRaw);
-    if (tankRow && normalizeTankStatus(tankRow.status) === 'archived') {
+    const tankRow = await validateTankExists(tankRaw);
+    if (!tankRow) {
+      return res.status(404).json(tankNotFoundBody());
+    }
+    if (normalizeTankStatus(tankRow.status) === 'archived') {
       return res.status(403).json({
         ok: false,
         error: 'tank_archived',
@@ -1885,8 +1899,11 @@ async function performKioskWorkAction(req, res) {
       endedBy = 'SWITCH_ACTIVITY';
     } else if (effectiveAction === 'switch_tank') {
       if (!tankRaw) return res.status(400).json({ ok: false, error: 'validation', message: 'Tank is required.' });
-      const tankRow = await ensureTankExists(tankRaw);
-      if (tankRow && normalizeTankStatus(tankRow.status) === 'archived') {
+      const tankRow = await validateTankExists(tankRaw);
+      if (!tankRow) {
+        return res.status(404).json(tankNotFoundBody());
+      }
+      if (normalizeTankStatus(tankRow.status) === 'archived') {
         return res.status(403).json({
           ok: false,
           error: 'tank_archived',
@@ -1911,8 +1928,11 @@ async function performKioskWorkAction(req, res) {
       const actCheck = validateKioskActivityForAuth(auth, activityRaw);
       if (!actCheck.ok) return res.status(400).json({ ok: false, error: 'validation', message: actCheck.message });
       if (!tankRaw) return res.status(400).json({ ok: false, error: 'validation', message: 'Tank is required.' });
-      const tankRow = await ensureTankExists(tankRaw);
-      if (tankRow && normalizeTankStatus(tankRow.status) === 'archived') {
+      const tankRow = await validateTankExists(tankRaw);
+      if (!tankRow) {
+        return res.status(404).json(tankNotFoundBody());
+      }
+      if (normalizeTankStatus(tankRow.status) === 'archived') {
         return res.status(403).json({
           ok: false,
           error: 'tank_archived',
@@ -1946,17 +1966,19 @@ function normalizeTankNumber(raw) {
   return s.slice(0, 24);
 }
 
-/** Registry status: always lowercase `active` | `archived`. */
+/** Registry status: always lowercase `waiting` | `active` | `paused` | `archived`. */
 function normalizeTankStatus(raw) {
-  const s = String(raw == null || raw === '' ? 'active' : raw)
+  const s = String(raw == null || raw === '' ? 'waiting' : raw)
     .trim()
     .toLowerCase();
   if (s === 'archived' || s === 'completed') return 'archived';
   if (s === 'paused') return 'paused';
+  if (s === 'waiting' || s === 'pending') return 'waiting';
   return 'active';
 }
 
-const TANK_SELECT_COLUMNS = 'id, tank_number, description, status, created_at, completed_at, updated_at';
+const TANK_SELECT_COLUMNS =
+  'id, tank_number, description, status, created_at, completed_at, updated_at, first_scanned_at, customer, model, priority, due_date, notes, piece_count, current_piece_number';
 
 function tankTimestampToIso(value) {
   if (value == null || value === '') return null;
@@ -1966,17 +1988,19 @@ function tankTimestampToIso(value) {
 }
 
 function computeTankDurationMs(row) {
-  const createdIso = tankTimestampToIso(row && row.created_at);
-  if (!createdIso) return 0;
-  const created = new Date(createdIso);
   const status = normalizeTankStatus(row && row.status);
+  if (status === 'waiting') return 0;
+  // Duration starts only after first production scan (Tank Created ≠ Tank Started).
+  const startIso = tankTimestampToIso(row && row.first_scanned_at);
+  if (!startIso) return 0;
+  const start = new Date(startIso);
   let end = new Date();
   if (status === 'archived') {
     const completedIso = tankTimestampToIso(row.completed_at);
     end = completedIso ? new Date(completedIso) : new Date();
     if (Number.isNaN(end.getTime())) end = new Date();
   }
-  return Math.max(0, end.getTime() - created.getTime());
+  return Math.max(0, end.getTime() - start.getTime());
 }
 
 function formatTankDurationDisplay(durationMs) {
@@ -1997,14 +2021,24 @@ function mapTankRowForApi(row) {
   if (!row) return row;
   const status = normalizeTankStatus(row.status);
   const created_at = tankTimestampToIso(row.created_at) || nowIso();
+  const first_scanned_at = tankTimestampToIso(row.first_scanned_at);
   const completed_at = status === 'archived' ? tankTimestampToIso(row.completed_at) : null;
-  const duration_ms = computeTankDurationMs({ ...row, created_at, completed_at, status });
+  const duration_ms = computeTankDurationMs({ ...row, created_at, completed_at, status, first_scanned_at });
   return {
     id: Number(row.id),
     tank_number: row.tank_number,
-    description: row.description,
+    description: row.description || '',
+    customer: row.customer || '',
+    model: row.model || '',
+    priority: row.priority || '',
+    due_date: row.due_date || null,
+    notes: row.notes || '',
+    piece_count: Math.min(4, Math.max(1, Number(row.piece_count) || 1)),
+    current_piece_number: Math.min(4, Math.max(1, Number(row.current_piece_number) || 1)),
     status,
     created_at,
+    first_scanned_at,
+    started_at: first_scanned_at,
     completed_at,
     updated_at: tankTimestampToIso(row.updated_at),
     duration_ms,
@@ -2764,22 +2798,17 @@ async function getTankByNumber(tankNumber) {
   return rows[0] || null;
 }
 
-async function ensureTankExists(rawTankNumber) {
+/** Production must never auto-create tanks. Manager Add Tank is the only create path. */
+const TANK_NOT_FOUND_MESSAGE = 'Tank not found. Please contact your supervisor.';
+
+async function validateTankExists(rawTankNumber) {
   const tankNumber = normalizeTankNumber(rawTankNumber);
   if (!tankNumber) return null;
-  let existing = await getTankByNumber(tankNumber);
-  if (existing) return existing;
-  const ts = nowIso();
-  try {
-    await pool.query(
-      `INSERT INTO tanks (tank_number, description, status, created_at, updated_at)
-       VALUES ($1, '', 'active', $2::timestamptz, $3::timestamptz)`,
-      [tankNumber, ts, ts]
-    );
-  } catch {
-    /* race-safe */
-  }
   return getTankByNumber(tankNumber);
+}
+
+function tankNotFoundBody() {
+  return { ok: false, error: 'tank_not_found', message: TANK_NOT_FOUND_MESSAGE };
 }
 
 function hoursRoundMode() {
@@ -4395,7 +4424,8 @@ const phase1 = createPhase1ProductionLogic({
   pool,
   nowIso,
   normalizeTankNumber,
-  ensureTankExists,
+  validateTankExists,
+  tankNotFoundMessage: TANK_NOT_FOUND_MESSAGE,
   normalizeTankStatus,
   startEndOfLocalDay,
   localDateString,
@@ -4462,31 +4492,64 @@ const NEED_TEAM_MESSAGE = 'Please scan a Team barcode first.';
 async function handleWindingScanAction(machine, body) {
   const barcode = body.barcode;
   const pendingIn = body.pending || {};
-  let pending = { tank: pendingIn.tank || null };
+  let pending = {
+    tank: pendingIn.tank || null,
+    piece: pendingIn.piece != null ? Number(pendingIn.piece) : null,
+  };
+  if (pending.piece != null && (!Number.isInteger(pending.piece) || pending.piece < 1 || pending.piece > 4)) {
+    pending.piece = null;
+  }
   const parsed = phase1.parseScan(barcode);
   const session = await phase1.getOpenSession(machine.id);
   const assignment = await phase1.getMachineAssignment(machine.id);
 
-  // Global session actions (do not require re-scanning team).
+  // Global Winder/team actions (apply to ALL open tanks — not just selected).
   if (parsed.type === 'pause') {
-    const result = await phase1.pauseSession(machine, parsed.value);
+    const result = await phase1.pauseSession(machine, parsed.value, {});
+    if (!result.ok) return result;
+    return { ok: true, status: 200, body: { ok: true, ...result.body, assignment } };
+  }
+
+  // Tank-specific Downtime (selected tank only).
+  if (parsed.type === 'downtime') {
+    const result = await phase1.pauseDowntimeSession(machine, {
+      tank_number: pending.tank || (session && session.tank_number) || null,
+      tank_id: body.tank_id != null ? Number(body.tank_id) : session ? Number(session.tank_id) : null,
+      reason_code: body.reason_code || body.downtime_reason || null,
+      reason_note: body.reason_note || body.downtime_note || null,
+    });
     if (!result.ok) return result;
     return { ok: true, status: 200, body: { ok: true, ...result.body, assignment } };
   }
 
   if (parsed.type === 'end_shift') {
-    const result = await phase1.endShiftSession(machine);
+    const result = await phase1.endShiftSession(machine, {});
     if (!result.ok) return result;
     return { ok: true, status: 200, body: { ok: true, ...result.body } };
   }
 
   if (parsed.type === 'alert') {
-    const result = await phase1.createAlert(machine, barcode, session);
+    const result = await phase1.createAlert(machine, barcode, session, {
+      notes: body.notes || body.issue_note || null,
+    });
     if (!result.ok) return result;
     if (result.body && result.body.alert && result.body.alert.id) {
       alertEmail.queueNewAlertEmail(result.body.alert.id);
     }
-    return { ok: true, status: 200, body: { ok: true, action: 'alert', alert: result.body.alert, assignment } };
+    return { ok: true, status: 200, body: { ok: true, ...result.body, assignment } };
+  }
+
+  if (parsed.type === 'qa_qc_resolve') {
+    const result = await phase1.resolveQaQcForMachine(machine, {
+      session,
+      resolution_note: body.resolution_note || body.notes || null,
+      resolved_by: body.resolved_by || 'kiosk',
+    });
+    if (!result.ok) return result;
+    if (result.body && result.body.alert && result.body.alert.id) {
+      alertEmail.queueResolveAlertEmail(result.body.alert.id);
+    }
+    return { ok: true, status: 200, body: { ok: true, ...result.body, assignment } };
   }
 
   // Team scan: assign the team to this machine for the day.
@@ -4503,21 +4566,79 @@ async function handleWindingScanAction(machine, body) {
     };
   }
 
-  // Resume: continue a break/lunch pause, OR (Option 1) resume a paused tank's phase.
+  // Resume: selected Downtime tank only, OR all Break/Lunch on Winder, OR all End Shift WIP.
+  // QA/QC uses Resolve QA/QC (not normal Resume).
   if (parsed.type === 'resume') {
-    if (session && session.status === 'stopped') {
-      const result = await phase1.resumeSession(machine);
+    const openRows = await phase1.getOpenSessionsForMachine(machine.id);
+    const selected =
+      (pending.tank
+        ? openRows.find(
+            (r) => String(r.tank_number || '').toUpperCase() === String(pending.tank).toUpperCase()
+          )
+        : null) ||
+      (await phase1.getOpenSession(machine.id));
+
+    if (
+      selected &&
+      selected.status === 'stopped' &&
+      phase1.isQaQcStopReason(selected.stop_reason)
+    ) {
+      return {
+        ok: false,
+        status: 409,
+        body: {
+          ok: false,
+          error: 'use_resolve_qa_qc',
+          message: 'This piece is on QA/QC. Scan QA_QC_RESOLVE or tap Resolve QA/QC.',
+        },
+      };
+    }
+
+    if (
+      selected &&
+      selected.status === 'stopped' &&
+      phase1.isDowntimeStopReason(selected.stop_reason)
+    ) {
+      const result = await phase1.resumeSelectedSession(machine, {
+        tank_id: Number(selected.tank_id),
+      });
+      if (!result.ok) return result;
+      return { ok: true, status: 200, body: { ok: true, ...result.body, assignment } };
+    }
+
+    const pausedOpen = openRows.filter(
+      (s) => s.status === 'stopped' && phase1.isWinderResumableStopReason(s.stop_reason)
+    );
+    if (pausedOpen.length) {
+      const result = await phase1.resumeSession(machine, {});
       if (!result.ok) return result;
       return { ok: true, status: 200, body: { ok: true, ...result.body, assignment } };
     }
     if (!assignment) {
       return { ok: false, status: 409, body: { ok: false, error: 'need_team', message: NEED_TEAM_MESSAGE } };
     }
+    // After End Shift: resume all WIP tanks on this Winder together.
+    if (body.resume_all_wip === true || !pending.tank) {
+      const allWip = await phase1.resumeAllEndShiftWipTanks(
+        machine,
+        {
+          id: assignment.team_id,
+          name: assignment.team_name,
+          barcode: assignment.team_barcode,
+          active: 1,
+        },
+        {}
+      );
+      if (allWip.ok) {
+        return { ok: true, status: 200, body: { ok: true, ...allWip.body, assignment, pending: { tank: null } } };
+      }
+      if (!pending.tank) return allWip;
+    }
     if (!pending.tank) {
       return {
         ok: false,
         status: 409,
-        body: { ok: false, error: 'need_tank', message: 'Scan the tank to resume its paused phase.' },
+        body: { ok: false, error: 'need_tank', message: 'Scan the tank to resume its End Shift paused phase.' },
       };
     }
     const result = await phase1.resumePausedTank(machine, pending.tank, {
@@ -4537,6 +4658,48 @@ async function handleWindingScanAction(machine, body) {
 
   if (parsed.type === 'tank') {
     pending.tank = parsed.value;
+    pending.piece = null;
+    const tankRow = await validateTankExists(pending.tank);
+    if (!tankRow) {
+      return { ok: false, status: 404, body: tankNotFoundBody() };
+    }
+    if (normalizeTankStatus(tankRow.status) === 'archived') {
+      return {
+        ok: false,
+        status: 403,
+        body: {
+          ok: false,
+          error: 'tank_archived',
+          message: 'This tank is completed. Restore it in Tank Management before use.',
+        },
+      };
+    }
+    const pieceCount = Math.min(4, Math.max(1, Number(tankRow.piece_count) || 1));
+    await phase1.ensureTankPieces(tankRow.id, pieceCount);
+    const pieces = await phase1.getTankPieces(tankRow.id);
+    const configuredPieces = pieces.filter((p) => Number(p.piece_number) <= pieceCount);
+    // Multi-tank: if this tank already has an open session on this machine, switch to it.
+    const openRows = await phase1.getOpenSessionsForMachine(machine.id);
+    const match = openRows.find(
+      (r) => String(r.tank_number || '').toUpperCase() === String(pending.tank).toUpperCase()
+    );
+    if (match) {
+      await phase1.setMachineActiveTank(machine.id, match.tank_id);
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          ok: true,
+          action: 'switch_tank',
+          session: await phase1.mapSession(match),
+          assignment,
+          pieces: configuredPieces,
+          piece_count: pieceCount,
+          pending: { tank: null, piece: null },
+        },
+      };
+    }
+    if (pieceCount === 1) pending.piece = 1;
     const pausedTank = await phase1.getPausedTankByNumber(pending.tank);
     const resumablePhase =
       pausedTank && pausedTank.wip_phase_name ? pausedTank.wip_phase_name : null;
@@ -4548,7 +4711,130 @@ async function handleWindingScanAction(machine, body) {
         action: 'tank_selected',
         assignment,
         pending,
+        pieces: configuredPieces,
+        piece_count: pieceCount,
+        open_sessions: await Promise.all(openRows.map((r) => phase1.mapSession(r))),
         resumable_phase: resumablePhase,
+        message:
+          pieceCount === 1
+            ? 'Piece 1 selected. Scan a phase to begin.'
+            : `Select Piece 1–${pieceCount} for this tank.`,
+      },
+    };
+  }
+
+  if (parsed.type === 'piece') {
+    const pieceNum = Number(parsed.value);
+    // Mid-session piece switch only when the pending tank is this open session's tank.
+    // If another tank is pending (multi-tank add), select piece for that tank instead.
+    const pendingTankNorm = pending.tank ? String(pending.tank).toUpperCase() : null;
+    const sessionTankNorm = session && session.tank_number ? String(session.tank_number).toUpperCase() : null;
+    const pieceTargetsOpenSession =
+      Boolean(session) && (!pendingTankNorm || pendingTankNorm === sessionTankNorm);
+    if (pieceTargetsOpenSession) {
+      const resolved = await phase1.resolvePieceForTank(session.tank_id, pieceNum);
+      if (!resolved.ok) return resolved;
+      if (String(resolved.piece.status) === 'completed') {
+        return {
+          ok: false,
+          status: 409,
+          body: {
+            ok: false,
+            error: 'piece_completed',
+            message: `Piece ${pieceNum} is already completed. Select another piece.`,
+            pieces: resolved.pieces,
+          },
+        };
+      }
+      const conflict = await phase1.findOpenPieceSession(session.tank_id, pieceNum, machine.id);
+      if (conflict) {
+        return {
+          ok: false,
+          status: 409,
+          body: {
+            ok: false,
+            error: 'piece_in_use',
+            message: `Piece ${pieceNum} is currently being worked on by ${conflict.team_name || 'another team'} / ${conflict.machine_name || 'another winder'}.`,
+            conflicting_team: conflict.team_name,
+            conflicting_machine: conflict.machine_name,
+          },
+        };
+      }
+      await pool.query(`UPDATE tanks SET current_piece_number = $1, updated_at = NOW() WHERE id = $2`, [
+        pieceNum,
+        session.tank_id,
+      ]);
+      await pool.query(
+        `UPDATE machine_sessions SET piece_number = $1, piece_id = $2, updated_at = NOW() WHERE id = $3`,
+        [pieceNum, resolved.piece.id, session.id]
+      );
+      await pool.query(
+        `UPDATE tank_pieces
+         SET status = CASE WHEN status = 'completed' THEN status ELSE 'in_progress' END,
+             started_at = COALESCE(started_at, NOW()),
+             updated_at = NOW()
+         WHERE id = $1`,
+        [resolved.piece.id]
+      );
+      const refreshed = await phase1.getOpenSession(machine.id, session.tank_id);
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          ok: true,
+          action: 'piece_selected',
+          piece_number: pieceNum,
+          piece_id: resolved.piece.id,
+          session: refreshed ? await phase1.mapSession(refreshed) : null,
+          pieces: resolved.pieces.filter((p) => Number(p.piece_number) <= resolved.piece_count),
+          piece_count: resolved.piece_count,
+          assignment,
+          pending: { tank: null, piece: pieceNum },
+        },
+      };
+    }
+    // Pre-session: require tank first, then store selected piece.
+    if (!pending.tank) {
+      return {
+        ok: false,
+        status: 409,
+        body: { ok: false, error: 'need_tank', message: 'Scan a tank before selecting a piece.' },
+      };
+    }
+    const tankRow = await validateTankExists(pending.tank);
+    if (!tankRow) return { ok: false, status: 404, body: tankNotFoundBody() };
+    const resolved = await phase1.resolvePieceForTank(tankRow.id, pieceNum);
+    if (!resolved.ok) return resolved;
+    if (String(resolved.piece.status) === 'completed') {
+      return {
+        ok: false,
+        status: 409,
+        body: {
+          ok: false,
+          error: 'piece_completed',
+          message: `Piece ${pieceNum} is already completed. Select another piece.`,
+          pieces: resolved.pieces,
+        },
+      };
+    }
+    pending.piece = pieceNum;
+    await pool.query(`UPDATE tanks SET current_piece_number = $1, updated_at = NOW() WHERE id = $2`, [
+      pieceNum,
+      tankRow.id,
+    ]);
+    return {
+      ok: true,
+      status: 200,
+      body: {
+        ok: true,
+        action: 'piece_selected',
+        piece_number: pieceNum,
+        piece_id: resolved.piece.id,
+        pieces: resolved.pieces.filter((p) => Number(p.piece_number) <= resolved.piece_count),
+        piece_count: resolved.piece_count,
+        assignment,
+        pending,
+        message: `Piece ${pieceNum} selected. Scan a phase to begin.`,
       },
     };
   }
@@ -4558,26 +4844,126 @@ async function handleWindingScanAction(machine, body) {
     if (!ph) {
       return { ok: false, status: 400, body: { ok: false, error: 'validation', message: 'Unknown phase barcode.' } };
     }
-    // Part Complete finishes the tank.
-    if (ph.completes) {
+    // Piece Complete / Tank Complete / Part Complete
+    if (ph.piece_complete || ph.completes) {
       if (!session) {
+        // Tank Complete after all pieces are done (no open session).
+        if (ph.code === 'TANK_COMPLETE' || ph.code === 'PART_COMPLETE') {
+          const tankId =
+            machine.active_tank_id != null
+              ? Number(machine.active_tank_id)
+              : pending.tank
+                ? null
+                : null;
+          let tankRow = null;
+          if (tankId) {
+            const r = await pool.query(`SELECT * FROM tanks WHERE id = $1`, [tankId]);
+            tankRow = r.rows[0] || null;
+          } else if (pending.tank) {
+            tankRow = await validateTankExists(pending.tank);
+          }
+          if (!tankRow) {
+            return {
+              ok: false,
+              status: 409,
+              body: {
+                ok: false,
+                error: 'no_session',
+                message: 'No active session. Scan the tank first, then Tank Complete.',
+              },
+            };
+          }
+          const pieces = await phase1.getTankPieces(tankRow.id);
+          const pieceCount = Math.min(4, Math.max(1, Number(tankRow.piece_count) || 1));
+          const progress = phase1.computePieceProgress(pieces, pieceCount);
+          if (!progress.all_pieces_complete) {
+            return {
+              ok: false,
+              status: 409,
+              body: {
+                ok: false,
+                error: 'pieces_incomplete',
+                message:
+                  'Complete all pieces before Tank Complete. Still needed: Piece ' +
+                  progress.incomplete_pieces.join(', Piece ') +
+                  '.',
+                incomplete_pieces: progress.incomplete_pieces,
+                pieces,
+              },
+            };
+          }
+          const confirmer = confirmerFromBody(body);
+          const ts = nowIso();
+          const fakeSession = {
+            id: null,
+            tank_id: tankRow.id,
+            tank_number: tankRow.tank_number,
+            team_id: assignment ? assignment.team_id : null,
+            team_name: assignment ? assignment.team_name : null,
+            piece_number: tankRow.current_piece_number || pieceCount,
+          };
+          const archived = await phase1.finishTankArchive(machine, fakeSession, {
+            confirmedByEmployeeId: confirmer ? confirmer.id : null,
+            confirmedByEmployeeName: confirmer ? confirmer.name : null,
+          }, ts);
+          return { ok: true, status: 200, body: { ok: true, ...archived.body, assignment } };
+        }
         return {
           ok: false,
           status: 409,
-          body: { ok: false, error: 'no_session', message: 'Start a phase before Part Complete.' },
+          body: { ok: false, error: 'no_session', message: 'Start a phase before completing piece/tank.' },
         };
       }
       const confirmer = confirmerFromBody(body);
-      const fin = await phase1.finishSession(machine, {
+      const fin = await phase1.changePhase(machine, ph.barcode, {
+        notes: body.notes || body.correction_note || null,
         confirmedByEmployeeId: confirmer ? confirmer.id : null,
         confirmedByEmployeeName: confirmer ? confirmer.name : null,
+        forceTankComplete: ph.code === 'TANK_COMPLETE' || ph.code === 'PART_COMPLETE',
       });
       if (!fin.ok) return fin;
       return { ok: true, status: 200, body: { ok: true, ...fin.body, assignment } };
     }
-    // Option 2 / phase change: an open session exists -> switch phase automatically.
+    // Option 2 / phase change: an open session exists -> switch phase automatically
+    // UNLESS a different tank is pending (multi-tank: start/resume that tank instead).
     if (session) {
-      const ch = await phase1.changePhase(machine, ph.barcode);
+      const pendingTankNorm = pending.tank ? String(pending.tank).toUpperCase() : null;
+      const sessionTankNorm = session.tank_number ? String(session.tank_number).toUpperCase() : null;
+      if (pendingTankNorm && pendingTankNorm !== sessionTankNorm) {
+        const pieceForStart =
+          body.piece_number != null ? Number(body.piece_number) : pending.piece != null ? Number(pending.piece) : null;
+        if (pieceForStart == null) {
+          return {
+            ok: false,
+            status: 409,
+            body: {
+              ok: false,
+              error: 'need_piece',
+              message: 'Select a piece for the new tank before scanning a phase.',
+              pending,
+            },
+          };
+        }
+        const startOther = await phase1.startSession(machine, {
+          team: { id: assignment.team_id, name: assignment.team_name, barcode: assignment.team_barcode, active: 1 },
+          tankNumber: pending.tank,
+          phaseRaw: ph.barcode,
+          pieceNumber: pieceForStart,
+          notes: body.notes || null,
+        });
+        if (!startOther.ok) return startOther;
+        return {
+          ok: true,
+          status: 200,
+          body: { ok: true, ...startOther.body, assignment, pending: { tank: null, piece: null } },
+        };
+      }
+      const ch = await phase1.changePhase(machine, ph.barcode, {
+        notes: body.notes || body.correction_note || null,
+        pieceNumber: body.piece_number != null ? Number(body.piece_number) : session.piece_number,
+        confirmedByEmployeeId: confirmerFromBody(body) ? confirmerFromBody(body).id : null,
+        confirmedByEmployeeName: confirmerFromBody(body) ? confirmerFromBody(body).name : null,
+      });
       if (!ch.ok) return ch;
       return { ok: true, status: 200, body: { ok: true, ...ch.body, assignment } };
     }
@@ -4589,24 +4975,57 @@ async function handleWindingScanAction(machine, body) {
         body: { ok: false, error: 'need_tank', message: 'Scan a tank before the phase.' },
       };
     }
+    const pieceForStart =
+      body.piece_number != null ? Number(body.piece_number) : pending.piece != null ? Number(pending.piece) : null;
+    if (pieceForStart == null) {
+      return {
+        ok: false,
+        status: 409,
+        body: {
+          ok: false,
+          error: 'need_piece',
+          message: 'Select a piece before scanning a phase.',
+          pending,
+        },
+      };
+    }
     const start = await phase1.startSession(machine, {
       team: { id: assignment.team_id, name: assignment.team_name, barcode: assignment.team_barcode, active: 1 },
       tankNumber: pending.tank,
       phaseRaw: ph.barcode,
+      pieceNumber: pieceForStart,
+      notes: body.notes || null,
     });
     if (!start.ok) return start;
-    return { ok: true, status: 200, body: { ok: true, ...start.body, assignment, pending: { tank: null } } };
+    return { ok: true, status: 200, body: { ok: true, ...start.body, assignment, pending: { tank: null, piece: null } } };
   }
 
   const employee = await lookupActiveEmployeeByScan(barcode);
   if (employee) {
+    if (!assignment) {
+      return {
+        ok: false,
+        status: 409,
+        body: { ok: false, error: 'need_team', message: 'Scan Team first.' },
+      };
+    }
+    const transfer = await phase1.transferEmployeeToTeam(employee.id, assignment.team_id, {
+      source: 'kiosk_transfer',
+      reason: 'Kiosk employee barcode scan',
+    });
+    if (!transfer.ok) return transfer;
     return {
       ok: true,
       status: 200,
       body: {
         ok: true,
-        action: 'confirmer',
-        employee: { id: Number(employee.id), code: employee.code, name: employee.name },
+        ...transfer.body,
+        // Also set confirmer for subsequent Piece/Tank Complete.
+        confirmer: {
+          id: Number(employee.id),
+          code: employee.code,
+          name: employee.name,
+        },
         assignment,
       },
     };
@@ -4621,12 +5040,48 @@ app.get('/api/kiosk/winding/config', async (req, res) => {
     if (!machine || !Number(machine.active)) {
       return res.status(403).json({ ok: false, error: 'forbidden', message: 'Open a machine kiosk URL to use this screen.' });
     }
-    const session = await phase1.getOpenSession(machine.id);
+    const openRows = await phase1.getOpenSessionsForMachine(machine.id);
+    const activeTankId = machine.active_tank_id != null ? Number(machine.active_tank_id) : null;
+    let session =
+      activeTankId != null
+        ? openRows.find((r) => Number(r.tank_id) === activeTankId) || openRows[0] || null
+        : openRows[0] || null;
     const mappedSession = session ? await phase1.mapSession(session) : null;
+    const open_sessions = [];
+    for (const row of openRows) {
+      open_sessions.push(await phase1.mapSession(row));
+    }
     const phaseTimeSummary =
       session && session.tank_id ? await phase1.fetchTankPhaseTimeSummary(Number(session.tank_id)) : [];
+    let piecesTankId = session && session.tank_id ? Number(session.tank_id) : activeTankId;
+    let pieces = piecesTankId ? await phase1.getTankPieces(piecesTankId) : [];
+    let piece_count = 0;
+    let active_tank_number = null;
+    if (piecesTankId) {
+      const tankMeta = await pool.query(
+        `SELECT tank_number, piece_count FROM tanks WHERE id = $1`,
+        [piecesTankId]
+      );
+      if (tankMeta.rows[0]) {
+        piece_count = Math.min(4, Math.max(1, Number(tankMeta.rows[0].piece_count) || 1));
+        active_tank_number = tankMeta.rows[0].tank_number;
+        await phase1.ensureTankPieces(piecesTankId, piece_count);
+        pieces = (await phase1.getTankPieces(piecesTankId)).filter((p) => Number(p.piece_number) <= piece_count);
+      }
+    }
     const assignment = await phase1.getMachineAssignment(machine.id);
     const { rows: teams } = await pool.query(`SELECT id, name, barcode FROM teams WHERE active = 1 ORDER BY name ASC`);
+    let open_qa_qc = null;
+    if (mappedSession && mappedSession.tank_id) {
+      try {
+        open_qa_qc = await phase1.findOpenQaQcAlert(
+          mappedSession.tank_id,
+          mappedSession.piece_number != null ? mappedSession.piece_number : 1
+        );
+      } catch (_err) {
+        open_qa_qc = null;
+      }
+    }
     return res.json({
       ok: true,
       workflow: 'winding_production',
@@ -4635,10 +5090,19 @@ app.get('/api/kiosk/winding/config', async (req, res) => {
       phases: WINDING_PHASES,
       alerts: ALERT_TYPES,
       pause_actions: [PAUSE_REASONS.BREAK, PAUSE_REASONS.LUNCH],
+      downtime_action: PAUSE_REASONS.DOWNTIME,
+      downtime_reasons: DOWNTIME_REASON_OPTIONS,
       end_shift: PAUSE_REASONS.END_SHIFT,
       resume_barcode: 'RESUME',
+      qa_qc_resolve_barcode: 'QA_QC_RESOLVE',
       assignment,
       session: mappedSession,
+      open_sessions,
+      open_qa_qc,
+      pieces,
+      piece_count,
+      active_tank_id: activeTankId,
+      active_tank_number,
       phase_time_summary: phaseTimeSummary,
     });
   } catch (err) {
@@ -4663,26 +5127,64 @@ app.post('/api/kiosk/winding/action', async (req, res) => {
         teamBarcode: body.team_barcode,
         tankNumber: body.tank_number,
         phaseRaw: body.phase,
+        pieceNumber: body.piece_number != null ? Number(body.piece_number) : null,
       });
     } else if (action === 'change_phase') {
-      result = await phase1.changePhase(machine, body.phase);
+      const confirmer = confirmerFromBody(body);
+      result = await phase1.changePhase(machine, body.phase, {
+        notes: body.notes || body.correction_note || null,
+        pieceNumber: body.piece_number,
+        confirmedByEmployeeId: confirmer ? confirmer.id : null,
+        confirmedByEmployeeName: confirmer ? confirmer.name : null,
+        forceTankComplete: body.force_tank_complete === true,
+      });
+    } else if (action === 'switch_tank') {
+      const tankId = Number(body.tank_id);
+      if (!Number.isInteger(tankId) || tankId <= 0) {
+        return res.status(400).json({ ok: false, error: 'validation', message: 'tank_id required.' });
+      }
+      await phase1.setMachineActiveTank(machine.id, tankId);
+      const switched = await phase1.getOpenSession(machine.id, tankId);
+      result = {
+        ok: true,
+        body: {
+          ok: true,
+          action: 'switch_tank',
+          session: switched ? await phase1.mapSession(switched) : null,
+        },
+      };
     } else if (action === 'part_complete') {
       const confirmer = confirmerFromBody(body);
       result = await phase1.finishSession(machine, {
         confirmedByEmployeeId: confirmer ? confirmer.id : null,
         confirmedByEmployeeName: confirmer ? confirmer.name : null,
+        forceTankComplete: true,
       });
     } else if (action === 'pause') {
-      result = await phase1.pauseSession(machine, body.barcode || body.pause);
+      result = await phase1.pauseSession(machine, body.barcode || body.pause, {
+        confirmed: body.confirmed === true,
+      });
     } else if (action === 'resume') {
-      result = await phase1.resumeSession(machine);
+      result = await phase1.resumeSession(machine, { confirmed: body.confirmed === true });
     } else if (action === 'end_shift') {
-      result = await phase1.endShiftSession(machine);
+      result = await phase1.endShiftSession(machine, { confirmed: body.confirmed === true });
     } else if (action === 'alert') {
       const session = await phase1.getOpenSession(machine.id);
-      result = await phase1.createAlert(machine, body.barcode || body.alert, session);
+      result = await phase1.createAlert(machine, body.barcode || body.alert, session, {
+        notes: body.notes || body.issue_note || null,
+      });
       if (result.ok && result.body && result.body.alert && result.body.alert.id) {
         alertEmail.queueNewAlertEmail(result.body.alert.id);
+      }
+    } else if (action === 'resolve_qa_qc') {
+      const session = await phase1.getOpenSession(machine.id);
+      result = await phase1.resolveQaQcForMachine(machine, {
+        session,
+        resolution_note: body.resolution_note || body.notes || null,
+        resolved_by: body.resolved_by || 'kiosk',
+      });
+      if (result.ok && result.body && result.body.alert && result.body.alert.id) {
+        alertEmail.queueResolveAlertEmail(result.body.alert.id);
       }
     } else {
       return res.status(400).json({ ok: false, error: 'validation', message: 'Unknown action.' });
@@ -4731,7 +5233,9 @@ app.patch('/api/manager/alerts/:id/resolve', async (req, res) => {
     return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Manager login required.' });
   }
   try {
-    const result = await phase1.resolveAlertById(req.params.id, auth.username || auth.name || 'manager');
+    const result = await phase1.resolveAlertById(req.params.id, auth.username || auth.name || 'manager', {
+      resolution_note: req.body && (req.body.resolution_note || req.body.notes) ? req.body.resolution_note || req.body.notes : null,
+    });
     if (!result.ok) return res.status(result.status).json(result.body);
     alertEmail.queueResolveAlertEmail(req.params.id);
     return res.json(result.body);
@@ -4852,10 +5356,81 @@ app.get('/api/manager/sessions/:id/details', async (req, res) => {
     if (!details) {
       return res.status(404).json({ ok: false, error: 'not_found', message: 'Session not found.' });
     }
-    return res.json({ ok: true, session: details });
+    let edits = [];
+    try {
+      edits = await phase1.listSessionEdits(id);
+    } catch (_err) {
+      edits = [];
+    }
+    return res.json({
+      ok: true,
+      session: {
+        ...details,
+        edits,
+        is_edited: edits.length > 0,
+      },
+    });
   } catch (err) {
     console.error('[manager session details]', err);
     return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load session details.' });
+  }
+});
+
+/** Manager-only: tank → piece → phase → session editor payload. */
+app.get('/api/manager/tanks/:id/phase-editor', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) {
+    return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Manager login required.' });
+  }
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({ ok: false, error: 'invalid_id', message: 'Invalid tank id.' });
+  }
+  try {
+    const result = await phase1.fetchPhaseEditorPayload(id, {
+      pieceNumber: req.query.piece != null ? Number(req.query.piece) : null,
+      pieceId: req.query.piece_id != null ? Number(req.query.piece_id) : null,
+      phaseCode: req.query.phase || null,
+    });
+    if (!result.ok) return res.status(result.status || 400).json(result.body || result);
+    return res.json(result.body);
+  } catch (err) {
+    console.error('[manager phase-editor]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load phase editor.' });
+  }
+});
+
+/** Manager-only: edit phase session start/end times (not available on kiosk). */
+app.patch('/api/manager/sessions/:id/times', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) {
+    return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Manager login required.' });
+  }
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({ ok: false, error: 'invalid_id', message: 'Invalid session id.' });
+  }
+  const body = req.body || {};
+  try {
+    const result = await phase1.editMachineSessionTimes(
+      id,
+      {
+        started_at: body.started_at,
+        ended_at: body.ended_at,
+        duration_ms: body.duration_ms,
+        edit_reason: body.edit_reason,
+      },
+      {
+        user_id: auth.id || auth.user_id || null,
+        name: auth.name || auth.username || 'Manager',
+      }
+    );
+    if (!result.ok) return res.status(result.status || 400).json(result.body || result);
+    const details = await phase1.fetchSessionDetails(id);
+    return res.json({ ok: true, ...result.body, session: details });
+  } catch (err) {
+    console.error('[manager session times]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not edit session times.' });
   }
 });
 
@@ -5116,51 +5691,34 @@ app.post('/api/manager/teams/:id/members', async (req, res) => {
       });
     }
 
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-      if (otherRes.rows.length && move) {
-        await client.query(`UPDATE team_members SET active = 0 WHERE id = $1`, [Number(otherRes.rows[0].id)]);
-      }
-      const inactiveSame = await client.query(
-        `SELECT id FROM team_members WHERE team_id = $1 AND employee_id = $2 AND active = 0`,
-        [teamId, employeeId]
+    const transfer = await phase1.transferEmployeeToTeam(employeeId, teamId, {
+      source: 'manager',
+      reason: move ? 'Manager moved employee between teams' : 'Manager added employee to team',
+    });
+    if (!transfer.ok) return res.status(transfer.status || 500).json(transfer.body || transfer);
+    if (role) {
+      await pool.query(
+        `UPDATE team_members SET role = $1 WHERE team_id = $2 AND employee_id = $3 AND active = 1`,
+        [role, teamId, employeeId]
       );
-      let memberRow;
-      if (inactiveSame.rows.length) {
-        const upd = await client.query(
-          `UPDATE team_members SET active = 1, role = $1, name = $2 WHERE id = $3 RETURNING *`,
-          [role || null, emp.name, Number(inactiveSame.rows[0].id)]
-        );
-        memberRow = upd.rows[0];
-      } else {
-        const ins = await client.query(
-          `INSERT INTO team_members (team_id, name, role, active, employee_id, created_at)
-           VALUES ($1,$2,$3,1,$4,NOW()) RETURNING *`,
-          [teamId, emp.name, role || null, employeeId]
-        );
-        memberRow = ins.rows[0];
-      }
-      await client.query('COMMIT');
-      return res.json({
-        ok: true,
-        member: {
-          ...memberRow,
-          employee_id: Number(memberRow.employee_id),
-          employee_code: emp.code,
-          employee_name: emp.name,
-        },
-      });
-    } catch (err) {
-      try {
-        await client.query('ROLLBACK');
-      } catch (_rollbackErr) {
-        /* ignore */
-      }
-      throw err;
-    } finally {
-      client.release();
     }
+    const memberRes = await pool.query(
+      `SELECT * FROM team_members WHERE team_id = $1 AND employee_id = $2 AND active = 1 LIMIT 1`,
+      [teamId, employeeId]
+    );
+    const memberRow = memberRes.rows[0];
+    return res.json({
+      ok: true,
+      transferred: transfer.body,
+      member: memberRow
+        ? {
+            ...memberRow,
+            employee_id: Number(memberRow.employee_id),
+            employee_code: emp.code,
+            employee_name: emp.name,
+          }
+        : null,
+    });
   } catch (err) {
     console.error('[manager team member add]', err);
     return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not add team member.' });
@@ -5175,6 +5733,18 @@ app.delete('/api/manager/teams/:teamId/members/:memberId', async (req, res) => {
     return res.status(400).json({ ok: false, error: 'validation', message: 'Invalid member id.' });
   }
   await pool.query(`UPDATE team_members SET active = 0 WHERE id = $1`, [memberId]);
+  try {
+    const row = await pool.query(`SELECT employee_id FROM team_members WHERE id = $1`, [memberId]);
+    if (row.rows[0] && row.rows[0].employee_id) {
+      await pool.query(
+        `UPDATE employee_team_memberships SET left_at = NOW()
+         WHERE employee_id = $1 AND left_at IS NULL`,
+        [Number(row.rows[0].employee_id)]
+      );
+    }
+  } catch (_err) {
+    /* membership table may be new */
+  }
   return res.json({ ok: true });
 });
 
@@ -5633,13 +6203,18 @@ async function postScanRecord(req, res) {
   const areaName = auth && auth.role === ROLE.KIOSK ? auth.area_name || null : null;
   const kioskUser = auth && auth.role === ROLE.KIOSK ? auth.username || null : null;
   if (resolvedTank) {
-    const tankRow = await ensureTankExists(resolvedTank);
-    if (status === 'IN' && tankRow && normalizeTankStatus(tankRow.status) === 'archived') {
-      return res.status(403).json({
-        ok: false,
-        error: 'tank_archived',
-        message: 'This tank is completed. Restore it in Tank Management before assigning work.',
-      });
+    const tankRow = await validateTankExists(resolvedTank);
+    if (status === 'IN') {
+      if (!tankRow) {
+        return res.status(404).json(tankNotFoundBody());
+      }
+      if (normalizeTankStatus(tankRow.status) === 'archived') {
+        return res.status(403).json({
+          ok: false,
+          error: 'tank_archived',
+          message: 'This tank is completed. Restore it in Tank Management before assigning work.',
+        });
+      }
     }
   }
   const scannedAt = nowIso();
@@ -5884,7 +6459,12 @@ app.patch('/api/scan_logs/:id', async (req, res) => {
 
   let tankNumber = null;
   if (hasTankPayload) {
-    if (tank) await ensureTankExists(tank);
+    if (tank) {
+      const tankRow = await validateTankExists(tank);
+      if (!tankRow) {
+        return res.status(404).json(tankNotFoundBody());
+      }
+    }
     tankNumber = tank;
     await pool.query(`UPDATE scan_logs SET tank_number = $1 WHERE id = $2`, [tankNumber, id]);
   }
@@ -6395,19 +6975,30 @@ async function summaryForLocalDate(yyyyMmDd) {
 }
 
 app.get('/api/summary/today', async (_req, res) => {
-  const day = localDateString();
-  const s = await summaryForLocalDate(day);
-  if (!s) return res.status(400).json({ ok: false, error: 'invalid_date' });
-  res.json({ ok: true, ...s });
+  try {
+    const day = localDateString();
+    const summary = await buildTankDailySummary(day);
+    if (!summary) return res.status(400).json({ ok: false, error: 'invalid_date' });
+    res.json({ ok: true, ...summary });
+  } catch (err) {
+    console.error('[summary/today]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load daily summary.' });
+  }
 });
 
 app.get('/api/summary', async (req, res) => {
-  const q = req.query.date ? String(req.query.date) : localDateString();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(q) || !parseLocalDate(q)) {
-    return res.status(400).json({ ok: false, error: 'invalid_date', message: 'date must be YYYY-MM-DD' });
+  try {
+    const q = req.query.date ? String(req.query.date) : localDateString();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(q) || !parseLocalDate(q)) {
+      return res.status(400).json({ ok: false, error: 'invalid_date', message: 'date must be YYYY-MM-DD' });
+    }
+    const summary = await buildTankDailySummary(q);
+    if (!summary) return res.status(400).json({ ok: false, error: 'invalid_date' });
+    res.json({ ok: true, ...summary });
+  } catch (err) {
+    console.error('[summary]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load daily summary.' });
   }
-  const s = await summaryForLocalDate(q);
-  res.json({ ok: true, ...s });
 });
 
 app.get('/api/payroll/today', async (_req, res) => {
@@ -6684,16 +7275,18 @@ app.get('/api/tanks', async (req, res) => {
   const params = [];
   let n = 1;
   if (statusFilter === 'active') {
-    sql += ` AND LOWER(TRIM(COALESCE(status, ''))) IN ('active', 'paused', '')`;
+    sql += ` AND LOWER(TRIM(COALESCE(status, ''))) IN ('active', 'paused', 'waiting', '')`;
+  } else if (statusFilter === 'waiting') {
+    sql += ` AND LOWER(TRIM(COALESCE(status, ''))) = 'waiting'`;
   } else if (statusFilter === 'archived') {
     sql += ` AND LOWER(TRIM(status)) = 'archived'`;
   } else if (statusFilter === 'all') {
-    if (activeOnly) sql += ` AND (LOWER(TRIM(COALESCE(status, ''))) = 'active' OR TRIM(COALESCE(status, '')) = '')`;
+    if (activeOnly) sql += ` AND (LOWER(TRIM(COALESCE(status, ''))) IN ('active', 'waiting', 'paused') OR TRIM(COALESCE(status, '')) = '')`;
   } else {
     return res.status(400).json({
       ok: false,
       error: 'validation',
-      message: 'status filter must be active, completed, or all.',
+      message: 'status filter must be active, waiting, completed, or all.',
     });
   }
   if (search) {
@@ -6707,19 +7300,35 @@ app.get('/api/tanks', async (req, res) => {
 });
 
 app.post('/api/tanks', async (req, res) => {
-  const tank_number = normalizeTankNumber(req.body && req.body.tank_number);
-  const description = req.body && req.body.description != null ? String(req.body.description).trim().slice(0, 120) : '';
+  const body = req.body || {};
+  const tank_number = normalizeTankNumber(body.tank_number);
+  const description = body.description != null ? String(body.description).trim().slice(0, 200) : '';
+  const customer = body.customer != null ? String(body.customer).trim().slice(0, 120) : '';
+  const model = body.model != null ? String(body.model).trim().slice(0, 120) : '';
+  const priority = body.priority != null ? String(body.priority).trim().slice(0, 40) : '';
+  const due_date = body.due_date ? String(body.due_date).slice(0, 10) : null;
+  const notes = body.notes != null ? String(body.notes).trim().slice(0, 2000) : '';
+  const piece_count = Math.min(4, Math.max(1, Number(body.piece_count) || 1));
   if (!tank_number) {
     return res.status(400).json({ ok: false, error: 'validation', message: 'tank_number is required.' });
   }
   const ts = nowIso();
   try {
     const ins = await pool.query(
-      `INSERT INTO tanks (tank_number, description, status, created_at, updated_at) VALUES ($1, $2, 'active', $3::timestamptz, $4::timestamptz)
+      `INSERT INTO tanks
+         (tank_number, description, status, created_at, updated_at, customer, model, priority, due_date, notes, piece_count, current_piece_number)
+       VALUES ($1, $2, 'waiting', $3::timestamptz, $4::timestamptz, $5, $6, $7, $8, $9, $10, 1)
        RETURNING id`,
-      [tank_number, description, ts, ts]
+      [tank_number, description, ts, ts, customer, model, priority, due_date, notes, piece_count]
     );
     const tid = ins.rows[0].id;
+    for (let n = 1; n <= piece_count; n += 1) {
+      await pool.query(
+        `INSERT INTO tank_pieces (tank_id, piece_number, status, created_at, updated_at)
+         VALUES ($1, $2, 'pending', NOW(), NOW()) ON CONFLICT DO NOTHING`,
+        [tid, n]
+      );
+    }
     const tankRes = await pool.query(`SELECT ${TANK_SELECT_COLUMNS} FROM tanks WHERE id = $1`, [tid]);
     return res.status(201).json({ ok: true, tank: mapTankRowForApi(tankRes.rows[0]) });
   } catch (e) {
@@ -6733,34 +7342,68 @@ app.post('/api/tanks', async (req, res) => {
 app.put('/api/tanks/:id', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ ok: false, error: 'invalid_id' });
-  const current = await pool.query(`SELECT id, status FROM tanks WHERE id = $1`, [id]);
+  const current = await pool.query(`SELECT * FROM tanks WHERE id = $1`, [id]);
   if (!current.rows.length) return res.status(404).json({ ok: false, error: 'not_found' });
-  const tank_number = normalizeTankNumber(req.body && req.body.tank_number);
-  const description = req.body && req.body.description != null ? String(req.body.description).trim().slice(0, 120) : '';
+  const body = req.body || {};
+  const tank_number = normalizeTankNumber(body.tank_number != null ? body.tank_number : current.rows[0].tank_number);
+  const description =
+    body.description != null ? String(body.description).trim().slice(0, 200) : current.rows[0].description || '';
+  const customer = body.customer != null ? String(body.customer).trim().slice(0, 120) : current.rows[0].customer || '';
+  const model = body.model != null ? String(body.model).trim().slice(0, 120) : current.rows[0].model || '';
+  const priority = body.priority != null ? String(body.priority).trim().slice(0, 40) : current.rows[0].priority || '';
+  const due_date =
+    body.due_date !== undefined
+      ? body.due_date
+        ? String(body.due_date).slice(0, 10)
+        : null
+      : current.rows[0].due_date || null;
+  const notes = body.notes != null ? String(body.notes).trim().slice(0, 2000) : current.rows[0].notes || '';
+  let piece_count = Math.min(
+    4,
+    Math.max(1, Number(body.piece_count != null ? body.piece_count : current.rows[0].piece_count) || 1)
+  );
+  const prevPieceCount = Math.min(4, Math.max(1, Number(current.rows[0].piece_count) || 1));
+  if (body.piece_count != null && piece_count !== prevPieceCount) {
+    const hasActivity = await phase1.tankHasProductionActivity(id);
+    if (hasActivity && piece_count < prevPieceCount) {
+      const maxActive = await phase1.maxPieceNumberWithActivity(id);
+      if (piece_count < maxActive) {
+        return res.status(409).json({
+          ok: false,
+          error: 'piece_count_locked',
+          message: `Cannot reduce pieces below ${maxActive} because production activity already exists on those pieces.`,
+          min_piece_count: maxActive,
+          has_production_activity: true,
+        });
+      }
+    }
+  }
   const status =
-    req.body && req.body.status != null && String(req.body.status).trim() !== ''
-      ? normalizeTankStatus(req.body.status)
+    body.status != null && String(body.status).trim() !== ''
+      ? normalizeTankStatus(body.status)
       : normalizeTankStatus(current.rows[0].status);
   if (!tank_number) return res.status(400).json({ ok: false, error: 'validation', message: 'tank_number is required.' });
   const ts = nowIso();
   try {
     const becomingArchived = status === 'archived' && normalizeTankStatus(current.rows[0].status) !== 'archived';
-    const becomingActive = status === 'active' && normalizeTankStatus(current.rows[0].status) === 'archived';
-    const completedAt = becomingArchived ? ts : becomingActive ? null : undefined;
-    if (completedAt !== undefined) {
+    const becomingActive =
+      (status === 'active' || status === 'waiting') && normalizeTankStatus(current.rows[0].status) === 'archived';
+    const completedAt = becomingArchived ? ts : becomingActive ? null : current.rows[0].completed_at;
+    await pool.query(
+      `UPDATE tanks SET
+         tank_number = $1, description = $2, status = $3, completed_at = $4, updated_at = $5::timestamptz,
+         customer = $6, model = $7, priority = $8, due_date = $9, notes = $10, piece_count = $11
+       WHERE id = $12`,
+      [tank_number, description, status, completedAt, ts, customer, model, priority, due_date, notes, piece_count, id]
+    );
+    for (let n = 1; n <= piece_count; n += 1) {
       await pool.query(
-        `UPDATE tanks SET tank_number = $1, description = $2, status = $3, completed_at = $4, updated_at = $5::timestamptz WHERE id = $6`,
-        [tank_number, description, status, completedAt, ts, id]
+        `INSERT INTO tank_pieces (tank_id, piece_number, status, created_at, updated_at)
+         VALUES ($1, $2, 'pending', NOW(), NOW()) ON CONFLICT DO NOTHING`,
+        [id, n]
       );
-    } else {
-      await pool.query(`UPDATE tanks SET tank_number = $1, description = $2, status = $3, updated_at = $4::timestamptz WHERE id = $5`, [
-        tank_number,
-        description,
-        status,
-        ts,
-        id,
-      ]);
     }
+    await phase1.ensureTankPieces(id, piece_count, { pruneExtras: piece_count < prevPieceCount });
   } catch (e) {
     if (e && e.code === '23505') {
       return res.status(409).json({ ok: false, error: 'duplicate_tank', message: 'Tank number already exists.' });
@@ -6793,23 +7436,438 @@ app.patch('/api/tanks/:id/restore', async (req, res) => {
   const rowRes = await pool.query(`SELECT id FROM tanks WHERE id = $1`, [id]);
   if (!rowRes.rows.length) return res.status(404).json({ ok: false, error: 'not_found' });
   const ts = nowIso();
-  await pool.query(`UPDATE tanks SET status = 'active', completed_at = NULL, updated_at = $1::timestamptz WHERE id = $2`, [ts, id]);
+  await pool.query(
+    `UPDATE tanks SET status = 'waiting', completed_at = NULL, updated_at = $1::timestamptz WHERE id = $2`,
+    [ts, id]
+  );
   const tankRes = await pool.query(`SELECT ${TANK_SELECT_COLUMNS} FROM tanks WHERE id = $1`, [id]);
   res.json({ ok: true, tank: mapTankRowForApi(tankRes.rows[0]) });
 });
 
-app.get('/api/tanks/:id/report', async (req, res) => {
-  const id = Number(req.params.id);
-  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ ok: false, error: 'invalid_id' });
+/**
+ * Tank-focused daily production summary (not payroll).
+ * One row per tank worked on the local calendar date.
+ */
+async function buildTankDailySummary(date) {
+  const day = startEndOfLocalDay(date);
+  if (!day) return null;
+  const { rows } = await pool.query(
+    `SELECT tk.id AS tank_id, tk.tank_number, tk.status, tk.first_scanned_at, tk.completed_at,
+            tk.piece_count, tk.current_piece_number, tk.customer, tk.model, tk.paused_reason,
+            open_ms.id AS open_session_id,
+            open_ms.status AS open_session_status,
+            open_ms.stop_reason AS open_stop_reason,
+            open_ms.started_at AS open_started_at,
+            open_ms.stopped_at AS open_stopped_at,
+            open_ms.activity_name AS open_phase_name,
+            open_ms.activity_code AS open_phase_code,
+            open_ms.piece_number AS open_piece_number,
+            open_ms.team_name AS open_team_name,
+            open_ms.machine_name AS open_machine_name,
+            last_ms.activity_name AS last_phase_name,
+            last_ms.team_name AS last_team_name,
+            last_ms.machine_name AS last_machine_name,
+            last_ms.last_at AS last_activity_at,
+            (SELECT COUNT(*)::int FROM tank_pieces tp WHERE tp.tank_id = tk.id AND tp.status = 'completed') AS completed_pieces,
+            (SELECT COUNT(*)::int FROM tank_pieces tp WHERE tp.tank_id = tk.id) AS total_pieces
+     FROM tanks tk
+     LEFT JOIN LATERAL (
+       SELECT ms.id, ms.status, ms.stop_reason, ms.started_at, ms.stopped_at,
+              ms.activity_name, ms.activity_code, ms.piece_number,
+              t.name AS team_name, m.name AS machine_name
+       FROM machine_sessions ms
+       JOIN teams t ON t.id = ms.team_id
+       JOIN machines m ON m.id = ms.machine_id
+       WHERE ms.tank_id = tk.id AND ms.status IN ('running', 'stopped')
+       ORDER BY ms.started_at DESC, ms.id DESC
+       LIMIT 1
+     ) open_ms ON TRUE
+     LEFT JOIN LATERAL (
+       SELECT ms.activity_name, t.name AS team_name, m.name AS machine_name,
+              COALESCE(ms.finished_at, ms.stopped_at, ms.updated_at, ms.started_at) AS last_at
+       FROM machine_sessions ms
+       JOIN teams t ON t.id = ms.team_id
+       JOIN machines m ON m.id = ms.machine_id
+       WHERE ms.tank_id = tk.id
+       ORDER BY COALESCE(ms.finished_at, ms.stopped_at, ms.updated_at, ms.started_at) DESC NULLS LAST, ms.id DESC
+       LIMIT 1
+     ) last_ms ON TRUE
+     WHERE EXISTS (
+       SELECT 1 FROM machine_sessions ms
+       WHERE ms.tank_id = tk.id
+         AND ms.started_at >= $1::timestamptz AND ms.started_at <= $2::timestamptz
+     )
+     OR (tk.completed_at IS NOT NULL AND tk.completed_at >= $1::timestamptz AND tk.completed_at <= $2::timestamptz)
+     ORDER BY tk.tank_number ASC`,
+    [day.startIso, day.endIso]
+  );
+
+  const tanks = [];
+  for (const r of rows) {
+    const tankId = Number(r.tank_id);
+    const pieceCount = Math.min(4, Math.max(1, Number(r.piece_count) || Number(r.total_pieces) || 1));
+    const completedPieces = Number(r.completed_pieces) || 0;
+    const currentPiece =
+      r.open_piece_number != null
+        ? Number(r.open_piece_number)
+        : Math.min(pieceCount, Math.max(1, Number(r.current_piece_number) || 1));
+    const tankStatus = normalizeTankStatus(r.status);
+
+    let production_status = 'Waiting';
+    if (tankStatus === 'archived') {
+      production_status = 'Completed';
+    } else if (completedPieces >= pieceCount && pieceCount > 0) {
+      production_status = 'Ready to Complete';
+    } else if (r.open_session_id) {
+      const openSt = String(r.open_session_status || '').toLowerCase();
+      if (openSt === 'running') production_status = 'Running';
+      else {
+        const reason = String(r.open_stop_reason || '')
+          .trim()
+          .toLowerCase()
+          .replace(/-/g, '_');
+        if (reason === 'break') production_status = 'Break';
+        else if (reason === 'lunch') production_status = 'Lunch';
+        else if (reason === 'downtime') production_status = 'Downtime';
+        else if (reason === 'end_shift') production_status = 'End Shift';
+        else production_status = 'Paused';
+      }
+    } else if (tankStatus === 'paused') {
+      const pr = String(r.paused_reason || '')
+        .trim()
+        .toLowerCase()
+        .replace(/-/g, '_');
+      production_status = pr === 'end_shift' ? 'End Shift' : 'Paused';
+    } else if (tankStatus === 'waiting') {
+      production_status = 'Waiting';
+    } else {
+      production_status = 'Active';
+    }
+
+    const duration_ms = computeTankDurationMs({
+      status: tankStatus,
+      first_scanned_at: r.first_scanned_at,
+      completed_at: r.completed_at,
+    });
+
+    let current_phase_time_ms = 0;
+    if (r.open_session_id) {
+      current_phase_time_ms = phase1.sessionElapsedMs({
+        status: r.open_session_status,
+        started_at: r.open_started_at,
+        stopped_at: r.open_stopped_at,
+        finished_at: null,
+      });
+    }
+
+    let tank_total_running_time_ms = 0;
+    let tank_total_running_time_display = '—';
+    try {
+      const phaseSummary = await phase1.fetchTankPhaseTimeSummary(tankId);
+      tank_total_running_time_ms = phaseSummary.reduce((sum, row) => {
+        if (row.counts_toward_tank_total === false) return sum;
+        return sum + (Number(row.total_duration_ms) || 0);
+      }, 0);
+      tank_total_running_time_display =
+        tank_total_running_time_ms > 0
+          ? formatTankDurationDisplay(tank_total_running_time_ms)
+          : '—';
+    } catch (_err) {
+      /* ignore */
+    }
+
+    let downtime_ms = 0;
+    try {
+      const { rows: dtRows } = await pool.query(
+        `SELECT started_at, ended_at, duration_ms
+         FROM downtime_intervals
+         WHERE tank_id = $1
+           AND started_at >= $2::timestamptz
+           AND started_at <= $3::timestamptz`,
+        [tankId, day.startIso, day.endIso]
+      );
+      for (const d of dtRows) {
+        if (d.duration_ms != null) {
+          downtime_ms += Number(d.duration_ms) || 0;
+        } else {
+          const startMs = new Date(d.started_at).getTime();
+          const endMs = d.ended_at ? new Date(d.ended_at).getTime() : Date.now();
+          if (!Number.isNaN(startMs) && !Number.isNaN(endMs)) downtime_ms += Math.max(0, endMs - startMs);
+        }
+      }
+    } catch (_err) {
+      /* table may not exist yet */
+    }
+
+    const current_phase = r.open_phase_name || r.last_phase_name || '—';
+    const team_name = r.open_team_name || r.last_team_name || '—';
+    const machine_name = r.open_machine_name || r.last_machine_name || '—';
+
+    tanks.push({
+      tank_id: tankId,
+      tank_number: r.tank_number,
+      piece: currentPiece,
+      piece_label: `Piece ${currentPiece}`,
+      piece_count: pieceCount,
+      current_piece_number: currentPiece,
+      team_name,
+      machine_name,
+      current_phase,
+      production_status,
+      status: tankStatus,
+      started_at: tankTimestampToIso(r.first_scanned_at),
+      current_phase_time_ms,
+      current_phase_time_display: phase1.formatElapsedDisplay(current_phase_time_ms),
+      duration_ms,
+      duration_display: formatTankDurationDisplay(duration_ms),
+      tank_total_running_time_ms,
+      tank_total_running_time_display,
+      downtime_ms,
+      downtime_display: phase1.formatElapsedDisplay(downtime_ms),
+      percent_complete: Math.round((completedPieces / pieceCount) * 100),
+      completed_pieces: completedPieces,
+      remaining_pieces: Math.max(0, pieceCount - completedPieces),
+      completed: tankStatus === 'archived',
+      last_activity_at: tankTimestampToIso(r.last_activity_at),
+      customer: r.customer || '',
+      model: r.model || '',
+    });
+  }
+
+  return { date, tanks };
+}
+
+app.get('/api/manager/daily-summary', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) return res.status(401).json({ ok: false, error: 'not_authenticated' });
+  try {
+    const date = req.query.date ? String(req.query.date) : localDateString();
+    const summary = await buildTankDailySummary(date);
+    if (!summary) return res.status(400).json({ ok: false, error: 'validation', message: 'Invalid date.' });
+    return res.json({ ok: true, ...summary });
+  } catch (err) {
+    console.error('[daily-summary]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load daily summary.' });
+  }
+});
+
+/** CSV export of tank daily summary (production, not payroll). */
+app.get('/api/summary/tanks.csv', async (req, res) => {
+  try {
+    const date = req.query.date ? String(req.query.date) : localDateString();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !parseLocalDate(date)) {
+      return res.status(400).json({ ok: false, error: 'invalid_date', message: 'date must be YYYY-MM-DD' });
+    }
+    const summary = await buildTankDailySummary(date);
+    if (!summary) return res.status(400).json({ ok: false, error: 'invalid_date' });
+    const header = [
+      'Tank #',
+      'Team',
+      'Machine',
+      'Current Phase',
+      'Status',
+      'Current Phase Time',
+      'Total Running Time',
+      'Progress %',
+      'Last Activity',
+    ];
+    const lines = [header.join(',')];
+    for (const r of summary.tanks) {
+      const cells = [
+        r.tank_number,
+        r.team_name,
+        r.machine_name,
+        r.current_phase,
+        r.production_status,
+        r.current_phase_time_display || '',
+        r.tank_total_running_time_display || '',
+        r.percent_complete,
+        r.last_activity_at || '',
+      ].map((v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`);
+      lines.push(cells.join(','));
+    }
+    const body = `${lines.join('\r\n')}\r\n`;
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="tank-daily-summary-${date}.csv"`);
+    return res.send(body);
+  } catch (err) {
+    console.error('[summary tanks csv]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not export daily summary.' });
+  }
+});
+
+/** Dedicated PDF layout for tank daily summary (not HTML print). */
+app.get('/api/summary/tanks.pdf', async (req, res) => {
+  try {
+    const date = req.query.date ? String(req.query.date) : localDateString();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !parseLocalDate(date)) {
+      return res.status(400).json({ ok: false, error: 'invalid_date', message: 'date must be YYYY-MM-DD' });
+    }
+    const summary = await buildTankDailySummary(date);
+    if (!summary) return res.status(400).json({ ok: false, error: 'invalid_date' });
+    const buffer = await buildTankDailySummaryPdfBuffer(summary);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="tank-daily-summary-${date}.pdf"`);
+    return res.send(buffer);
+  } catch (err) {
+    console.error('[summary tanks pdf]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not export daily summary PDF.' });
+  }
+});
+
+app.get('/api/manager/production-notes', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) return res.status(401).json({ ok: false, error: 'not_authenticated' });
+  try {
+    const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
+    const { rows } = await pool.query(
+      `SELECT pn.*, m.name AS machine_name
+       FROM production_notes pn
+       LEFT JOIN machines m ON m.id = pn.machine_id
+       ORDER BY pn.created_at DESC
+       LIMIT $1`,
+      [limit]
+    );
+    return res.json({
+      ok: true,
+      notes: rows.map((r) => ({
+        id: Number(r.id),
+        note_type: r.note_type,
+        body: r.body,
+        tank_number: r.tank_number,
+        piece_number: r.piece_number,
+        machine_name: r.machine_name,
+        team_name: r.team_name,
+        operator_name: r.operator_name,
+        phase_name: r.phase_name,
+        created_at: r.created_at,
+      })),
+    });
+  } catch (err) {
+    console.error('[production-notes]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load notes.' });
+  }
+});
+
+app.post('/api/manager/production-notes', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) return res.status(401).json({ ok: false, error: 'not_authenticated' });
+  const body = req.body || {};
+  const noteBody = String(body.body || '').trim().slice(0, 2000);
+  if (!noteBody) return res.status(400).json({ ok: false, error: 'validation', message: 'Note body is required.' });
+  const noteType = ['general', 'problem', 'maintenance', 'quality', 'safety', 'correction'].includes(
+    String(body.note_type || '').toLowerCase()
+  )
+    ? String(body.note_type).toLowerCase()
+    : 'general';
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO production_notes (note_type, body, tank_number, piece_number, operator_name, created_at)
+       VALUES ($1,$2,$3,$4,$5,NOW()) RETURNING id, created_at`,
+      [noteType, noteBody, body.tank_number || null, body.piece_number || null, auth.username || null]
+    );
+    return res.status(201).json({ ok: true, note: rows[0] });
+  } catch (err) {
+    console.error('[production-notes create]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not save note.' });
+  }
+});
+
+app.post('/api/kiosk/winding/notes', async (req, res) => {
+  try {
+    const machine = await windingMachineFromRequest(req);
+    if (!machine) return res.status(401).json({ ok: false, error: 'not_authenticated' });
+    const body = req.body || {};
+    const noteBody = String(body.body || '').trim().slice(0, 2000);
+    if (!noteBody) return res.status(400).json({ ok: false, error: 'validation', message: 'Note is required.' });
+    const noteType = ['general', 'problem', 'maintenance', 'quality', 'safety', 'correction'].includes(
+      String(body.note_type || '').toLowerCase()
+    )
+      ? String(body.note_type).toLowerCase()
+      : 'general';
+    const session = await phase1.getOpenSession(machine.id);
+    const { rows } = await pool.query(
+      `INSERT INTO production_notes
+         (note_type, body, tank_id, tank_number, piece_number, machine_id, team_id, team_name, session_id, phase_code, phase_name, operator_name, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW()) RETURNING id`,
+      [
+        noteType,
+        noteBody,
+        session ? session.tank_id : null,
+        session ? session.tank_number : body.tank_number || null,
+        session ? session.piece_number || 1 : body.piece_number || null,
+        machine.id,
+        session ? session.team_id : null,
+        session ? session.team_name : null,
+        session ? session.id : null,
+        session ? session.activity_code : null,
+        session ? session.activity_name : null,
+        body.operator_name || null,
+      ]
+    );
+    return res.status(201).json({ ok: true, id: Number(rows[0].id) });
+  } catch (err) {
+    console.error('[kiosk notes]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not save note.' });
+  }
+});
+
+app.get('/api/manager/tanks/print-selected', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) return res.status(401).type('html').send('Login required');
+  const ids = String(req.query.ids || '')
+    .split(',')
+    .map((x) => Number(x.trim()))
+    .filter((n) => Number.isInteger(n) && n > 0);
+  const printAll = String(req.query.all || '') === '1';
+  try {
+    let rows;
+    if (printAll) {
+      const r = await pool.query(
+        `SELECT tank_number FROM tanks WHERE LOWER(TRIM(COALESCE(status,''))) <> 'archived' ORDER BY tank_number ASC LIMIT 200`
+      );
+      rows = r.rows;
+    } else if (ids.length) {
+      const r = await pool.query(`SELECT tank_number FROM tanks WHERE id = ANY($1::bigint[]) ORDER BY tank_number ASC`, [
+        ids,
+      ]);
+      rows = r.rows;
+    } else {
+      return res.status(400).type('html').send('No tanks selected.');
+    }
+    if (!rows.length) return res.status(404).type('html').send('No tanks found.');
+    let bcIndex = 0;
+    const scripts = [];
+    const cards = rows
+      .map((t) => {
+        const tank = String(t.tank_number).replace(/</g, '&lt;');
+        const barcode = `TANK_${t.tank_number}`;
+        const esc = barcode.replace(/'/g, "\\'");
+        const id = `bc${bcIndex++}`;
+        scripts.push(`JsBarcode('#${id}','${esc}',{format:'CODE128',displayValue:false,height:90,margin:6,width:2});`);
+        return `<div class="card"><p class="title">Tank ${tank}</p><svg id="${id}"></svg><p class="value">${barcode.replace(/</g, '&lt;')}</p></div>`;
+      })
+      .join('');
+    res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"/><title>Tank Barcodes</title>
+<style>body{font-family:Arial,sans-serif;margin:16px}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.card{border:1.5px solid #cbd5e1;border-radius:10px;padding:12px;text-align:center;break-inside:avoid}.title{font-size:18px;font-weight:800;margin:0 0 8px}.value{font-family:monospace;font-size:12px;margin-top:6px}@media print{body{margin:8px}}</style>
+<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script></head><body>
+<h1>Selected Tank Barcodes</h1><div class="grid">${cards}</div>
+<script>${scripts.join('')}setTimeout(()=>window.print(),400);</script></body></html>`);
+  } catch (err) {
+    console.error('[print-selected]', err);
+    res.status(500).type('html').send('Could not print barcodes.');
+  }
+});
+
+async function getTankReportPayload(id) {
+  if (!Number.isInteger(id) || id <= 0) return { ok: false, status: 400, error: 'invalid_id' };
   const tankRes = await pool.query(`SELECT ${TANK_SELECT_COLUMNS} FROM tanks WHERE id = $1`, [id]);
-  if (!tankRes.rows.length) return res.status(404).json({ ok: false, error: 'not_found', message: 'Tank not found.' });
+  if (!tankRes.rows.length) return { ok: false, status: 404, error: 'not_found', message: 'Tank not found.' };
   const tank = mapTankRowForApi(tankRes.rows[0]);
   const logsAsc = await fetchTankLaborLogs(tank.tank_number);
   const emRes = await pool.query(`SELECT id, code, name, hourly_rate FROM employees`);
   const employeesByCode = new Map();
-  for (const e of emRes.rows) {
-    employeesByCode.set(normalizeCode(e.code), e);
-  }
+  for (const e of emRes.rows) employeesByCode.set(normalizeCode(e.code), e);
   const report = computeTankLaborReport(tank.tank_number, logsAsc, employeesByCode, Date.now());
   const finishedJobs = await fetchFinishJobEvents({ tankNumber: tank.tank_number, limit: 50 });
   let teamCompletion = phase1.emptyTankTeamCompletion();
@@ -6835,19 +7893,136 @@ app.get('/api/tanks/:id/report', async (req, res) => {
   if (teamProduction && (!teamProduction.phase_time_summary || !teamProduction.phase_time_summary.length)) {
     teamProduction.phase_time_summary = phaseTimeSummary;
   }
-  res.json({
+  let pieces = [];
+  let correctionNotes = [];
+  let downtimeIntervals = [];
+  let downtimeTotalMs = 0;
+  let pieceReports = [];
+  let qaQcHistory = [];
+  try {
+    pieces = await phase1.getTankPieces(id);
+  } catch (err) {
+    console.error('[tank report] pieces:', err);
+  }
+  try {
+    pieceReports = await phase1.fetchPieceReports(id);
+  } catch (err) {
+    console.error('[tank report] piece_reports:', err);
+  }
+  try {
+    qaQcHistory = await phase1.fetchTankQaQcHistory(id);
+  } catch (err) {
+    console.error('[tank report] qa_qc_history:', err);
+  }
+  try {
+    const noteRes = await pool.query(
+      `SELECT id, note_type, body, tank_number, piece_number, team_name, operator_name, phase_name, machine_id, created_at
+       FROM production_notes
+       WHERE tank_id = $1 OR (tank_number IS NOT NULL AND UPPER(TRIM(tank_number)) = UPPER(TRIM($2)))
+       ORDER BY created_at DESC LIMIT 200`,
+      [id, tank.tank_number]
+    );
+    correctionNotes = noteRes.rows;
+  } catch (err) {
+    console.error('[tank report] notes:', err);
+  }
+  try {
+    const activity = await phase1.fetchTankActivity(tank.tank_number);
+    downtimeIntervals = activity.downtime_intervals || [];
+    downtimeTotalMs = Number(activity.downtime_total_ms) || 0;
+  } catch (err) {
+    console.error('[tank report] downtime:', err);
+  }
+  const totalLaborHours =
+    teamProduction && teamProduction.total_hours != null
+      ? teamProduction.total_hours
+      : teamCompletion.total_team_hours || 0;
+  const totalMachineHours =
+    teamProduction && teamProduction.total_machine_hours != null
+      ? teamProduction.total_machine_hours
+      : totalLaborHours;
+
+  let reportMeta = {
+    team_name: teamCompletion.team_name || null,
+    machine_name: null,
+    current_phase: null,
+    production_status: normalizeTankStatus(tank.status) === 'archived' ? 'Completed' : tank.status,
+    percent_complete: null,
+    piece_label: `Piece ${tank.current_piece_number || 1}`,
+    started_at: tank.first_scanned_at || tank.started_at || null,
+    downtime_display: phase1.formatElapsedDisplay(downtimeTotalMs),
+  };
+  try {
+    const { rows: openRows } = await pool.query(
+      `SELECT ms.status, ms.stop_reason, ms.activity_name, ms.piece_number,
+              t.name AS team_name, m.name AS machine_name
+       FROM machine_sessions ms
+       JOIN teams t ON t.id = ms.team_id
+       JOIN machines m ON m.id = ms.machine_id
+       WHERE ms.tank_id = $1 AND ms.status IN ('running', 'stopped')
+       ORDER BY ms.started_at DESC LIMIT 1`,
+      [id]
+    );
+    if (openRows[0]) {
+      const o = openRows[0];
+      reportMeta.team_name = o.team_name;
+      reportMeta.machine_name = o.machine_name;
+      reportMeta.current_phase = o.activity_name;
+      reportMeta.piece_label = `Piece ${o.piece_number || tank.current_piece_number || 1}`;
+      const st = String(o.status || '').toLowerCase();
+      if (st === 'running') reportMeta.production_status = 'Running';
+      else {
+        const reason = String(o.stop_reason || '').toLowerCase();
+        if (reason === 'break') reportMeta.production_status = 'Break';
+        else if (reason === 'lunch') reportMeta.production_status = 'Lunch';
+        else if (reason === 'downtime') reportMeta.production_status = 'Downtime';
+        else if (reason === 'qa_qc') reportMeta.production_status = 'QA/QC';
+        else reportMeta.production_status = 'Paused';
+      }
+    } else if (teamProduction && (teamProduction.phases || []).length) {
+      const lastPhase = teamProduction.phases[teamProduction.phases.length - 1];
+      reportMeta.current_phase = lastPhase.phase_name || reportMeta.current_phase;
+      if ((lastPhase.sessions || []).length) {
+        const s0 = lastPhase.sessions[lastPhase.sessions.length - 1];
+        reportMeta.team_name = s0.team_name || reportMeta.team_name;
+        reportMeta.machine_name = s0.machine_name || reportMeta.machine_name;
+      }
+    }
+    const pieceCount = Math.min(4, Math.max(1, Number(tank.piece_count) || pieces.length || 1));
+    const completedPieces = pieces.filter((p) => String(p.status) === 'completed' && Number(p.piece_number) <= pieceCount).length;
+    reportMeta.percent_complete = Math.round((completedPieces / pieceCount) * 100);
+    reportMeta.piece_count = pieceCount;
+    reportMeta.completed_pieces = completedPieces;
+    if (normalizeTankStatus(tank.status) !== 'archived' && completedPieces >= pieceCount && pieceCount > 0) {
+      reportMeta.production_status = 'Ready to Complete';
+    }
+  } catch (err) {
+    console.error('[tank report] report_meta:', err.message);
+  }
+
+  return {
     ok: true,
     tank: {
       id: tank.id,
       tank_number: tank.tank_number,
       description: tank.description,
+      customer: tank.customer,
+      model: tank.model,
+      priority: tank.priority,
+      due_date: tank.due_date,
+      notes: tank.notes,
+      piece_count: tank.piece_count,
+      current_piece_number: tank.current_piece_number,
       status: tank.status,
       registry_status: tankRes.rows[0].status,
       created_at: tank.created_at,
+      first_scanned_at: tank.first_scanned_at,
+      started_at: tank.started_at,
       completed_at: tank.completed_at,
       duration_ms: tank.duration_ms,
       duration_display: tank.duration_display,
     },
+    report_meta: reportMeta,
     summary: report.summary,
     employeeBreakdown: report.employeeBreakdown,
     activityBreakdown: report.activityBreakdown,
@@ -6856,7 +8031,51 @@ app.get('/api/tanks/:id/report', async (req, res) => {
     team_completion: teamCompletion,
     team_production: teamProduction,
     phase_time_summary: phaseTimeSummary,
-  });
+    pieces,
+    piece_reports: pieceReports,
+    has_production_activity: await phase1.tankHasProductionActivity(id),
+    max_piece_with_activity: await phase1.maxPieceNumberWithActivity(id),
+    production_notes: correctionNotes,
+    downtime_intervals: downtimeIntervals,
+    downtime_total_ms: downtimeTotalMs,
+    downtime_total_display: phase1.formatElapsedDisplay(downtimeTotalMs),
+    qa_qc_history: qaQcHistory,
+    labor_hours: {
+      total_labor_hours: totalLaborHours,
+      total_machine_hours: totalMachineHours,
+      hours_per_phase: (teamProduction && teamProduction.hours_per_phase) || [],
+      hours_per_team: (teamProduction && teamProduction.hours_per_team) || [],
+      hours_per_piece: (teamProduction && teamProduction.hours_per_piece) || [],
+    },
+  };
+}
+
+app.get('/api/tanks/:id/report', async (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    const payload = await getTankReportPayload(id);
+    if (!payload.ok) return res.status(payload.status || 500).json(payload);
+    return res.json(payload);
+  } catch (err) {
+    console.error('[tank report]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load tank report.' });
+  }
+});
+
+app.get('/api/tanks/:id/report.pdf', async (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    const assembled = await getTankReportPayload(id);
+    if (!assembled.ok) return res.status(assembled.status || 500).json(assembled);
+    const buffer = await buildTankReportPdfBuffer(assembled);
+    const safeTank = String((assembled.tank && assembled.tank.tank_number) || id).replace(/[^\w.-]+/g, '_');
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="tank-report-${safeTank}.pdf"`);
+    return res.send(buffer);
+  } catch (err) {
+    console.error('[tank report pdf]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not export tank report PDF.' });
+  }
 });
 
 async function managerCurrentWorkRows() {

@@ -15,7 +15,29 @@
       .wk-value { font-size: 1.05rem; font-weight: 700; margin: 0; }
       .wk-value--running { color: #15803d; }
       .wk-value--idle { color: #64748b; }
+      .wk-value--paused { color: #b45309; }
+      .wk-value--break { color: #b45309; }
+      .wk-value--lunch { color: #c2410c; }
+      .wk-value--downtime { color: #6d28d9; background: #f5f3ff; padding: 2px 8px; border-radius: 6px; display: inline-block; }
+      .wk-value--qa_qc { color: #b91c1c; background: #fef2f2; padding: 2px 8px; border-radius: 6px; display: inline-block; }
+      .wk-open-tank-btn.is-downtime { border-color: #8b5cf6; color: #5b21b6; }
+      .wk-open-tank-btn.is-break { border-color: #f59e0b; }
+      .wk-open-tank-btn.is-lunch { border-color: #ea580c; }
+      .wk-open-tank-btn.is-qa_qc { border-color: #dc2626; color: #b91c1c; }
+      .btn-touch--downtime { background: #f5f3ff; border-color: #8b5cf6; color: #5b21b6; }
+      .btn-touch--qa-qc { background: #fef2f2; border-color: #dc2626; color: #b91c1c; }
+      .btn-touch--resolve-qa { background: #dc2626; border-color: #b91c1c; color: #fff; }
+      .btn-touch--resolve-qa:not([hidden]) { grid-column: 1 / -1; min-height: 64px; font-size: 18px; order: -1; }
+      .wk-qaqc-panel { margin-top: 14px; padding: 14px 16px; border: 2px solid #fca5a5; border-radius: 12px; background: #fef2f2; }
+      .wk-qaqc-panel[hidden] { display: none !important; }
+      .wk-qaqc-title { margin: 0 0 6px; font-size: 1.15rem; font-weight: 800; color: #991b1b; }
+      .wk-qaqc-meta { margin: 4px 0 0; font-size: 0.95rem; color: #7f1d1d; font-weight: 600; }
+      .wk-qaqc-note { margin: 8px 0 0; font-size: 0.9rem; color: #7f1d1d; }
+      .wk-qaqc-actions { margin-top: 12px; }
+      .wk-qaqc-actions .btn-touch--resolve-qa { width: 100%; min-height: 64px; font-size: 18px; font-weight: 800; }
       .wk-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+      .wk-touch { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin-top: 14px; }
+      .wk-touch .btn-touch { min-height: 52px; font-size: 15px; font-weight: 800; border-radius: 12px; }
       .wk-pending { background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 10px; padding: 12px; margin-top: 12px; }
       .wk-assignment { display: flex; align-items: center; gap: 12px; background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 10px; padding: 12px 16px; margin: 12px 0; }
       .wk-assignment-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: #047857; font-weight: 700; }
@@ -24,11 +46,20 @@
       .wk-phase-summary-title { margin: 0 0 10px; font-size: 0.95rem; font-weight: 800; color: #1e3a5f; }
       .wk-phase-summary-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
       .wk-phase-summary-item { font-size: 0.9rem; font-weight: 600; color: #334155; }
-      .wk-phase-summary-item--running { color: #15803d; }
-      .wk-value--paused { color: #b45309; }
-      .wk-phase-summary-item--paused { color: #b45309; }
-      .wk-phase-summary-item--completed { color: #1d4ed8; }
-      .wk-phase-summary-item--not_started { color: #94a3b8; font-weight: 500; }
+      .wk-open-tanks { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+      .wk-open-tank-btn { min-height: 44px; }
+      .wk-open-tank-btn.is-active { outline: 2px solid #2563eb; }
+      .wk-pieces { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+      .wk-piece-chip { padding: 8px 12px; border-radius: 999px; border: 1px solid #cbd5e1; font-weight: 700; background: #fff; }
+      .wk-piece-chip.done { background: #ecfdf5; border-color: #6ee7b7; color: #065f46; }
+      .wk-piece-chip.current { background: #eff6ff; border-color: #93c5fd; color: #1d4ed8; }
+      .wk-piece-touch { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; margin-top: 4px; }
+      .wk-piece-touch .btn-touch.is-selected { outline: 2px solid #2563eb; background: #eff6ff; }
+      .wk-piece-touch .btn-touch.is-done { opacity: 0.65; }
+      .modal-note { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: none; align-items: center; justify-content: center; z-index: 80; padding: 16px; }
+      .modal-note.show { display: flex; }
+      .modal-note-card { background: #fff; border-radius: 14px; padding: 18px; width: min(480px, 100%); display: grid; gap: 10px; }
+      .lang-bar { margin-left: auto; }
       @media (max-width: 640px) { .wk-grid { grid-template-columns: 1fr; } }
     </style>
   </head>
@@ -37,22 +68,23 @@
       <header class="kiosk-header">
         <div class="kiosk-header-row">
           <div>
-            <h1>Factory Scan Clock</h1>
+            <h1 data-i18n="app.title">Factory Scan Clock</h1>
             <p id="machineLabel" class="wk-sub">Winding Machine</p>
           </div>
+          <div id="kioskLangMount" class="lang-bar"></div>
           <button id="logoutBtn" type="button" class="btn-secondary">Exit Kiosk</button>
         </div>
       </header>
       <section class="kiosk-card scan-panel">
         <div class="scan-panel-head">
-          <h2 id="workflowTitle">Scan team barcode</h2>
-          <p id="workflowSub">Scan TEAM, tank, then phase. Pause: STOP:BREAK / STOP:LUNCH / RESUME. End day: REASON:END_SHIFT. Finish: employee badge + Part Complete.</p>
+          <h2 id="workflowTitle" data-i18n="kiosk.scanTeam">Scan team barcode</h2>
+          <p id="workflowSub">Scan TEAM, tank, then phase. Touch buttons match barcodes.</p>
         </div>
         <input id="scannerTrap" type="text" class="scanner-trap-input" tabindex="0" inputmode="none" autocomplete="off" readonly aria-label="Scanner" />
         <form id="scanForm" class="scan-input-row" autocomplete="off">
           <label for="manualBarcodeInput">Manual entry</label>
           <div class="scan-input-wrap scan-input-wrap--scanner">
-            <input id="manualBarcodeInput" type="text" placeholder="TEAM-WINDER-1 · TANK_1234 · PHASE:WIND · STOP:LUNCH · RESUME · REASON:END_SHIFT" autocomplete="off" />
+            <input id="manualBarcodeInput" type="text" placeholder="TEAM · TANK · PHASE · STOP · RESUME" autocomplete="off" />
             <button id="scanButton" type="button" class="scan-submit-btn">Scan</button>
           </div>
         </form>
@@ -71,21 +103,102 @@
           <div class="wk-item"><p class="wk-label">Status</p><p id="valStatus" class="wk-value wk-value--idle">Idle</p></div>
           <div class="wk-item"><p class="wk-label">Current Phase Time</p><p id="valElapsed" class="wk-value">—</p></div>
           <div class="wk-item"><p class="wk-label">Tank Total Running Time</p><p id="valTankTotal" class="wk-value">—</p></div>
+          <div class="wk-item"><p class="wk-label">Piece</p><p id="valPiece" class="wk-value">—</p></div>
         </div>
+        <div id="pieceChips" class="wk-pieces" hidden></div>
+        <div id="openTanksPanel" class="wk-open-tanks" hidden></div>
         <div id="phaseSummaryPanel" class="wk-phase-summary" hidden>
           <h3 class="wk-phase-summary-title">Phase Time Summary</h3>
           <ul id="phaseSummaryList" class="wk-phase-summary-list"></ul>
         </div>
         <div id="pendingPanel" class="wk-pending" hidden><p id="pendingText">—</p></div>
-        <div class="wk-actions">
-          <button id="btnPartComplete" type="button" class="btn-primary" hidden>Part Complete</button>
+        <div id="qaQcPanel" class="wk-qaqc-panel" hidden>
+          <h3 class="wk-qaqc-title">QA/QC Issue Open</h3>
+          <p id="qaQcPhasePaused" class="wk-qaqc-meta">Phase Paused: —</p>
+          <p id="qaQcStarted" class="wk-qaqc-meta">Started: —</p>
+          <p id="qaQcNote" class="wk-qaqc-note" hidden></p>
+          <div class="wk-qaqc-actions">
+            <button type="button" class="btn-primary btn-touch btn-touch--resolve-qa" id="btnResolveQaQcPanel">Resolve QA/QC</button>
+          </div>
+        </div>
+        <div class="wk-touch" id="touchControls" aria-label="Touch controls">
+          <button type="button" class="btn-primary btn-touch btn-touch--resolve-qa" id="btnResolveQaQc" data-barcode="QA_QC_RESOLVE" hidden>Resolve QA/QC</button>
+          <button type="button" class="btn-primary btn-touch" data-barcode="RESUME" data-i18n="kiosk.resume">Resume</button>
+          <button type="button" class="btn-secondary btn-touch" data-barcode="STOP:BREAK" data-i18n="kiosk.break">Break</button>
+          <button type="button" class="btn-secondary btn-touch" data-barcode="STOP:LUNCH" data-i18n="kiosk.lunch">Lunch</button>
+          <button type="button" class="btn-secondary btn-touch btn-touch--downtime" data-barcode="STOP:DOWNTIME" data-i18n="kiosk.downtime">Downtime</button>
+          <button type="button" class="btn-secondary btn-touch btn-touch--qa-qc" id="btnQaQc" data-barcode="ALERT:QA_QC">QA/QC</button>
+          <button type="button" class="btn-secondary btn-touch" data-barcode="PHASE:CORRECTIONS" data-i18n="kiosk.correction">Correction</button>
+          <button type="button" class="btn-primary btn-touch" data-barcode="PHASE:PIECE_COMPLETE" data-i18n="kiosk.pieceComplete">Piece Complete</button>
+          <button type="button" class="btn-primary btn-touch" data-barcode="PHASE:TANK_COMPLETE" data-i18n="kiosk.tankComplete">Tank Complete</button>
+          <button type="button" class="btn-secondary btn-touch" data-barcode="REASON:END_SHIFT" data-i18n="kiosk.endShift">End Shift</button>
+          <div id="pieceTouchButtons" class="wk-piece-touch" aria-label="Piece selection"></div>
+          <button type="button" class="btn-secondary btn-touch" id="btnOpenNotes" data-i18n="kiosk.notes">Notes</button>
+          <button type="button" class="btn-secondary btn-touch" id="btnShowPhases" data-i18n="kiosk.changePhase">Change Phase</button>
         </div>
       </section>
       <section class="kiosk-card selection-panel" id="phasePanel" hidden>
-        <h3>Select phase</h3>
+        <h3 data-i18n="kiosk.changePhase">Select phase</h3>
         <div id="phaseButtons" class="selection-buttons"></div>
       </section>
     </main>
-    <script src="/machine-kiosk.js?v=2"></script>
+    <div id="noteModal" class="modal-note" role="dialog" aria-modal="true" hidden>
+      <div class="modal-note-card">
+        <h3 id="noteModalTitle">Notes</h3>
+        <label>Type
+          <select id="noteType">
+            <option value="general">General</option>
+            <option value="problem">Problem</option>
+            <option value="maintenance">Maintenance</option>
+            <option value="quality">Quality</option>
+            <option value="safety">Safety</option>
+            <option value="correction">Correction</option>
+          </select>
+        </label>
+        <textarea id="noteBody" rows="4" placeholder="Enter note…"></textarea>
+        <div class="wk-actions">
+          <button type="button" class="btn-primary" id="btnSaveNote" data-i18n="common.save">Save</button>
+          <button type="button" class="btn-secondary" id="btnCancelNote" data-i18n="common.cancel">Cancel</button>
+        </div>
+      </div>
+    </div>
+    <div id="downtimeModal" class="modal-note" role="dialog" aria-modal="true" hidden>
+      <div class="modal-note-card">
+        <h3>Downtime reason</h3>
+        <p class="muted" style="margin:0">Applies only to the selected tank. Other tanks keep running.</p>
+        <label>Reason
+          <select id="downtimeReason">
+            <option value="mold_issue">Mold issue</option>
+            <option value="material_unavailable">Material unavailable</option>
+            <option value="equipment_issue">Equipment issue</option>
+            <option value="quality_inspection">Quality inspection</option>
+            <option value="waiting_for_cure">Waiting for cure</option>
+            <option value="other">Other</option>
+          </select>
+        </label>
+        <textarea id="downtimeNote" rows="3" placeholder="Optional short note…"></textarea>
+        <div class="wk-actions">
+          <button type="button" class="btn-primary" id="btnSaveDowntime">Start Downtime</button>
+          <button type="button" class="btn-secondary" id="btnSkipDowntimeReason">Skip reason</button>
+          <button type="button" class="btn-secondary" id="btnCancelDowntime">Cancel</button>
+        </div>
+      </div>
+    </div>
+    <div id="resolveQaQcModal" class="modal-note" role="dialog" aria-modal="true" hidden>
+      <div class="modal-note-card">
+        <h3>Resolve QA/QC</h3>
+        <p class="muted" style="margin:0">Optional. Resolves only the selected Tank + Piece and resumes the paused phase.</p>
+        <label>Resolution Note
+          <textarea id="resolveQaQcNote" rows="3" placeholder="Optional resolution note…"></textarea>
+        </label>
+        <div class="wk-actions">
+          <button type="button" class="btn-primary" id="btnConfirmResolveQaQc">Resolve</button>
+          <button type="button" class="btn-secondary" id="btnSkipResolveQaQcNote">Resolve without note</button>
+          <button type="button" class="btn-secondary" id="btnCancelResolveQaQc">Cancel</button>
+        </div>
+      </div>
+    </div>
+    <script src="/i18n.js"></script>
+    <script src="/machine-kiosk.js?v=8"></script>
   </body>
 </html>

@@ -137,6 +137,70 @@
     </div>`;
   }
 
+  function renderDowntime(intervals, totalDisplay) {
+    const rows = Array.isArray(intervals) ? intervals : [];
+    if (!rows.length) {
+      return '<p class="muted">No downtime recorded for this tank.</p>';
+    }
+    const body = rows
+      .map(
+        (d) => `<tr>
+          <td>${escapeHtml(fmtDateTime(d.started_at))}</td>
+          <td>${escapeHtml(d.ended_at ? fmtDateTime(d.ended_at) : d.open ? 'Open' : '—')}</td>
+          <td>${escapeHtml(d.duration_display || '—')}</td>
+          <td>${escapeHtml(d.reason_label || d.reason_code || '—')}</td>
+          <td>${escapeHtml(d.reason_note || '—')}</td>
+          <td>${escapeHtml(d.phase_name || '—')}</td>
+        </tr>`
+      )
+      .join('');
+    return `<p class="tank-activity-total"><strong>Total Downtime:</strong> ${escapeHtml(totalDisplay || '—')}</p>
+      <div class="table-wrap table-scroll">
+      <table>
+        <thead>
+          <tr><th>Start</th><th>End</th><th>Duration</th><th>Reason</th><th>Note</th><th>Phase</th></tr>
+        </thead>
+        <tbody>${body}</tbody>
+      </table>
+    </div>`;
+  }
+
+  function renderPhaseSummary(summary, totalDisplay) {
+    const rows = Array.isArray(summary) ? summary : [];
+    if (!rows.length) {
+      return '<p class="muted">No phase time summary for this tank yet.</p>';
+    }
+    const items = rows
+      .map((row) => {
+        const st = String(row.status || 'not_started');
+        const time = st === 'not_started' ? '—' : escapeHtml(row.total_duration_display || '0m');
+        const label = row.status_label
+          ? escapeHtml(row.status_label)
+          : st === 'running'
+            ? 'Running'
+            : st === 'paused'
+              ? 'Paused'
+              : st === 'completed'
+                ? 'Completed'
+                : 'Not Started';
+        const completed =
+          st === 'completed' && row.completed_at
+            ? ` · ${escapeHtml(fmtDateTime(row.completed_at))}`
+            : '';
+        const notes = row.notes ? `<div class="tank-activity-phase-notes">${escapeHtml(row.notes)}</div>` : '';
+        return `<li class="phase-time-summary-item phase-time-summary-item--${escapeHtml(st)}">
+          <strong>${escapeHtml(row.phase_name || row.phase_code || '—')}</strong>
+          — ${time} — ${label}${completed}
+          ${notes}
+        </li>`;
+      })
+      .join('');
+    return `<div class="phase-time-summary">
+      <p class="tank-activity-total"><strong>Tank Total Running Time:</strong> ${escapeHtml(totalDisplay || '—')}</p>
+      <ul class="phase-time-summary-list">${items}</ul>
+    </div>`;
+  }
+
   async function openTankActivity(tankNumber) {
     const tank = String(tankNumber || '').trim();
     if (!tank) return;
@@ -149,6 +213,10 @@
       if (!res.ok || !data.ok) throw new Error((data && data.message) || 'Could not load tank activity.');
       if (!bodyEl) return;
       bodyEl.innerHTML = `
+        <h4 class="tank-activity-section-title">Phase Time Summary</h4>
+        ${renderPhaseSummary(data.phase_time_summary || [], data.tank_total_running_time_display)}
+        <h4 class="tank-activity-section-title">Downtime</h4>
+        ${renderDowntime(data.downtime_intervals || [], data.downtime_total_display)}
         <h4 class="tank-activity-section-title">Production Sessions</h4>
         ${renderSessions(data.sessions || [])}
         <h4 class="tank-activity-section-title">Alerts</h4>

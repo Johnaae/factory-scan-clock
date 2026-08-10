@@ -50,21 +50,57 @@
       <section class="card manager-card">
         <div class="card-header">
           <div class="card-header-main">
-            <h2 class="card-title">Tank Management</h2>
+            <h2 class="card-title" data-i18n="tank.management">Tank Management</h2>
             <p class="card-kicker">Track production tanks, update status, and print traveler barcodes.</p>
           </div>
+          <div id="managerLangMount" class="lang-bar"></div>
         </div>
         <div class="card-body manager-form-stack">
-          <div class="manager-tank-form-row">
+          <div class="manager-tank-form-row manager-form-grid manager-form-grid-3">
             <div class="field">
-              <label for="tankNumber">Tank Number</label>
+              <label for="tankNumber" data-i18n="tank.number">Tank Number</label>
               <input id="tankNumber" type="text" placeholder="e.g. 1023 or FGT-2201" autocomplete="off" />
             </div>
             <div class="field">
-              <label for="tankDescription">Description</label>
-              <textarea id="tankDescription" class="manager-textarea-short" rows="3" placeholder="Optional short description" autocomplete="off"></textarea>
+              <label for="tankCustomer" data-i18n="tank.customer">Customer</label>
+              <input id="tankCustomer" type="text" placeholder="Customer" autocomplete="off" />
             </div>
-            <button id="btnAddTank" class="btn btn-primary manager-form-action-btn" type="button">Add Tank</button>
+            <div class="field">
+              <label for="tankModel" data-i18n="tank.model">Model</label>
+              <input id="tankModel" type="text" placeholder="Model" autocomplete="off" />
+            </div>
+            <div class="field">
+              <label for="tankPriority" data-i18n="tank.priority">Priority</label>
+              <select id="tankPriority">
+                <option value="">—</option>
+                <option value="low">Low</option>
+                <option value="normal" selected>Normal</option>
+                <option value="high">High</option>
+                <option value="urgent">Urgent</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="tankDueDate" data-i18n="tank.dueDate">Due Date</label>
+              <input id="tankDueDate" type="date" />
+            </div>
+            <div class="field">
+              <label for="tankPieceCount">Number of Pieces</label>
+              <select id="tankPieceCount">
+                <option value="1" selected>1</option>
+                <option value="2">2</option>
+                <option value="3">3</option>
+                <option value="4">4</option>
+              </select>
+            </div>
+            <div class="field" style="grid-column: 1 / -1;">
+              <label for="tankDescription" data-i18n="tank.description">Description</label>
+              <textarea id="tankDescription" class="manager-textarea-short" rows="2" placeholder="Optional short description" autocomplete="off"></textarea>
+            </div>
+            <div class="field" style="grid-column: 1 / -1;">
+              <label for="tankNotes" data-i18n="tank.notes">Notes</label>
+              <textarea id="tankNotes" class="manager-textarea-short" rows="2" placeholder="Optional notes" autocomplete="off"></textarea>
+            </div>
+            <button id="btnAddTank" class="btn btn-primary manager-form-action-btn" type="button" data-i18n="tank.add">Add Tank</button>
           </div>
           <div class="manager-tank-form-filters manager-form-grid manager-form-grid-2">
             <div class="field">
@@ -77,11 +113,17 @@
             <div class="field">
               <label for="tankStatusFilter">Tank Filter</label>
               <select id="tankStatusFilter">
-                <option value="active" selected>Active</option>
+                <option value="active" selected>Active / Waiting</option>
+                <option value="waiting">Waiting</option>
                 <option value="archived">Completed</option>
                 <option value="all">All</option>
               </select>
             </div>
+          </div>
+          <div class="toolbar manager-toolbar">
+            <button id="btnPrintSelectedTanks" class="btn btn-sm btn-primary" type="button" data-i18n="tank.printSelected">Print Selected</button>
+            <button id="btnPrintAllTanks" class="btn btn-sm" type="button" data-i18n="tank.printAll">Print All</button>
+            <button id="btnSelectAllTanks" class="btn btn-sm" type="button">Select All</button>
           </div>
           <div class="toastline manager-alert" id="tankHint"></div>
         </div>
@@ -89,9 +131,69 @@
           <div class="table-wrap table-scroll manager-table-wrap">
             <table class="manager-table">
               <thead>
-                <tr><th>Tank #</th><th>Description</th><th>Status</th><th>Created</th><th>Completed</th><th>Duration</th><th>Actions</th></tr>
+                <tr>
+                  <th><input type="checkbox" id="tankSelectAll" aria-label="Select all" /></th>
+                  <th>Tank #</th><th>Customer</th><th>Model</th><th>Pieces</th><th>Status</th><th>Created</th><th>Started</th><th>Duration</th><th>Actions</th>
+                </tr>
               </thead>
               <tbody id="tankBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="card manager-card" id="dailySummarySection">
+        <div class="card-header">
+          <div class="card-header-main">
+            <h2 class="card-title" data-i18n="daily.summary">Daily Summary</h2>
+            <p class="card-kicker">What happened to every tank today — progress by Winder, not payroll.</p>
+          </div>
+          <div class="toolbar">
+            <input id="dailySummaryDate" type="date" />
+            <input id="dailySummaryFilter" type="search" placeholder="Filter…" />
+            <button id="btnDailySummaryRefresh" class="btn btn-sm" type="button" data-i18n="common.refresh">Refresh</button>
+            <button id="btnDailySummaryCsv" class="btn btn-sm" type="button">Export CSV</button>
+            <button id="btnDailySummaryPrint" class="btn btn-sm" type="button">Export PDF</button>
+          </div>
+        </div>
+        <div class="card-body card-body--flush">
+          <div class="table-wrap table-scroll manager-table-wrap" id="dailySummaryPrintArea">
+            <table class="manager-table manager-table--daily-summary" id="dailySummaryTable">
+              <thead>
+                <tr>
+                  <th data-sort="tank_number">Tank #</th>
+                  <th data-sort="team_name">Team</th>
+                  <th data-sort="machine_name">Machine</th>
+                  <th data-sort="current_phase">Current Phase</th>
+                  <th data-sort="production_status">Status</th>
+                  <th data-sort="current_phase_time_ms">Current Phase Time</th>
+                  <th data-sort="tank_total_running_time_ms">Total Running Time</th>
+                  <th data-sort="percent_complete">Progress</th>
+                  <th data-sort="last_activity_at">Last Activity</th>
+                  <th>View Report</th>
+                </tr>
+              </thead>
+              <tbody id="dailySummaryBody"><tr><td colspan="10" class="muted">Loading…</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="card manager-card" id="productionNotesSection">
+        <div class="card-header">
+          <div class="card-header-main">
+            <h2 class="card-title">Production Notes</h2>
+            <p class="card-kicker">Operator notes from the scanner (general, problem, maintenance, quality, safety, corrections).</p>
+          </div>
+          <button id="btnNotesRefresh" class="btn btn-sm" type="button">Refresh</button>
+        </div>
+        <div class="card-body card-body--flush">
+          <div class="table-wrap table-scroll manager-table-wrap">
+            <table class="manager-table">
+              <thead>
+                <tr><th>When</th><th>Type</th><th>Tank</th><th>Piece</th><th>Team</th><th>Machine</th><th>Note</th></tr>
+              </thead>
+              <tbody id="productionNotesBody"><tr><td colspan="7" class="muted">Loading…</td></tr></tbody>
             </table>
           </div>
         </div>
@@ -261,7 +363,7 @@
         <div class="modal-head">
           <h3 class="modal-title" id="tankReportTitle">Tank Report</h3>
           <div class="toolbar">
-            <button id="btnPrintTankReport" class="btn btn-sm" type="button">Print Report</button>
+            <button id="btnPrintTankReport" class="btn btn-sm" type="button">Export PDF</button>
             <button id="btnCloseTankReport" class="btn btn-sm" type="button">Close</button>
           </div>
         </div>
@@ -269,17 +371,75 @@
       </div>
     </div>
 
+    <div id="tankEditBackdrop" class="modal-backdrop" role="dialog" aria-modal="true" aria-hidden="true">
+      <div class="modal modal-wide tank-edit-modal" role="document">
+        <div class="modal-head">
+          <h3 class="modal-title" data-i18n="tank.edit">Edit Tank</h3>
+          <button id="btnCloseTankEdit" class="btn btn-sm" type="button">Close</button>
+        </div>
+        <div class="modal-body tank-edit-modal-body">
+          <input type="hidden" id="editTankId" />
+          <div class="manager-form-grid manager-form-grid-2">
+            <div class="field"><label for="editTankNumber">Tank Number</label><input id="editTankNumber" type="text" /></div>
+            <div class="field"><label for="editTankStatus">Status</label>
+              <select id="editTankStatus">
+                <option value="waiting">Waiting</option>
+                <option value="active">Active</option>
+                <option value="paused">Paused</option>
+                <option value="archived">Completed</option>
+              </select>
+            </div>
+            <div class="field"><label for="editTankCustomer">Customer</label><input id="editTankCustomer" type="text" /></div>
+            <div class="field"><label for="editTankModel">Model</label><input id="editTankModel" type="text" /></div>
+            <div class="field"><label for="editTankPriority">Priority</label>
+              <select id="editTankPriority">
+                <option value="">—</option>
+                <option value="low">Low</option>
+                <option value="normal">Normal</option>
+                <option value="high">High</option>
+                <option value="urgent">Urgent</option>
+              </select>
+            </div>
+            <div class="field"><label for="editTankDueDate">Due Date</label><input id="editTankDueDate" type="date" /></div>
+            <div class="field">
+              <label for="editTankPieceCount">Number of Pieces</label>
+              <select id="editTankPieceCount">
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="3">3</option>
+                <option value="4">4</option>
+              </select>
+              <p class="muted" id="editTankPieceCountHint" style="margin:6px 0 0;font-size:12px"></p>
+            </div>
+            <div class="field" style="grid-column:1/-1"><label for="editTankDescription">Description</label><textarea id="editTankDescription" rows="2"></textarea></div>
+            <div class="field" style="grid-column:1/-1"><label for="editTankNotes">Notes</label><textarea id="editTankNotes" rows="3"></textarea></div>
+          </div>
+          <div class="toastline manager-alert" id="editTankHint"></div>
+        </div>
+        <div class="modal-footer tank-edit-modal-footer">
+          <button id="btnSaveTankEdit" class="btn btn-primary" type="button" data-i18n="common.save">Save</button>
+          <button id="btnCancelTankEdit" class="btn" type="button" data-i18n="common.cancel">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/i18n.js"></script>
     <script src="/status-styles.js"></script>
-    <script src="/tank-activity.js"></script>
-    <script src="/session-details.js"></script>
+    <script src="/tank-activity.js?v=2"></script>
+    <script src="/session-details.js?v=3"></script>
+    <script src="/phase-time-editor.js?v=3"></script>
     <script src="/team-member-picker.js"></script>
     <script src="/team-member-details.js"></script>
-    <script src="/machine-dashboard.js?v=4"></script>
+    <script src="/machine-dashboard.js?v=9"></script>
     <script src="/team-dashboard.js?v=2"></script>
     <script src="/alert-sound.js"></script>
-    <script src="/manager.js?v=9"></script>
+    <script src="/manager.js?v=14"></script>
     <script>
       document.addEventListener('DOMContentLoaded', () => {
+        if (window.FactoryI18n) {
+          window.FactoryI18n.mountSelector('managerLangMount');
+          window.FactoryI18n.applyDom();
+        }
         if (window.AlertSound) {
           window.AlertSound.mount();
         }
@@ -323,6 +483,8 @@
                   <td>${a.machine_name || '—'}</td>
                   <td>${a.team_name || '—'}</td>
                   <td>${a.tank_number || '—'}</td>
+                  <td>${a.piece_number != null ? `Piece ${a.piece_number}` : '—'}</td>
+                  <td>${a.phase_name || '—'}</td>
                   <td>${a.reported_at ? new Date(a.reported_at).toLocaleString() : '—'}</td>
                   <td>${emailCell}</td>
                   <td>${a.resolved_at ? new Date(a.resolved_at).toLocaleString() : '—'}</td>
@@ -333,8 +495,8 @@
             const nextHtml = `${openHtml}
               <h3 class="manager-section-heading">Alert history</h3>
               <div class="table-wrap table-scroll manager-table-wrap"><table class="manager-table">
-                <thead><tr><th>Status</th><th>Type</th><th>Machine</th><th>Team</th><th>Tank</th><th>Reported</th><th>Email</th><th>Resolved</th><th>By</th></tr></thead>
-                <tbody>${histRows || '<tr><td colspan="9" class="muted">No alerts yet.</td></tr>'}</tbody>
+                <thead><tr><th>Status</th><th>Type</th><th>Machine</th><th>Team</th><th>Tank</th><th>Piece</th><th>Phase</th><th>Reported</th><th>Email</th><th>Resolved</th><th>By</th></tr></thead>
+                <tbody>${histRows || '<tr><td colspan="11" class="muted">No alerts yet.</td></tr>'}</tbody>
               </table></div>`;
             if (nextHtml !== lastAlertHistoryHtml) {
               el.innerHTML = nextHtml;

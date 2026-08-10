@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Factory Scan Clock — Daily Summary</title>
+    <title>Factory Scan Clock — Tank Daily Summary</title>
     <meta name="theme-color" content="#0f2a44" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="Factory Scan" />
@@ -33,7 +33,7 @@
           </div>
           <div class="brand-text">
             <div class="brand-title">Factory Scan Clock</div>
-            <div class="brand-sub">Daily attendance snapshot</div>
+            <div class="brand-sub">Tank production snapshot</div>
           </div>
         </div>
         <nav class="nav" aria-label="Primary">
@@ -56,131 +56,61 @@
 
     <main class="container">
       <div class="page-hero">
-        <h1>Daily summary</h1>
-        <p>Per-employee first IN, last OUT, scan count, and end-of-day status for the selected calendar date.</p>
+        <h1>Tank Daily Summary</h1>
+        <p>Tank progress for the day — phase, status, and running time by Winder.</p>
       </div>
 
-      <section class="card">
+      <section class="card" id="dailySummaryPrintRoot">
         <div class="card-header card-header-rows">
           <div class="card-header-main">
-            <h2 class="card-title">Summary &amp; export</h2>
-            <p class="card-kicker">Pick a calendar date for the grid below. Exports use the unified report builder (CSV &amp; PDF).</p>
+            <h2 class="card-title">Production by tank</h2>
+            <p class="card-kicker">One row per tank. Open View Report for piece, downtime, and phase detail.</p>
           </div>
           <div class="toolbar">
             <button class="btn btn-primary" type="button" id="btnToday">Jump to today</button>
+            <button class="btn btn-sm" type="button" id="btnRefresh">Refresh</button>
+            <button class="btn btn-sm" type="button" id="btnCsv">Export CSV</button>
+            <button class="btn btn-sm" type="button" id="btnPrint">Export PDF</button>
           </div>
         </div>
         <div class="card-body">
-          <div class="field retain-focus" style="max-width: 320px">
-            <label for="sumDate">Summary date</label>
-            <input id="sumDate" type="date" />
-          </div>
-
-          <div class="card export-hub-card" style="margin-top: var(--space-5)">
-            <div class="card-body export-hub-body retain-focus">
-              <header class="export-hub-head">
-                <h2 class="export-hub-title">Export Reports</h2>
-                <p class="export-hub-subtitle">
-                  Export payroll summaries or raw scan logs by format, date scope, and employee.
-                </p>
-              </header>
-              <div class="export-hub-controls export-panel">
-                <div class="export-hub-grid">
-                  <div class="export-hub-field">
-                    <span class="export-hub-label" id="lblSxFormat">Format</span>
-                    <div class="segmented" role="group" aria-labelledby="lblSxFormat">
-                      <label class="segmented-opt"
-                        ><input type="radio" name="sxFormat" value="pdf" /><span>PDF</span></label
-                      >
-                      <label class="segmented-opt"
-                        ><input type="radio" name="sxFormat" value="csv" checked /><span>CSV</span></label
-                      >
-                    </div>
-                  </div>
-                  <div class="export-hub-field">
-                    <span class="export-hub-label" id="lblSxScope">Date scope</span>
-                    <div class="segmented" role="group" aria-labelledby="lblSxScope">
-                      <label class="segmented-opt"
-                        ><input type="radio" name="sxScope" value="today" checked /><span>Today</span></label
-                      >
-                      <label class="segmented-opt" title="Date range"
-                        ><input type="radio" name="sxScope" value="range" /><span>Range</span></label
-                      >
-                      <label class="segmented-opt"
-                        ><input type="radio" name="sxScope" value="all" /><span>All logs</span></label
-                      >
-                    </div>
-                  </div>
-                  <div class="export-hub-field">
-                    <span class="export-hub-label" id="lblSxWorkers">Workers</span>
-                    <div class="segmented" role="group" aria-labelledby="lblSxWorkers">
-                      <label class="segmented-opt"
-                        ><input type="radio" name="sxWorkerMode" value="all" checked /><span>All workers</span></label
-                      >
-                      <label class="segmented-opt"
-                        ><input type="radio" name="sxWorkerMode" value="single" /><span>One employee</span></label
-                      >
-                    </div>
-                  </div>
-                </div>
-                <div class="export-hub-employee is-hidden" id="sxEmployeeWrap" aria-hidden="true">
-                  <label class="export-hub-label" for="sxEmployee">Employee</label>
-                  <select id="sxEmployee" class="export-select-premium" aria-label="Select employee for export">
-                    <option value="all">All workers</option>
-                  </select>
-                </div>
-                <div class="export-hub-dates split split-2 export-date-row is-hidden" id="sxDateRow">
-                  <div class="field retain-focus">
-                    <label for="sxStart">Start date</label>
-                    <input id="sxStart" type="date" />
-                  </div>
-                  <div class="field retain-focus">
-                    <label for="sxEnd">End date</label>
-                    <input id="sxEnd" type="date" />
-                  </div>
-                </div>
-                <div class="export-hub-actions">
-                  <button class="btn btn-primary btn-export-report" type="button" id="btnSxExport" aria-busy="false">
-                    <svg class="btn-export-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                      <path
-                        d="M12 3v12m0 0 4-4m-4 4-4-4M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3"
-                        stroke="currentColor"
-                        stroke-width="2"
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                      />
-                    </svg>
-                    <span class="btn-export-label">Export Report</span>
-                  </button>
-                </div>
-                <p class="export-status-line" id="sxExportHint" role="status"></p>
-              </div>
+          <div class="split split-2" style="align-items: end; gap: 12px; max-width: 560px">
+            <div class="field retain-focus">
+              <label for="sumDate">Summary date</label>
+              <input id="sumDate" type="date" />
+            </div>
+            <div class="field retain-focus">
+              <label for="sumFilter">Filter</label>
+              <input id="sumFilter" type="search" placeholder="Tank, team, machine, phase…" />
             </div>
           </div>
-
           <div class="toastline" id="sumHint" style="margin-top: 14px"></div>
         </div>
         <div class="card-body card-body--flush">
           <div class="table-panel">
-          <div class="table-wrap table-scroll">
-            <table class="summary-table">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Code</th>
-                  <th>Active</th>
-                  <th>First IN</th>
-                  <th>Last OUT</th>
-                  <th class="th-num">Scans</th>
-                  <th>Status (day)</th>
-                  <th class="th-num">Hours (rnd)</th>
-                  <th class="th-num">Hourly rate</th>
-                  <th class="th-num">Total wage</th>
-                </tr>
-              </thead>
-              <tbody id="sumBody"></tbody>
-            </table>
-          </div>
+            <div class="table-wrap table-scroll" id="sumPrintArea">
+              <table class="summary-table summary-table--daily" id="sumTable">
+                <thead>
+                  <tr>
+                    <th>Tank #</th>
+                    <th>Team</th>
+                    <th>Machine</th>
+                    <th>Current Phase</th>
+                    <th>Status</th>
+                    <th>Current Phase Time</th>
+                    <th>Total Running Time</th>
+                    <th>Progress</th>
+                    <th>Last Activity</th>
+                    <th>View Report</th>
+                  </tr>
+                </thead>
+                <tbody id="sumBody">
+                  <tr>
+                    <td colspan="10" class="muted">Loading…</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       </section>
