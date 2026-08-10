@@ -246,12 +246,6 @@ ALTER TABLE machine_sessions ADD COLUMN IF NOT EXISTS piece_id BIGINT;
 ALTER TABLE machine_sessions ADD COLUMN IF NOT EXISTS notes TEXT;
 ALTER TABLE part_complete_events ADD COLUMN IF NOT EXISTS piece_number INTEGER;
 ALTER TABLE part_complete_events ADD COLUMN IF NOT EXISTS piece_id BIGINT;
-ALTER TABLE machine_session_edits ADD COLUMN IF NOT EXISTS tank_id BIGINT;
-ALTER TABLE machine_session_edits ADD COLUMN IF NOT EXISTS piece_id BIGINT;
-ALTER TABLE machine_session_edits ADD COLUMN IF NOT EXISTS piece_number INTEGER;
-ALTER TABLE machine_session_edits ADD COLUMN IF NOT EXISTS phase_code TEXT;
-ALTER TABLE machine_session_edits ADD COLUMN IF NOT EXISTS phase_name TEXT;
-
 
 CREATE TABLE IF NOT EXISTS employee_team_memberships (
   id BIGSERIAL PRIMARY KEY,
@@ -283,6 +277,12 @@ CREATE TABLE IF NOT EXISTS machine_session_edits (
   edited_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   edit_reason TEXT NOT NULL
 );
+
+ALTER TABLE machine_session_edits ADD COLUMN IF NOT EXISTS tank_id BIGINT;
+ALTER TABLE machine_session_edits ADD COLUMN IF NOT EXISTS piece_id BIGINT;
+ALTER TABLE machine_session_edits ADD COLUMN IF NOT EXISTS piece_number INTEGER;
+ALTER TABLE machine_session_edits ADD COLUMN IF NOT EXISTS phase_code TEXT;
+ALTER TABLE machine_session_edits ADD COLUMN IF NOT EXISTS phase_name TEXT;
 `;
 
 /** Extended tables for pieces and production notes (created after parents). */
