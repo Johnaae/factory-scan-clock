@@ -8,6 +8,7 @@ const WINDING_PHASES = [
   { code: 'DOME_INSTALL', label: 'Dome Install', barcode: 'PHASE:DOME_INSTALL' },
   { code: 'WIND', label: 'Wind', barcode: 'PHASE:WIND' },
   { code: 'HOT_COAT', label: 'Hot Coat', barcode: 'PHASE:HOT_COAT' },
+  { code: 'GRIND', label: 'Grind', barcode: 'PHASE:GRIND' },
   { code: 'LINER', label: 'Liner', barcode: 'PHASE:LINER' },
   { code: 'CORRECTIONS', label: 'Corrections', barcode: 'PHASE:CORRECTIONS' },
   { code: 'SPACER_GLASS', label: 'Spacer Glass', barcode: 'PHASE:SPACER_GLASS' },
@@ -23,6 +24,7 @@ const TANK_TOTAL_RUNNING_PHASE_CODES = new Set([
   'DOME_INSTALL',
   'WIND',
   'HOT_COAT',
+  'GRIND',
   'LINER',
   'CORRECTIONS',
   'SPACER_GLASS',
@@ -177,6 +179,24 @@ function mapMachineForClient(row) {
     kiosk_url: kioskUrlForSlug(slug),
     sort_order: Number(row.sort_order) || 0,
     active: Number(row.active) !== 0,
+  };
+}
+
+function countActiveProduction(sessions) {
+  const list = Array.isArray(sessions) ? sessions : [];
+  const tankKeys = new Set();
+  for (const s of list) {
+    const tid = Number(s.tank_id);
+    if (Number.isInteger(tid) && tid > 0) {
+      tankKeys.add(`id:${tid}`);
+      continue;
+    }
+    const tn = String(s.tank_number || '').trim().toUpperCase();
+    if (tn) tankKeys.add(`num:${tn}`);
+  }
+  return {
+    active_tank_count: tankKeys.size,
+    active_piece_count: list.length,
   };
 }
 
@@ -852,6 +872,33 @@ function createPhase1ProductionLogic(deps) {
     return rows;
   }
 
+  async function getOpenSessionForPiece(machineId, tankId, pieceNumber) {
+    const mid = Number(machineId);
+    const tid = Number(tankId);
+    const pieceNum = Number(pieceNumber);
+    if (!Number.isInteger(mid) || mid <= 0 || !Number.isInteger(tid) || tid <= 0) return null;
+    if (!Number.isInteger(pieceNum) || pieceNum < 1 || pieceNum > 4) return null;
+    const { rows } = await pool.query(
+      `SELECT ms.*,
+              t.name AS team_name, t.barcode AS team_barcode,
+              tk.tank_number,
+              m.name AS machine_name, m.code AS machine_code, m.barcode AS machine_barcode,
+              m.active_tank_id
+       FROM machine_sessions ms
+       JOIN teams t ON t.id = ms.team_id
+       JOIN tanks tk ON tk.id = ms.tank_id
+       JOIN machines m ON m.id = ms.machine_id
+       WHERE ms.machine_id = $1
+         AND ms.tank_id = $2
+         AND COALESCE(ms.piece_number, 1) = $3
+         AND ms.status IN ('running', 'stopped')
+       ORDER BY ms.started_at DESC, ms.id DESC
+       LIMIT 1`,
+      [mid, tid, pieceNum]
+    );
+    return rows[0] || null;
+  }
+
   async function setMachineActiveTank(machineId, tankId) {
     await pool.query(`UPDATE machines SET active_tank_id = $1 WHERE id = $2`, [
       tankId != null ? Number(tankId) : null,
@@ -1046,6 +1093,11 @@ function createPhase1ProductionLogic(deps) {
        WHERE id = $4`,
       [Number(team.id), today, ts, mid]
     );
+    await getMembershipApi().startTeamShiftMemberships(Number(team.id), {
+      at: ts,
+      source: 'team_scan',
+      reason: 'Kiosk team scan — shift start',
+    });
     return {
       team_id: Number(team.id),
       team_name: team.name,
@@ -1306,12 +1358,14 @@ function createPhase1ProductionLogic(deps) {
 
       let machineStatus = 'idle';
       let machineStatusLabel = 'Idle';
+      const productionCounts = countActiveProduction(open_sessions);
       if (open_sessions.length) {
         const anyRunning = open_sessions.some((s) => s.status === 'running');
         machineStatus = anyRunning ? 'running' : 'stopped';
+        const tankN = productionCounts.active_tank_count;
         machineStatusLabel = anyRunning
-          ? `${open_sessions.length} tank${open_sessions.length > 1 ? 's' : ''} active`
-          : `${open_sessions.length} tank${open_sessions.length > 1 ? 's' : ''} paused`;
+          ? `${tankN} tank${tankN > 1 ? 's' : ''} active`
+          : `${tankN} tank${tankN > 1 ? 's' : ''} paused`;
       } else if (assignment) {
         machineStatus = 'assigned';
         machineStatusLabel = 'Team Assigned';
@@ -1349,7 +1403,8 @@ function createPhase1ProductionLogic(deps) {
         finished_tanks_today: await countFinishedToday(m.id),
         open_alerts: openAlerts,
         open_sessions,
-        active_tank_count: open_sessions.length,
+        active_tank_count: productionCounts.active_tank_count,
+        active_piece_count: productionCounts.active_piece_count,
         pieces: [],
         session: selectedSession,
       });
@@ -1393,19 +1448,8 @@ function createPhase1ProductionLogic(deps) {
       };
     }
 
-    // Multi-tank: block only if THIS tank already has an open session on this machine.
-    const existingForTank = await getOpenSession(machine.id, tankRow.id);
-    if (existingForTank) {
-      return {
-        ok: false,
-        status: 409,
-        body: {
-          ok: false,
-          error: 'session_active',
-          message: 'This tank already has an active session on this machine. Scan a phase to continue, or switch tanks.',
-        },
-      };
-    }
+    // Multi-piece: block only if THIS tank + piece already has an open session on this machine.
+    // (checked after piece resolution below)
 
     const pieceCount = Math.min(4, Math.max(1, Number(tankRow.piece_count) || 1));
     await ensureTankPieces(tankRow.id, pieceCount);
@@ -1440,6 +1484,20 @@ function createPhase1ProductionLogic(deps) {
     const pieceNum = resolved.piece.piece_number;
     const pieceId = resolved.piece.id;
 
+    const existingForPiece = await getOpenSessionForPiece(machine.id, tankRow.id, pieceNum);
+    if (existingForPiece) {
+      return {
+        ok: false,
+        status: 409,
+        body: {
+          ok: false,
+          error: 'session_active',
+          message: `Piece ${pieceNum} already has an active session on this machine. Scan a phase to continue.`,
+          piece_number: pieceNum,
+        },
+      };
+    }
+
     // Same piece cannot have two active sessions (any winder/team).
     const conflict = await getMembershipApi().findOpenPieceSession(tankRow.id, pieceNum, null);
     if (conflict && Number(conflict.machine_id) !== Number(machine.id)) {
@@ -1453,17 +1511,6 @@ function createPhase1ProductionLogic(deps) {
           conflicting_team: conflict.team_name,
           conflicting_machine: displayMachineName(conflict.machine_name),
           piece_number: pieceNum,
-        },
-      };
-    }
-    if (conflict && Number(conflict.machine_id) === Number(machine.id)) {
-      return {
-        ok: false,
-        status: 409,
-        body: {
-          ok: false,
-          error: 'session_active',
-          message: 'This tank already has an active session on this machine. Scan a phase to continue, or switch tanks.',
         },
       };
     }
@@ -1513,7 +1560,7 @@ function createPhase1ProductionLogic(deps) {
       );
     }
 
-    const session = await getOpenSession(machine.id, tankRow.id);
+    const session = await getOpenSessionForPiece(machine.id, tankRow.id, pieceNum);
     return {
       ok: true,
       body: {
@@ -1528,11 +1575,42 @@ function createPhase1ProductionLogic(deps) {
   }
 
   async function changePhase(machine, phaseRaw, opts = {}) {
+    let session = opts.session || null;
+    const requestedPiece = opts.pieceNumber != null ? Number(opts.pieceNumber) : null;
     const tankIdHint = opts.tankId != null ? Number(opts.tankId) : null;
-    let session = tankIdHint ? await getOpenSession(machine.id, tankIdHint) : null;
-    if (!session) session = await getOpenSession(machine.id);
+    if (!session) {
+      if (requestedPiece != null && tankIdHint) {
+        session = await getOpenSessionForPiece(machine.id, tankIdHint, requestedPiece);
+      } else if (requestedPiece != null) {
+        const machineRow = await getMachineById(machine.id);
+        const activeTankId =
+          machineRow && machineRow.active_tank_id != null ? Number(machineRow.active_tank_id) : null;
+        if (activeTankId) {
+          session = await getOpenSessionForPiece(machine.id, activeTankId, requestedPiece);
+        }
+      } else if (tankIdHint) {
+        session = await getOpenSession(machine.id, tankIdHint);
+      } else {
+        session = await getOpenSession(machine.id);
+      }
+    }
     if (!session) {
       return { ok: false, status: 409, body: { ok: false, error: 'no_session', message: 'No active session.' } };
+    }
+    if (
+      requestedPiece != null &&
+      Number(session.piece_number || 1) !== requestedPiece
+    ) {
+      return {
+        ok: false,
+        status: 409,
+        body: {
+          ok: false,
+          error: 'piece_session_mismatch',
+          message: `No active session for Piece ${requestedPiece}. Scan a phase to start it.`,
+          piece_number: requestedPiece,
+        },
+      };
     }
     const phase = resolvePhase(phaseRaw);
     if (!phase) {
@@ -2252,6 +2330,14 @@ function createPhase1ProductionLogic(deps) {
         return { type: 'piece', value: num };
       }
     }
+    if (
+      s === 'EMPLOYEE_OUT' ||
+      s === 'EMPLOYEE:OUT' ||
+      s === 'SCAN:EMPLOYEE_OUT' ||
+      s === 'ACTION:EMPLOYEE_OUT'
+    ) {
+      return { type: 'employee_out', value: s };
+    }
     if (s.startsWith('PHASE:') || s.startsWith('PHASE_') || s.startsWith('ACTIVITY:')) {
       return { type: 'phase', value: s };
     }
@@ -2288,31 +2374,56 @@ function createPhase1ProductionLogic(deps) {
        LEFT JOIN employees e ON e.id = tm.employee_id
        ORDER BY tm.team_id, COALESCE(e.name, tm.name) ASC`
     );
+    const { rows: shiftMemberRows } = await pool.query(
+      `SELECT team_id, employee_id FROM employee_team_memberships WHERE left_at IS NULL`
+    );
+    const onShiftByTeamId = new Map();
+    for (const r of shiftMemberRows) {
+      const tid = Number(r.team_id);
+      if (!onShiftByTeamId.has(tid)) onShiftByTeamId.set(tid, new Set());
+      if (r.employee_id != null) onShiftByTeamId.get(tid).add(Number(r.employee_id));
+    }
     const machines = await fetchCanonicalWindingMachines();
     const productionByTeamId = new Map();
     for (const m of machines) {
-      const session = await getOpenSession(m.id);
-      if (!session) continue;
-      const mapped = await mapSession(session);
-      const labor = await computeSessionLaborForRow(session);
-      const phaseTimeSummary = await fetchTankPhaseTimeSummary(Number(session.tank_id));
-      productionByTeamId.set(Number(session.team_id), {
-        machine_id: Number(m.id),
-        machine_name: displayMachineName(m.name),
-        tank_number: mapped.tank_number,
-        tank_id: mapped.tank_id,
-        phase_name: mapped.phase_name,
-        status: mapped.status || 'running',
-        status_label: mapped.status_label,
-        elapsed_display: mapped.elapsed_display,
-        running_time_display: mapped.running_time_display,
-        started_at: mapped.started_at,
-        session_id: mapped.id,
-        estimated_labor_cost: labor ? labor.total_estimated_cost : null,
-        phase_time_summary: phaseTimeSummary,
-        tank_total_running_time_ms: computeTankTotalRunningMs(phaseTimeSummary),
-        tank_total_running_time_display: tankTotalRunningTimeDisplay(phaseTimeSummary),
-      });
+      const openRows = await getOpenSessionsForMachine(m.id);
+      for (const session of openRows) {
+        const teamId = Number(session.team_id);
+        if (!Number.isInteger(teamId) || teamId <= 0) continue;
+        const mapped = await mapSession(session);
+        const labor = await computeSessionLaborForRow(session);
+        const phaseTimeSummary = session.tank_id
+          ? await fetchTankPhaseTimeSummary(Number(session.tank_id))
+          : [];
+        const entry = {
+          machine_id: Number(m.id),
+          machine_name: displayMachineName(m.name),
+          tank_number: mapped.tank_number,
+          tank_id: mapped.tank_id,
+          piece_number: Number(session.piece_number) || mapped.piece_number || 1,
+          phase_name: mapped.phase_name,
+          status: mapped.status || 'running',
+          status_label: mapped.status_label,
+          elapsed_display: mapped.elapsed_display,
+          running_time_display: mapped.running_time_display,
+          started_at: mapped.started_at,
+          session_id: mapped.id,
+          estimated_labor_cost: labor ? labor.total_estimated_cost : null,
+          phase_time_summary: phaseTimeSummary,
+          tank_total_running_time_ms: computeTankTotalRunningMs(phaseTimeSummary),
+          tank_total_running_time_display: tankTotalRunningTimeDisplay(phaseTimeSummary),
+        };
+        if (!productionByTeamId.has(teamId)) productionByTeamId.set(teamId, []);
+        productionByTeamId.get(teamId).push(entry);
+      }
+    }
+    for (const entries of productionByTeamId.values()) {
+      entries.sort((a, b) =>
+        String(a.tank_number || '').localeCompare(String(b.tank_number || ''), undefined, {
+          numeric: true,
+          sensitivity: 'base',
+        })
+      );
     }
     const pausedWipByTeamId = new Map();
     const { rows: pausedTanks } = await pool.query(
@@ -2323,7 +2434,7 @@ function createPhase1ProductionLogic(deps) {
     );
     for (const row of pausedTanks) {
       const teamId = Number(row.wip_team_id);
-      if (!Number.isInteger(teamId) || teamId <= 0 || productionByTeamId.has(teamId) || pausedWipByTeamId.has(teamId)) {
+      if (!Number.isInteger(teamId) || teamId <= 0 || (productionByTeamId.get(teamId) || []).length || pausedWipByTeamId.has(teamId)) {
         continue;
       }
       pausedWipByTeamId.set(teamId, row);
@@ -2352,9 +2463,11 @@ function createPhase1ProductionLogic(deps) {
           role: m.role || null,
           active: Number(m.active) !== 0,
         }));
-      const prod = productionByTeamId.get(tid) || null;
-      const wip = !prod ? pausedWipByTeamId.get(tid) || null : null;
+      const prodEntries = productionByTeamId.get(tid) || [];
+      const prod = prodEntries.length ? prodEntries[0] : null;
+      const wip = !prodEntries.length ? pausedWipByTeamId.get(tid) || null : null;
       const activeMembers = members.filter((m) => m.active);
+      const onShift = onShiftByTeamId.get(tid) || new Set();
       const phaseTimeSummary = prod
         ? prod.phase_time_summary
         : wip
@@ -2367,18 +2480,37 @@ function createPhase1ProductionLogic(deps) {
           : null;
       const wipStatusLabel =
         wip && normalizeStopReason(wip.paused_reason) === 'end_shift' ? 'Paused - End Shift' : 'Paused';
+      const anyRunning = prodEntries.some((p) => p.status === 'running');
+      const teamStatus = prodEntries.length
+        ? anyRunning
+          ? 'running'
+          : 'stopped'
+        : wip
+          ? 'paused'
+          : 'idle';
+      const teamStatusLabel = prodEntries.length
+        ? prodEntries.length > 1
+          ? `${prodEntries.length} active`
+          : prod.status_label
+        : wip
+          ? wipStatusLabel
+          : 'Idle';
       cards.push({
         id: tid,
         name: t.name,
         barcode: t.barcode,
         active: Number(t.active) !== 0,
-        member_count: activeMembers.length,
-        members,
+        member_count: onShift.size || activeMembers.length,
+        members: members.map((m) => ({
+          ...m,
+          on_shift: m.employee_id != null && onShift.has(Number(m.employee_id)),
+        })),
         current_machine: machineName,
         current_tank: prod ? prod.tank_number : wip ? wip.tank_number : null,
         current_phase: prod ? prod.phase_name : wip ? wip.wip_phase_name || wip.wip_phase_code : null,
-        status: prod ? prod.status : wip ? 'paused' : 'idle',
-        status_label: prod ? prod.status_label : wip ? wipStatusLabel : 'Idle',
+        current_piece: prod ? prod.piece_number || 1 : null,
+        status: teamStatus,
+        status_label: teamStatusLabel,
         elapsed_display: prod ? prod.elapsed_display : '—',
         running_time_display: prod ? prod.running_time_display : '—',
         started_at: prod ? prod.started_at : null,
@@ -2388,6 +2520,8 @@ function createPhase1ProductionLogic(deps) {
         phase_time_summary: phaseTimeSummary,
         tank_total_running_time_ms: computeTankTotalRunningMs(phaseTimeSummary),
         tank_total_running_time_display: tankTotalRunningTimeDisplay(phaseTimeSummary),
+        active_sessions: prodEntries,
+        active_session_count: prodEntries.length,
       });
     }
     return cards;
@@ -2423,19 +2557,26 @@ function createPhase1ProductionLogic(deps) {
     }));
   }
 
-  function buildSessionLaborBreakdown(sessionRow, memberSnapshots) {
-    const hours = roundHours2(sessionElapsedMs(sessionRow) / 3600000);
-    const members = memberSnapshots.map((m) => ({
-      employee_id: m.employee_id,
-      employee_code: m.employee_code,
-      employee_name: m.employee_name,
-      hourly_rate: m.hourly_rate,
-      hours,
-      estimated_cost: roundMoney(hours * m.hourly_rate),
-    }));
+  function buildSessionLaborBreakdown(sessionRow, memberSnapshots, memberHoursById) {
+    const defaultHours = roundHours2(sessionElapsedMs(sessionRow) / 3600000);
+    const members = memberSnapshots.map((m) => {
+      const empId = Number(m.employee_id);
+      const hours =
+        memberHoursById && memberHoursById.has(empId)
+          ? memberHoursById.get(empId)
+          : defaultHours;
+      return {
+        employee_id: m.employee_id,
+        employee_code: m.employee_code,
+        employee_name: m.employee_name,
+        hourly_rate: m.hourly_rate,
+        hours,
+        estimated_cost: roundMoney(hours * m.hourly_rate),
+      };
+    });
     const totalEstimatedCost = roundMoney(members.reduce((sum, m) => sum + m.estimated_cost, 0));
     return {
-      duration_hours: hours,
+      duration_hours: defaultHours,
       duration_display: formatElapsedDisplay(sessionElapsedMs(sessionRow)),
       member_count: members.length,
       members,
@@ -2446,7 +2587,16 @@ function createPhase1ProductionLogic(deps) {
   async function computeSessionLaborForRow(sessionRow) {
     if (!sessionRow) return null;
     const members = await fetchSessionMemberSnapshots(Number(sessionRow.id));
-    return buildSessionLaborBreakdown(sessionRow, members);
+    const memberHoursById = new Map();
+    for (const m of members) {
+      const laborMs = await getMembershipApi().employeeSessionLaborMs(
+        Number(m.employee_id),
+        sessionRow,
+        Date.now()
+      );
+      memberHoursById.set(Number(m.employee_id), roundHours2(laborMs / 3600000));
+    }
+    return buildSessionLaborBreakdown(sessionRow, members, memberHoursById);
   }
 
   async function getSessionById(sessionId) {
@@ -2660,10 +2810,47 @@ function createPhase1ProductionLogic(deps) {
     let target = null;
     const tankId = opts.tank_id != null ? Number(opts.tank_id) : null;
     const tankNorm = opts.tank_number ? normalizeTankNumber(opts.tank_number) : '';
+    const pieceNum = opts.piece_number != null ? Number(opts.piece_number) : null;
     if (Number.isInteger(tankId) && tankId > 0) {
-      target = openRows.find((r) => Number(r.tank_id) === tankId) || null;
+      const sameTank = openRows.filter((r) => Number(r.tank_id) === tankId);
+      if (pieceNum != null) {
+        target = sameTank.find((r) => Number(r.piece_number || 1) === pieceNum) || null;
+      } else if (sameTank.length === 1) {
+        target = sameTank[0];
+      } else if (sameTank.length > 1) {
+        return {
+          ok: false,
+          status: 409,
+          body: {
+            ok: false,
+            error: 'need_piece',
+            message: 'Select the piece for Downtime when multiple pieces are active on this tank.',
+          },
+        };
+      } else {
+        target = null;
+      }
     } else if (tankNorm) {
-      target = openRows.find((r) => String(r.tank_number || '').toUpperCase() === tankNorm) || null;
+      const sameTank = openRows.filter(
+        (r) => String(r.tank_number || '').toUpperCase() === tankNorm
+      );
+      if (pieceNum != null) {
+        target = sameTank.find((r) => Number(r.piece_number || 1) === pieceNum) || null;
+      } else if (sameTank.length === 1) {
+        target = sameTank[0];
+      } else if (sameTank.length > 1) {
+        return {
+          ok: false,
+          status: 409,
+          body: {
+            ok: false,
+            error: 'need_piece',
+            message: 'Select the piece for Downtime when multiple pieces are active on this tank.',
+          },
+        };
+      } else {
+        target = null;
+      }
     } else {
       target = await getOpenSession(machine.id);
     }
@@ -2803,10 +2990,27 @@ function createPhase1ProductionLogic(deps) {
     let target = null;
     const tankId = opts.tank_id != null ? Number(opts.tank_id) : null;
     const tankNorm = opts.tank_number ? normalizeTankNumber(opts.tank_number) : '';
+    const pieceNum = opts.piece_number != null ? Number(opts.piece_number) : null;
     if (Number.isInteger(tankId) && tankId > 0) {
-      target = openRows.find((r) => Number(r.tank_id) === tankId) || null;
+      const sameTank = openRows.filter((r) => Number(r.tank_id) === tankId);
+      if (pieceNum != null) {
+        target = sameTank.find((r) => Number(r.piece_number || 1) === pieceNum) || null;
+      } else if (sameTank.length === 1) {
+        target = sameTank[0];
+      } else {
+        target = sameTank[0] || null;
+      }
     } else if (tankNorm) {
-      target = openRows.find((r) => String(r.tank_number || '').toUpperCase() === tankNorm) || null;
+      const sameTank = openRows.filter(
+        (r) => String(r.tank_number || '').toUpperCase() === tankNorm
+      );
+      if (pieceNum != null) {
+        target = sameTank.find((r) => Number(r.piece_number || 1) === pieceNum) || null;
+      } else if (sameTank.length === 1) {
+        target = sameTank[0];
+      } else {
+        target = sameTank[0] || null;
+      }
     } else {
       target = await getOpenSession(machine.id);
     }
@@ -2887,6 +3091,7 @@ function createPhase1ProductionLogic(deps) {
 
     const tankNumbers = uniqueTankNumbers(openRows);
     const ts = nowIso();
+    const teamIdForClose = assignment ? Number(assignment.team_id) : null;
     await withTransaction(async (client) => {
       for (const session of openRows) {
         await closeOpenDowntimeIntervalsForSession(session.id, ts, client);
@@ -2909,6 +3114,14 @@ function createPhase1ProductionLogic(deps) {
             ts,
             Number(session.tank_id),
           ]
+        );
+      }
+      if (teamIdForClose) {
+        await client.query(
+          `UPDATE employee_team_memberships
+           SET left_at = $1::timestamptz, reason = COALESCE(reason, 'end_shift')
+           WHERE team_id = $2 AND left_at IS NULL`,
+          [ts, teamIdForClose]
         );
       }
       await client.query(
@@ -3114,10 +3327,11 @@ function createPhase1ProductionLogic(deps) {
     const tid = Number(teamId);
     if (!Number.isInteger(sid) || sid <= 0 || !Number.isInteger(tid) || tid <= 0) return;
     const { rows } = await pool.query(
-      `SELECT tm.id, tm.employee_id, e.code AS employee_code, e.name AS employee_name, e.hourly_rate
-       FROM team_members tm
-       JOIN employees e ON e.id = tm.employee_id
-       WHERE tm.team_id = $1 AND tm.active = 1 AND tm.employee_id IS NOT NULL`,
+      `SELECT tm.id, etm.employee_id, e.code AS employee_code, e.name AS employee_name, e.hourly_rate
+       FROM employee_team_memberships etm
+       JOIN employees e ON e.id = etm.employee_id
+       LEFT JOIN team_members tm ON tm.team_id = etm.team_id AND tm.employee_id = etm.employee_id
+       WHERE etm.team_id = $1 AND etm.left_at IS NULL AND etm.employee_id IS NOT NULL`,
       [tid]
     );
     for (const m of rows) {
@@ -3129,7 +3343,7 @@ function createPhase1ProductionLogic(deps) {
         [
           sid,
           Number(m.employee_id),
-          Number(m.id),
+          m.id != null ? Number(m.id) : null,
           m.employee_code || null,
           m.employee_name || null,
           m.hourly_rate != null ? roundMoney(m.hourly_rate) : 0,
@@ -3150,20 +3364,7 @@ function createPhase1ProductionLogic(deps) {
   }
 
   async function computeEmployeeTeamProductionMs(employeeId, bounds, closeMs = Date.now()) {
-    const id = Number(employeeId);
-    if (!Number.isInteger(id) || id <= 0 || !bounds) return 0;
-    const { rows } = await pool.query(
-      `SELECT ms.started_at, ms.finished_at, ms.stopped_at, ms.status
-       FROM session_team_members stm
-       INNER JOIN machine_sessions ms ON ms.id = stm.session_id
-       WHERE stm.employee_id = $1`,
-      [id]
-    );
-    let total = 0;
-    for (const row of rows) {
-      total += sessionMsInBounds(row, bounds, closeMs);
-    }
-    return total;
+    return getMembershipApi().computeEmployeeMembershipProductionMs(employeeId, bounds, closeMs);
   }
 
   async function computeEmployeeTeamProductionHoursForDay(employeeId, yyyyMmDd) {
@@ -3525,6 +3726,7 @@ function createPhase1ProductionLogic(deps) {
     getTeamByBarcode,
     getOpenSession,
     getOpenSessionsForMachine,
+    getOpenSessionForPiece,
     setMachineActiveTank,
     ensureTankPieces,
     getTankPieces,
@@ -3550,6 +3752,7 @@ function createPhase1ProductionLogic(deps) {
     fetchCanonicalWindingMachines,
     buildDashboardCards,
     buildTeamDashboardCards,
+    countActiveProduction,
     fetchAllOpenAlerts,
     startSession,
     changePhase,
@@ -3581,8 +3784,15 @@ function createPhase1ProductionLogic(deps) {
     fetchSessionDetails,
     fetchTankPhaseTimeSummary,
     transferEmployeeToTeam: (...args) => getMembershipApi().transferEmployeeToTeam(...args),
+    employeeOutFromTeam: (...args) => getMembershipApi().employeeOutFromTeam(...args),
+    getEmployeeActiveShiftTeam: (...args) => getMembershipApi().getEmployeeActiveShiftTeam(...args),
+    startTeamShiftMemberships: (...args) => getMembershipApi().startTeamShiftMemberships(...args),
+    closeTeamShiftMemberships: (...args) => getMembershipApi().closeTeamShiftMemberships(...args),
     findOpenPieceSession: (...args) => getMembershipApi().findOpenPieceSession(...args),
     computeMembershipAwareTankLabor: (...args) => getMembershipApi().computeMembershipAwareTankLabor(...args),
+    computeEmployeeMembershipProductionMs: (...args) =>
+      getMembershipApi().computeEmployeeMembershipProductionMs(...args),
+    employeeSessionLaborMs: (...args) => getMembershipApi().employeeSessionLaborMs(...args),
     editMachineSessionTimes: (...args) => getMembershipApi().editMachineSessionTimes(...args),
     listSessionEdits: (...args) => getMembershipApi().listSessionEdits(...args),
     isDowntimeStopReason,
@@ -3627,4 +3837,5 @@ module.exports = {
   kioskUrlForSlug,
   mapMachineForClient,
   displayMachineName,
+  countActiveProduction,
 };

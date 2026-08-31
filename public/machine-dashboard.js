@@ -158,60 +158,98 @@
     return statusLabel(session.status, null);
   }
 
-  function renderActiveTankSession(session, selectedTankId, machineName) {
-    if (!session) return '';
-    const tankId = Number(session.tank_id);
-    const isSelected = selectedTankId != null && tankId === Number(selectedTankId);
-    const isExpanded = expandedTankIds.has(tankId);
+  function sessionStatusClass(session) {
     const st = session.status || 'idle';
     const reason = String(session.stop_reason || '').toLowerCase();
-    const statusText = tankSessionStatusLabel(session);
-    let statusCls = 'machine-tank-session--idle';
-    if (st === 'running') statusCls = 'machine-tank-session--running';
-    else if (reason === 'downtime') statusCls = 'machine-tank-session--downtime';
-    else if (reason === 'break') statusCls = 'machine-tank-session--break';
-    else if (reason === 'lunch') statusCls = 'machine-tank-session--lunch';
-    else if (st === 'stopped') statusCls = 'machine-tank-session--paused';
-    const summary = session.phase_time_summary || [];
-    const totalDisplay = session.tank_total_running_time_display || '—';
+    if (st === 'running') return 'running';
+    if (reason === 'downtime') return 'downtime';
+    if (reason === 'break') return 'break';
+    if (reason === 'lunch') return 'lunch';
+    if (st === 'stopped') return 'paused';
+    return 'idle';
+  }
 
-    return `<article class="machine-tank-session ${statusCls}${isSelected ? ' machine-tank-session--kiosk-focus' : ''}${isExpanded ? ' is-expanded' : ''}" data-tank-id="${tankId}" data-session-id="${Number(session.id)}" data-tank-number="${escapeHtml(session.tank_number || '')}">
-      <button type="button" class="machine-tank-session-toggle" data-toggle-phase-summary data-tank-id="${tankId}" aria-expanded="${isExpanded ? 'true' : 'false'}">
-        <header class="machine-tank-session-head">
-          <h4 class="machine-tank-session-title">Tank ${escapeHtml(session.tank_number || '—')} — ${escapeHtml(statusText)}</h4>
-          <span class="machine-tank-session-chevron" aria-hidden="true">${isExpanded ? '▾' : '▸'}</span>
+  function aggregateTankStatus(sessions) {
+    const list = Array.isArray(sessions) ? sessions : [];
+    if (!list.length) return { label: 'Idle', cls: 'idle' };
+    if (list.some((s) => s.status === 'running')) return { label: 'Running', cls: 'running' };
+    const priority = ['downtime', 'qa_qc', 'break', 'lunch'];
+    for (const key of priority) {
+      const match = list.find((s) => String(s.stop_reason || '').toLowerCase() === key);
+      if (match) {
+        return { label: tankSessionStatusLabel(match), cls: sessionStatusClass(match) };
+      }
+    }
+    const first = list[0];
+    return { label: tankSessionStatusLabel(first), cls: sessionStatusClass(first) };
+  }
+
+  function pieceStatusLine(session) {
+    const phase = session.phase_name || session.activity_name || '—';
+    const time = session.running_time_display || session.elapsed_display || '—';
+    const status = tankSessionStatusLabel(session);
+    if (session.status === 'running') return `${escapeHtml(phase)} — Running ${escapeHtml(time)}`;
+    return `${escapeHtml(phase)} — ${escapeHtml(status)}${time && time !== '—' ? ` — ${escapeHtml(time)}` : ''}`;
+  }
+
+  function renderActivePieceRow(session, tankId) {
+    if (!session) return '';
+    const pieceNum = Number(session.piece_number) || 1;
+    const stCls = sessionStatusClass(session);
+    return `<div class="machine-tank-piece-row machine-tank-piece-row--${stCls}" data-session-id="${Number(session.id)}" data-piece="${pieceNum}">
+      <div class="machine-tank-piece-main">
+        <div class="machine-tank-piece-head">Piece ${escapeHtml(String(pieceNum))}</div>
+        <div class="machine-tank-piece-detail">${pieceStatusLine(session)}</div>
+      </div>
+      <div class="machine-tank-piece-actions">
+        <button type="button" class="btn btn-sm btn-edit-phase-time" data-tank-id="${tankId}" data-piece="${pieceNum}" data-phase="${escapeHtml(session.phase_code || session.activity_code || '')}" data-session-id="${Number(session.id)}">Edit Phase Time</button>
+        ${renderSessionDetailsBtn(session.id)}
+      </div>
+    </div>`;
+  }
+
+  function renderActiveTankCard(group, selectedTankId, machineName) {
+    const sessions = (group.sessions || []).slice().sort((a, b) => Number(a.piece_number) - Number(b.piece_number));
+    if (!sessions.length) return '';
+    const primary = sessions[0];
+    const tankId = Number(group.tank_id || primary.tank_id);
+    const tankNumber = group.tank_number || primary.tank_number || '—';
+    const isSelected = selectedTankId != null && tankId === Number(selectedTankId);
+    const isExpanded = expandedTankIds.has(tankId);
+    const tankStatus = aggregateTankStatus(sessions);
+    const summary = primary.phase_time_summary || [];
+    const totalDisplay = primary.tank_total_running_time_display || '—';
+    const teamName = primary.team_name || '—';
+
+    return `<article class="machine-tank-card machine-tank-card--${tankStatus.cls}${isSelected ? ' machine-tank-card--kiosk-focus' : ''}${isExpanded ? ' is-expanded' : ''}" data-tank-id="${tankId}" data-tank-number="${escapeHtml(tankNumber)}">
+      <button type="button" class="machine-tank-card-toggle" data-toggle-phase-summary data-tank-id="${tankId}" aria-expanded="${isExpanded ? 'true' : 'false'}">
+        <header class="machine-tank-card-head">
+          <h4 class="machine-tank-card-title">Tank ${escapeHtml(tankNumber)} — ${escapeHtml(tankStatus.label)}</h4>
+          <span class="machine-tank-card-chevron" aria-hidden="true">${isExpanded ? '▾' : '▸'}</span>
         </header>
-        <p class="machine-tank-session-brief">
-          Piece ${escapeHtml(String(session.piece_number || 1))}
-          · ${escapeHtml(session.phase_name || session.activity_name || '—')}
-          · ${escapeHtml(totalDisplay)}
-        </p>
       </button>
-      <dl class="machine-tank-session-grid">
-        <div><dt>Piece</dt><dd>Piece ${escapeHtml(String(session.piece_number || 1))}</dd></div>
-        <div><dt>Phase</dt><dd>${escapeHtml(session.phase_name || session.activity_name || '—')}</dd></div>
-        <div><dt>Phase Time</dt><dd class="machine-card-elapsed">${escapeHtml(session.running_time_display || session.elapsed_display || '—')}</dd></div>
-        <div><dt>Total Running Time</dt><dd>${escapeHtml(totalDisplay)}</dd></div>
-        <div><dt>Team</dt><dd>${escapeHtml(session.team_name || '—')}</dd></div>
-        <div><dt>Machine</dt><dd>${escapeHtml(machineName || session.machine_name || '—')}</dd></div>
+      <div class="machine-tank-pieces">
+        ${sessions.map((s) => renderActivePieceRow(s, tankId)).join('')}
+      </div>
+      <dl class="machine-tank-card-meta">
+        <div><dt>Tank Total Running Time</dt><dd>${escapeHtml(totalDisplay)}</dd></div>
+        <div><dt>Team</dt><dd>${escapeHtml(teamName)}</dd></div>
+        <div><dt>Machine</dt><dd>${escapeHtml(machineName || primary.machine_name || '—')}</dd></div>
       </dl>
-      <div class="machine-tank-session-actions">
+      <div class="machine-tank-card-actions">
         <button type="button" class="btn btn-sm btn-primary btn-view-phase-summary" data-toggle-phase-summary data-tank-id="${tankId}">
           ${isExpanded ? 'Hide Phase Summary' : 'View Phase Summary'}
         </button>
-        <button type="button" class="btn btn-sm btn-view-tank-activity" data-tank="${escapeHtml(session.tank_number || '')}">View Tank Activity</button>
-        <button type="button" class="btn btn-sm btn-edit-phase-time" data-tank-id="${tankId}" data-piece="${Number(session.piece_number) || ''}" data-phase="${escapeHtml(session.phase_code || session.activity_code || '')}" data-session-id="${Number(session.id)}">Edit Phase Time</button>
-        ${renderSessionDetailsBtn(session.id)}
+        <button type="button" class="btn btn-sm btn-view-tank-activity" data-tank="${escapeHtml(tankNumber)}">View Tank Activity</button>
       </div>
       <div class="machine-tank-phase-panel" data-phase-panel="${tankId}" ${isExpanded ? '' : 'hidden'}>
         <div class="machine-tank-phase-panel-head">
           <strong>Phase Time Summary</strong>
-          <span class="muted">Tank ${escapeHtml(session.tank_number || '')} · read-only</span>
+          <span class="muted">Tank ${escapeHtml(tankNumber)} · read-only</span>
         </div>
         <div class="machine-tank-phase-meta">
-          <span>Status: <strong>${escapeHtml(statusText)}</strong></span>
-          <span>Current phase: <strong>${escapeHtml(session.phase_name || '—')}</strong></span>
-          <span>Phase time: <strong class="machine-card-elapsed">${escapeHtml(session.running_time_display || session.elapsed_display || '—')}</strong></span>
+          <span>Status: <strong>${escapeHtml(tankStatus.label)}</strong></span>
+          <span>Active pieces: <strong>${sessions.length}</strong></span>
           <span>Tank total: <strong>${escapeHtml(totalDisplay)}</strong></span>
         </div>
         ${renderPhaseSummaryList(summary)}
@@ -227,10 +265,31 @@
       </div>`;
     }
     const selectedId = m.selected_tank_id != null ? m.selected_tank_id : m.tank_id;
+    const byTank = new Map();
+    for (const s of sessions) {
+      const tankId = Number(s.tank_id);
+      const key = Number.isInteger(tankId) && tankId > 0 ? tankId : String(s.tank_number || '');
+      if (!byTank.has(key)) {
+        byTank.set(key, {
+          tank_id: tankId,
+          tank_number: s.tank_number,
+          sessions: [],
+        });
+      }
+      byTank.get(key).sessions.push(s);
+    }
+    const groups = Array.from(byTank.values()).sort((a, b) =>
+      String(a.tank_number || '').localeCompare(String(b.tank_number || ''), undefined, {
+        numeric: true,
+        sensitivity: 'base',
+      })
+    );
+    const pieceCount = sessions.length;
+    const tankCount = groups.length;
     return `<div class="machine-active-tanks" data-field="active-tanks">
-      <div class="machine-active-tanks-label">Active Tanks (${sessions.length})</div>
+      <div class="machine-active-tanks-label">Active Production (${tankCount} tank${tankCount === 1 ? '' : 's'}, ${pieceCount} piece${pieceCount === 1 ? '' : 's'})</div>
       <div class="machine-active-tanks-list">
-        ${sessions.map((s) => renderActiveTankSession(s, selectedId, m.name)).join('')}
+        ${groups.map((g) => renderActiveTankCard(g, selectedId, m.name)).join('')}
       </div>
     </div>`;
   }
@@ -293,15 +352,15 @@
         if (!Number.isInteger(tankId) || tankId <= 0) return;
         if (expandedTankIds.has(tankId)) expandedTankIds.delete(tankId);
         else expandedTankIds.add(tankId);
-        const card = btn.closest('.machine-tank-session');
+        const card = btn.closest('.machine-tank-card') || btn.closest('.machine-tank-session');
         if (!card) return;
         const expanded = expandedTankIds.has(tankId);
         card.classList.toggle('is-expanded', expanded);
         const panel = card.querySelector(`[data-phase-panel="${tankId}"]`);
         if (panel) panel.hidden = !expanded;
-        const toggle = card.querySelector('.machine-tank-session-toggle');
+        const toggle = card.querySelector('.machine-tank-card-toggle') || card.querySelector('.machine-tank-session-toggle');
         if (toggle) toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
-        const chevron = card.querySelector('.machine-tank-session-chevron');
+        const chevron = card.querySelector('.machine-tank-card-chevron') || card.querySelector('.machine-tank-session-chevron');
         if (chevron) chevron.textContent = expanded ? '▾' : '▸';
         card.querySelectorAll('.btn-view-phase-summary').forEach((b) => {
           b.textContent = expanded ? 'Hide Phase Summary' : 'View Phase Summary';

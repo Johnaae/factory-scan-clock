@@ -166,6 +166,263 @@ function createTeamMembershipAndLabor(pool, helpers = {}) {
     }
   }
 
+  /**
+   * Remove employee from active shift labor without stopping production.
+   * Closes ALL open membership intervals for the employee (current shift).
+   * Also closes open scan_logs IN interval when present.
+   */
+  async function employeeOutFromTeam(employeeId, teamId, opts = {}) {
+    const empId = Number(employeeId);
+    const teamIdNum = teamId != null ? Number(teamId) : null;
+    const ts = opts.at || nowIso();
+    const source = opts.source || 'kiosk_employee_out';
+    const reason = opts.reason || 'Employee out';
+
+    const empRes = await pool.query(
+      `SELECT id, code, name, is_active FROM employees WHERE id = $1`,
+      [empId]
+    );
+    if (!empRes.rows.length) {
+      return { ok: false, status: 404, body: { ok: false, error: 'not_found', message: 'Employee not found.' } };
+    }
+    const emp = empRes.rows[0];
+    if (Number(emp.is_active) === 0) {
+      return {
+        ok: false,
+        status: 400,
+        body: { ok: false, error: 'inactive_employee', message: 'That employee is inactive.' },
+      };
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const openAll = await client.query(
+        `SELECT id, team_id FROM employee_team_memberships
+         WHERE employee_id = $1 AND left_at IS NULL
+         ORDER BY joined_at DESC, id DESC`,
+        [empId]
+      );
+      if (!openAll.rows.length) {
+        await client.query('ROLLBACK');
+        return {
+          ok: false,
+          status: 409,
+          body: {
+            ok: false,
+            error: 'not_on_shift',
+            message: `${emp.name} is not currently on shift.`,
+          },
+        };
+      }
+
+      const activeTeamId = Number(openAll.rows[0].team_id);
+      let teamName = null;
+      if (Number.isInteger(teamIdNum) && teamIdNum > 0) {
+        const teamRes = await client.query(`SELECT id, name, active FROM teams WHERE id = $1`, [teamIdNum]);
+        if (!teamRes.rows.length || !Number(teamRes.rows[0].active)) {
+          await client.query('ROLLBACK');
+          return { ok: false, status: 404, body: { ok: false, error: 'not_found', message: 'Team not found.' } };
+        }
+        teamName = teamRes.rows[0].name;
+      } else {
+        const teamRes = await client.query(`SELECT name FROM teams WHERE id = $1`, [activeTeamId]);
+        teamName = teamRes.rows[0] ? teamRes.rows[0].name : null;
+      }
+
+      const { rowCount } = await client.query(
+        `UPDATE employee_team_memberships
+         SET left_at = $1::timestamptz, reason = COALESCE(reason, $4), source = $3
+         WHERE employee_id = $2 AND left_at IS NULL`,
+        [ts, empId, source, reason]
+      );
+      const scanOutWritten = await closeOpenScanClockOut(client, emp, ts, reason);
+      await client.query('COMMIT');
+
+      return {
+        ok: true,
+        body: {
+          ok: true,
+          action: 'employee_out',
+          employee: { id: Number(emp.id), code: emp.code, name: emp.name },
+          team: { id: activeTeamId, name: teamName },
+          left_at: ts,
+          memberships_closed: rowCount || 0,
+          scan_clock_out: scanOutWritten,
+          confirmation_line: `${emp.name} marked out for today. Production continues. Default team roster unchanged.`,
+        },
+      };
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (_e) {
+        /* ignore */
+      }
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Open shift labor memberships for default roster when Team is scanned at shift start.
+   * Does not modify permanent team_members roster rows.
+   */
+  async function startTeamShiftMemberships(teamId, opts = {}) {
+    const tid = Number(teamId);
+    const ts = opts.at || nowIso();
+    const source = opts.source || 'team_scan';
+    const reason = opts.reason || 'Shift start';
+    const { rows: roster } = await pool.query(
+      `SELECT tm.employee_id, e.name
+       FROM team_members tm
+       JOIN employees e ON e.id = tm.employee_id
+       WHERE tm.team_id = $1 AND tm.employee_id IS NOT NULL AND tm.active = 1 AND e.is_active = 1`,
+      [tid]
+    );
+    let opened = 0;
+    for (const m of roster) {
+      const open = await pool.query(
+        `SELECT id FROM employee_team_memberships
+         WHERE employee_id = $1 AND team_id = $2 AND left_at IS NULL LIMIT 1`,
+        [Number(m.employee_id), tid]
+      );
+      if (!open.rows.length) {
+        await pool.query(
+          `INSERT INTO employee_team_memberships (employee_id, team_id, joined_at, left_at, source, reason)
+           VALUES ($1, $2, $3::timestamptz, NULL, $4, $5)`,
+          [Number(m.employee_id), tid, ts, source, reason]
+        );
+        opened += 1;
+      }
+    }
+    return { opened, roster_count: roster.length };
+  }
+
+  /**
+   * Close all open shift memberships for a team (End Shift).
+   */
+  async function closeTeamShiftMemberships(teamId, opts = {}) {
+    const tid = Number(teamId);
+    const ts = opts.at || nowIso();
+    const reason = opts.reason || 'end_shift';
+    const { rowCount } = await pool.query(
+      `UPDATE employee_team_memberships
+       SET left_at = $1::timestamptz, reason = COALESCE(reason, $3)
+       WHERE team_id = $2 AND left_at IS NULL`,
+      [ts, tid, reason]
+    );
+    return { closed: rowCount || 0 };
+  }
+
+  async function getEmployeeActiveShiftTeam(employeeId) {
+    const empId = Number(employeeId);
+    if (!Number.isInteger(empId) || empId <= 0) return null;
+    const { rows } = await pool.query(
+      `SELECT m.id AS membership_id, m.team_id, m.joined_at, t.name AS team_name
+       FROM employee_team_memberships m
+       JOIN teams t ON t.id = m.team_id
+       WHERE m.employee_id = $1 AND m.left_at IS NULL
+       ORDER BY m.joined_at DESC, m.id DESC
+       LIMIT 1`,
+      [empId]
+    );
+    if (!rows.length) return null;
+    const r = rows[0];
+    return {
+      membership_id: Number(r.membership_id),
+      team_id: Number(r.team_id),
+      team_name: r.team_name,
+      joined_at: r.joined_at,
+    };
+  }
+
+  async function computeEmployeeMembershipProductionMs(employeeId, bounds, closeMs = Date.now()) {
+    const id = Number(employeeId);
+    if (!Number.isInteger(id) || id <= 0 || !bounds) return 0;
+    const ws = new Date(bounds.startIso).getTime();
+    const we = new Date(bounds.endIso).getTime();
+    if (Number.isNaN(ws) || Number.isNaN(we)) return 0;
+
+    const { rows: memberships } = await pool.query(
+      `SELECT team_id, joined_at, left_at FROM employee_team_memberships WHERE employee_id = $1`,
+      [id]
+    );
+    const { rows: sessions } = await pool.query(
+      `SELECT ms.team_id, ms.started_at, ms.finished_at, ms.stopped_at, ms.status, ms.activity_code
+       FROM session_team_members stm
+       INNER JOIN machine_sessions ms ON ms.id = stm.session_id
+       WHERE stm.employee_id = $1`,
+      [id]
+    );
+
+    let total = 0;
+    for (const row of sessions) {
+      const code = String(row.activity_code || '').trim().toUpperCase();
+      if (typeof isProductionPhaseCode === 'function' && !isProductionPhaseCode(code)) continue;
+
+      const startMs = toMs(row.started_at);
+      let endMs;
+      if (row.status === 'finished' && row.finished_at) endMs = toMs(row.finished_at);
+      else if (row.status === 'stopped' && row.stopped_at) endMs = toMs(row.stopped_at);
+      else endMs = closeMs;
+      if (startMs == null || endMs == null || endMs <= startMs) continue;
+
+      const boundStart = Math.max(startMs, ws);
+      const boundEnd = Math.min(endMs, we, closeMs);
+      if (boundEnd <= boundStart) continue;
+
+      const teamId = Number(row.team_id);
+      for (const mem of memberships) {
+        if (Number(mem.team_id) !== teamId) continue;
+        const joinMs = toMs(mem.joined_at);
+        const leaveMs = mem.left_at ? toMs(mem.left_at) : closeMs;
+        if (joinMs == null || leaveMs == null) continue;
+        total += overlapMs(boundStart, boundEnd, joinMs, leaveMs);
+      }
+    }
+    return total;
+  }
+
+  async function employeeSessionLaborMs(employeeId, sessionRow, closeMs = Date.now()) {
+    const id = Number(employeeId);
+    if (!Number.isInteger(id) || id <= 0 || !sessionRow) return 0;
+    const startMs = toMs(sessionRow.started_at);
+    let endMs;
+    if (sessionRow.status === 'finished' && sessionRow.finished_at) endMs = toMs(sessionRow.finished_at);
+    else if (sessionRow.status === 'stopped' && sessionRow.stopped_at) endMs = toMs(sessionRow.stopped_at);
+    else endMs = closeMs;
+    if (startMs == null || endMs == null || endMs <= startMs) return 0;
+
+    const { rows: memberships } = await pool.query(
+      `SELECT joined_at, left_at FROM employee_team_memberships
+       WHERE employee_id = $1 AND team_id = $2`,
+      [id, Number(sessionRow.team_id)]
+    );
+    let labor = 0;
+    for (const mem of memberships) {
+      const joinMs = toMs(mem.joined_at);
+      const leaveMs = mem.left_at ? toMs(mem.left_at) : closeMs;
+      if (joinMs == null || leaveMs == null) continue;
+      labor += overlapMs(startMs, endMs, joinMs, leaveMs);
+    }
+    return labor;
+  }
+
+  async function closeOpenScanClockOut(client, employee, ts, reason = 'Employee Out') {
+    const last = await client.query(
+      `SELECT status FROM scan_logs WHERE employee_id = $1 ORDER BY scanned_at DESC, id DESC LIMIT 1`,
+      [Number(employee.id)]
+    );
+    if (!last.rows.length || String(last.rows[0].status || '').toUpperCase() !== 'IN') return false;
+    await client.query(
+      `INSERT INTO scan_logs (employee_code, employee_name, employee_id, status, scanned_at, note, note_category, note_value, tank_number)
+       VALUES ($1, $2, $3, 'OUT', $4::timestamptz, $5, 'REASON', $5, NULL)`,
+      [employee.code, employee.name, Number(employee.id), ts, reason]
+    );
+    return true;
+  }
+
   async function findOpenPieceSession(tankId, pieceNumber, excludeMachineId) {
     const params = [Number(tankId), Number(pieceNumber)];
     let exclude = '';
@@ -510,8 +767,14 @@ function createTeamMembershipAndLabor(pool, helpers = {}) {
   return {
     backfillOpenMembershipsIfNeeded,
     transferEmployeeToTeam,
+    employeeOutFromTeam,
+    getEmployeeActiveShiftTeam,
+    startTeamShiftMemberships,
+    closeTeamShiftMemberships,
     findOpenPieceSession,
     computeMembershipAwareTankLabor,
+    computeEmployeeMembershipProductionMs,
+    employeeSessionLaborMs,
     editMachineSessionTimes,
     listSessionEdits,
   };

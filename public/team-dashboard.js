@@ -71,9 +71,12 @@
   }
 
   function renderMemberRow(m, teamId, opts) {
-    const inactive = !m.active;
-    const status = inactive ? 'Inactive' : 'Active';
-    const statusCls = inactive ? 'team-member-status--inactive' : 'team-member-status--active';
+    const rosterInactive = !m.active;
+    const onShift = Boolean(m.on_shift);
+    const status = rosterInactive ? 'Inactive' : onShift ? 'Active' : 'Off shift';
+    const statusCls =
+      rosterInactive || !onShift ? 'team-member-status--inactive' : 'team-member-status--active';
+    const rowMuted = rosterInactive || !onShift;
     const role = m.role ? `<span class="muted team-member-role">${escapeHtml(m.role)}</span>` : '';
     const nameHtml =
       root.TeamMemberPicker && root.TeamMemberPicker.memberNameHtml
@@ -88,7 +91,7 @@
         ? `<button type="button" class="btn btn-sm btn-remove-member" data-team-id="${teamId}" data-member-id="${m.id}">Remove</button>`
         : '';
     const actions = detailsBtn || removeBtn ? `<div class="team-member-detail-actions">${detailsBtn}${removeBtn}</div>` : '';
-    return `<li class="team-member-detail-row${inactive ? ' team-member-detail-row--inactive' : ''}">
+    return `<li class="team-member-detail-row${rowMuted ? ' team-member-detail-row--inactive' : ''}">
       <div class="team-member-detail-main">
         ${nameHtml}
         ${role}
@@ -113,7 +116,7 @@
       : '<li class="muted team-member-detail-empty">No active members.</li>';
     const addMemberForm =
       opts && opts.allowMemberEdit && team.active && root.TeamMemberPicker
-        ? `<div class="team-add-member-form">${root.TeamMemberPicker.renderAddMemberForm(team.id)}</div>`
+        ? `<div class="team-add-member-form">${root.TeamMemberPicker.renderAddMemberForm(team.id, { floatDropdown: true })}</div>`
         : '';
     return `<ul class="team-member-detail-list">${memberRows}</ul>${addMemberForm}`;
   }
@@ -137,6 +140,44 @@
     return `<div class="phase-time-summary" data-field="phase-summary">
       <h4 class="phase-time-summary-title">Phase Time Summary</h4>
       <ul class="phase-time-summary-list">${items}</ul>
+    </div>`;
+  }
+
+  function renderActiveSessionsHtml(sessions) {
+    if (!sessions || !sessions.length) return '';
+    const byTank = new Map();
+    for (const s of sessions) {
+      const key = String(s.tank_number || s.tank_id || '');
+      if (!byTank.has(key)) {
+        byTank.set(key, { tank_number: s.tank_number, items: [] });
+      }
+      byTank.get(key).items.push(s);
+    }
+    const groups = Array.from(byTank.values()).sort((a, b) =>
+      String(a.tank_number || '').localeCompare(String(b.tank_number || ''), undefined, {
+        numeric: true,
+        sensitivity: 'base',
+      })
+    );
+    const body = groups
+      .map((g) => {
+        const pieces = g.items
+          .slice()
+          .sort((a, b) => Number(a.piece_number) - Number(b.piece_number))
+          .map(
+            (s) =>
+              `<li class="team-active-session-piece">Piece ${Number(s.piece_number) || 1} · ${escapeHtml(String(s.phase_name || '—'))} · ${escapeHtml(String(s.running_time_display || s.elapsed_display || s.status_label || s.status || '—'))}</li>`
+          )
+          .join('');
+        return `<li class="team-active-session-tank">
+          <strong>Tank ${escapeHtml(String(g.tank_number || '—'))}</strong>
+          <ul class="team-active-session-pieces">${pieces}</ul>
+        </li>`;
+      })
+      .join('');
+    return `<div class="team-active-sessions" data-field="active-sessions">
+      <h4 class="phase-time-summary-title">Active Production</h4>
+      <ul class="phase-time-summary-list team-active-session-groups">${body}</ul>
     </div>`;
   }
 
@@ -164,6 +205,7 @@
         <div><dt>Members</dt><dd data-field="member-count">${Number(team.member_count) || 0}</dd></div>
       </dl>
       ${team.phase_time_summary && team.phase_time_summary.length ? renderPhaseSummaryHtml(team.phase_time_summary) : ''}
+      ${team.active_sessions && team.active_sessions.length ? renderActiveSessionsHtml(team.active_sessions) : ''}
       <div class="team-dashboard-session-actions" data-field="session-actions">${renderSessionDetailsBtn(team.session_id)}</div>
       <details class="team-members-collapse">
         <summary class="team-members-collapse-summary">View Members</summary>
@@ -203,6 +245,19 @@
       if (actionsEl) actionsEl.insertAdjacentHTML('beforebegin', nextPhaseSummary);
     } else if (phaseSummaryEl && !nextPhaseSummary) {
       phaseSummaryEl.remove();
+    }
+    const activeSessionsEl = cardEl.querySelector('[data-field="active-sessions"]');
+    const nextActiveSessions =
+      team.active_sessions && team.active_sessions.length
+        ? renderActiveSessionsHtml(team.active_sessions)
+        : '';
+    if (activeSessionsEl && nextActiveSessions !== activeSessionsEl.outerHTML) {
+      activeSessionsEl.outerHTML = nextActiveSessions || '';
+    } else if (!activeSessionsEl && nextActiveSessions) {
+      const actionsEl = cardEl.querySelector('[data-field="session-actions"]');
+      if (actionsEl) actionsEl.insertAdjacentHTML('beforebegin', nextActiveSessions);
+    } else if (activeSessionsEl && !nextActiveSessions) {
+      activeSessionsEl.remove();
     }
     const sessionActionsEl = cardEl.querySelector('[data-field="session-actions"]');
     if (sessionActionsEl) {

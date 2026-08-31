@@ -81,8 +81,8 @@
 
   function renderMember(m) {
     if (titleEl) titleEl.textContent = m.name || 'Employee Details';
-    const statusCls = m.active ? 'team-member-status--active' : 'team-member-status--inactive';
-    const statusText = m.active ? 'Active' : 'Inactive';
+    const statusCls = m.on_shift ? 'team-member-status--active' : 'team-member-status--inactive';
+    const statusText = m.on_shift ? 'Active' : 'Off shift';
     const noTime = !m.has_time_data;
     const timeNote = noTime
       ? '<p class="muted team-member-details-note">No time recorded.</p>'

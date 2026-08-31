@@ -65,9 +65,30 @@ const tankReportTitle = document.getElementById('tankReportTitle');
 const tankReportBody = document.getElementById('tankReportBody');
 const btnCloseTankReport = document.getElementById('btnCloseTankReport');
 const btnPrintTankReport = document.getElementById('btnPrintTankReport');
+const tankTableHead = document.getElementById('tankTableHead');
+const tankTrashConfirmBackdrop = document.getElementById('tankTrashConfirmBackdrop');
+const tankTrashConfirmTitle = document.getElementById('tankTrashConfirmTitle');
+const tankTrashConfirmMessage = document.getElementById('tankTrashConfirmMessage');
+const tankTrashHistoryWarning = document.getElementById('tankTrashHistoryWarning');
+const tankTrashConfirmHint = document.getElementById('tankTrashConfirmHint');
+const btnConfirmTankTrash = document.getElementById('btnConfirmTankTrash');
+const btnCancelTankTrash = document.getElementById('btnCancelTankTrash');
+const tankTrashRestoreBackdrop = document.getElementById('tankTrashRestoreBackdrop');
+const tankTrashRestoreMessage = document.getElementById('tankTrashRestoreMessage');
+const btnConfirmTankTrashRestore = document.getElementById('btnConfirmTankTrashRestore');
+const btnCancelTankTrashRestore = document.getElementById('btnCancelTankTrashRestore');
+const tankPermanentDeleteBackdrop = document.getElementById('tankPermanentDeleteBackdrop');
+const tankPermanentDeleteMessage = document.getElementById('tankPermanentDeleteMessage');
+const tankPermanentDeleteConfirmInput = document.getElementById('tankPermanentDeleteConfirmInput');
+const tankPermanentDeleteHint = document.getElementById('tankPermanentDeleteHint');
+const btnConfirmTankPermanentDelete = document.getElementById('btnConfirmTankPermanentDelete');
+const btnCancelTankPermanentDelete = document.getElementById('btnCancelTankPermanentDelete');
 let currentAuthUser = null;
 let tanksFetchSeq = 0;
 let tankActionInFlight = false;
+let pendingTrashTank = null;
+let pendingTrashRestoreTank = null;
+let pendingPermanentDeleteTank = null;
 let dailySummaryRows = [];
 let dailySortKey = 'tank_number';
 let dailySortDir = 1;
@@ -84,8 +105,33 @@ function setAlert(el, message, type) {
 
 async function apiJson(url, opts) {
   const res = await fetch(url, opts);
-  const data = await res.json().catch(() => ({}));
+  const text = await res.text();
+  let data = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch (_e) {
+      data = { ok: false, error: 'non_json_response', message: text.trim().slice(0, 240), raw: text };
+    }
+  }
   return { res, data };
+}
+
+function apiErrorMessage(data, fallback) {
+  if (data && data.message) return String(data.message);
+  if (data && data.error === 'non_json_response') {
+    return 'Server returned an unexpected response. Restart or redeploy the application server, then try again.';
+  }
+  return fallback;
+}
+
+function tankTableColSpan(filter) {
+  return filter === 'trash' ? 8 : 10;
+}
+
+function renderTankTableMessage(filter, message) {
+  if (!tankBody) return;
+  tankBody.innerHTML = `<tr><td colspan="${tankTableColSpan(filter)}" class="muted">${escapeHtml(message)}</td></tr>`;
 }
 
 function tankIsActive(t) {
@@ -276,13 +322,52 @@ function tankStatusBadge(t) {
 
 function getTankStatusFilter() {
   const raw = tankStatusFilter ? String(tankStatusFilter.value || '').toLowerCase() : 'active';
-  if (raw === 'archived' || raw === 'all' || raw === 'waiting') return raw;
+  if (raw === 'archived' || raw === 'all' || raw === 'waiting' || raw === 'trash') return raw;
   return 'active';
+}
+
+function updateTrashFilterLabel(count) {
+  if (!tankStatusFilter) return;
+  const trashOpt = Array.from(tankStatusFilter.options).find((o) => o.value === 'trash');
+  if (trashOpt) trashOpt.textContent = count > 0 ? `Trash (${count})` : 'Trash';
+}
+
+function updateTankTableHead(filter) {
+  if (!tankTableHead) return;
+  if (filter === 'trash') {
+    tankTableHead.innerHTML = `<tr>
+      <th>Tank #</th><th>Customer</th><th>Model</th><th>Pieces</th><th>Previous Status</th><th>Deleted At</th><th>Deleted By</th><th>Actions</th>
+    </tr>`;
+    return;
+  }
+  tankTableHead.innerHTML = `<tr>
+    <th><input type="checkbox" id="tankSelectAll" aria-label="Select all" /></th>
+    <th>Tank #</th><th>Customer</th><th>Model</th><th>Pieces</th><th>Status</th><th>Created</th><th>Started</th><th>Duration</th><th>Actions</th>
+  </tr>`;
+  const selectAll = document.getElementById('tankSelectAll');
+  if (selectAll) {
+    selectAll.addEventListener('change', () => {
+      const checked = selectAll.checked;
+      document.querySelectorAll('.tank-select-cb').forEach((cb) => {
+        cb.checked = checked;
+      });
+    });
+  }
+}
+
+function previousStatusLabel(status) {
+  const st = String(status || '').toLowerCase();
+  if (st === 'archived') return 'Completed';
+  if (st === 'waiting') return 'Waiting';
+  if (st === 'paused') return 'Paused';
+  if (st === 'active') return 'Active';
+  return status || '—';
 }
 
 function tankEmptyMessage(filter) {
   if (filter === 'archived') return 'No completed tanks';
   if (filter === 'waiting') return 'No waiting tanks';
+  if (filter === 'trash') return 'No tanks in Trash';
   if (filter === 'all') return 'No tanks found';
   return 'No active tanks';
 }
@@ -295,31 +380,197 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;');
 }
 
+function closeTankActionsMenu() {
+  const openBtn = document.querySelector('.tank-actions-more-btn[aria-expanded="true"]');
+  if (openBtn) openBtn.setAttribute('aria-expanded', 'false');
+  const menu = document.getElementById('tankActionsMenu');
+  if (menu) {
+    menu.classList.remove('is-open');
+    menu.innerHTML = '';
+    menu.hidden = true;
+  }
+}
+
+function ensureTankActionsMenu() {
+  let menu = document.getElementById('tankActionsMenu');
+  if (menu) return menu;
+  menu = document.createElement('div');
+  menu.id = 'tankActionsMenu';
+  menu.className = 'tank-actions-menu';
+  menu.setAttribute('role', 'menu');
+  menu.hidden = true;
+  document.body.appendChild(menu);
+  return menu;
+}
+
+function positionTankActionsMenu(anchorBtn) {
+  const menu = ensureTankActionsMenu();
+  const rect = anchorBtn.getBoundingClientRect();
+  const menuWidth = Math.max(188, menu.offsetWidth || 188);
+  const pad = 8;
+  let left = rect.right - menuWidth;
+  left = Math.max(pad, Math.min(left, window.innerWidth - menuWidth - pad));
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(rect.bottom + 4)}px`;
+  menu.style.visibility = 'hidden';
+  menu.hidden = false;
+  menu.classList.add('is-open');
+  const mh = menu.offsetHeight || 0;
+  let top = rect.bottom + 4;
+  if (top + mh > window.innerHeight - pad && rect.top - mh - 4 > pad) {
+    top = rect.top - mh - 4;
+  }
+  menu.style.top = `${Math.round(top)}px`;
+  menu.style.visibility = '';
+}
+
+function buildTankMoreMenuHtml(btn) {
+  const kind = btn.getAttribute('data-menu-kind') || 'normal';
+  const id = btn.getAttribute('data-id') || '';
+  const tank = escapeHtml(btn.getAttribute('data-tank') || '');
+  const status = escapeHtml(btn.getAttribute('data-status') || '');
+  if (kind === 'trash') {
+    return `<button type="button" role="menuitem" class="tank-actions-menu-item is-danger" data-act="permanent-delete" data-id="${id}" data-tank="${tank}">Delete Permanently</button>`;
+  }
+  const showComplete = btn.getAttribute('data-can-complete') === '1';
+  const statusAction = showComplete
+    ? `<button type="button" role="menuitem" class="tank-actions-menu-item is-success" data-act="archive" data-id="${id}">Complete Tank</button>`
+    : `<button type="button" role="menuitem" class="tank-actions-menu-item" data-act="restore" data-id="${id}">Restore</button>`;
+  return `
+    <button type="button" role="menuitem" class="tank-actions-menu-item" data-act="edit-phase" data-id="${id}">Edit Phase Time</button>
+    <button type="button" role="menuitem" class="tank-actions-menu-item" data-act="print" data-tank="${tank}">Print</button>
+    ${statusAction}
+    <button type="button" role="menuitem" class="tank-actions-menu-item is-danger" data-act="delete" data-id="${id}" data-tank="${tank}" data-status="${status}">Delete</button>
+  `;
+}
+
+function openTankActionsMenu(anchorBtn) {
+  const wasOpen = anchorBtn.getAttribute('aria-expanded') === 'true';
+  closeTankActionsMenu();
+  if (wasOpen) return;
+  const menu = ensureTankActionsMenu();
+  menu.innerHTML = buildTankMoreMenuHtml(anchorBtn);
+  anchorBtn.setAttribute('aria-expanded', 'true');
+  positionTankActionsMenu(anchorBtn);
+}
+
+function renderNormalTankActionsCell(t) {
+  const canComplete = tankIsActive(t) && String(t.status).toLowerCase() !== 'archived' ? '1' : '0';
+  return `<td class="tank-actions-cell">
+    <div class="tank-actions">
+      <button type="button" class="btn btn-sm btn-primary" data-act="report" data-id="${t.id}">View Report</button>
+      <button type="button" class="btn btn-sm" data-act="edit" data-id="${t.id}">Edit</button>
+      <button type="button" class="btn btn-sm tank-actions-more-btn" aria-label="More actions" aria-haspopup="menu" aria-expanded="false" data-tank-more="1" data-menu-kind="normal" data-id="${t.id}" data-tank="${escapeHtml(t.tank_number)}" data-status="${escapeHtml(t.status || '')}" data-can-complete="${canComplete}">⋮</button>
+    </div>
+  </td>`;
+}
+
+function renderTrashTankActionsCell(t) {
+  return `<td class="tank-actions-cell">
+    <div class="tank-actions">
+      <button type="button" class="btn btn-sm btn-primary" data-act="report" data-id="${t.id}">View Report</button>
+      <button type="button" class="btn btn-sm btn-success" data-act="trash-restore" data-id="${t.id}" data-tank="${escapeHtml(t.tank_number)}">Restore</button>
+      <button type="button" class="btn btn-sm tank-actions-more-btn" aria-label="More actions" aria-haspopup="menu" aria-expanded="false" data-tank-more="1" data-menu-kind="trash" data-id="${t.id}" data-tank="${escapeHtml(t.tank_number)}">⋮</button>
+    </div>
+  </td>`;
+}
+
+function handleTankActionButton(btn) {
+  if (!btn) return;
+  const act = btn.getAttribute('data-act');
+  if (!act) return;
+  closeTankActionsMenu();
+  if (act === 'print') {
+    const tank = btn.getAttribute('data-tank');
+    if (tank) window.open(`/manager/tank-print?tank=${encodeURIComponent(tank)}`, '_blank', 'noopener,noreferrer');
+    return;
+  }
+  const id = Number(btn.getAttribute('data-id'));
+  if (!Number.isFinite(id)) return;
+  if (act === 'edit') void editTank(id);
+  if (act === 'report') void openTankReport(id);
+  if (act === 'edit-phase') {
+    if (window.PhaseTimeEditor) {
+      window.PhaseTimeEditor.open(id, {
+        onSaved: () => {
+          if (currentTankReportId === id) void openTankReport(id);
+        },
+      });
+    }
+  }
+  if (act === 'archive') void setTankStatus(id, 'archived');
+  if (act === 'restore') void setTankStatus(id, 'active');
+  if (act === 'delete') {
+    openTankTrashConfirm({
+      id,
+      tank_number: btn.getAttribute('data-tank') || '',
+      status: btn.getAttribute('data-status') || '',
+    });
+  }
+  if (act === 'trash-restore') {
+    openTankTrashRestore({ id, tank_number: btn.getAttribute('data-tank') || '' });
+  }
+  if (act === 'permanent-delete') {
+    openTankPermanentDelete({ id, tank_number: btn.getAttribute('data-tank') || '' });
+  }
+}
+
 function clearTankSearch() {
   if (tankSearch) tankSearch.value = '';
   void loadTanks();
 }
 
 async function loadTanks() {
+  closeTankActionsMenu();
   const seq = ++tanksFetchSeq;
   const q = String(tankSearch && tankSearch.value ? tankSearch.value : '').trim();
   const statusFilter = getTankStatusFilter();
+  updateTankTableHead(statusFilter);
+  renderTankTableMessage(statusFilter, 'Loading…');
   const query = new URLSearchParams({ status: statusFilter });
   if (q) query.set('search', q);
   const { res, data } = await apiJson(`/api/tanks?${query.toString()}`);
+  // Ignore stale responses from a previous filter/search request.
   if (seq !== tanksFetchSeq) return;
+  if (getTankStatusFilter() !== statusFilter) return;
   if (!res.ok) {
-    if (tankHint) tankHint.textContent = (data && data.message) || 'Could not load tanks.';
+    const msg = apiErrorMessage(data, 'Could not load tanks.');
+    renderTankTableMessage(statusFilter, msg);
+    if (tankHint) tankHint.textContent = msg;
     return;
   }
-  const rows = data.tanks || [];
+  if (tankHint && String(tankHint.textContent || '').startsWith('Could not load tanks')) {
+    tankHint.textContent = '';
+  }
+  updateTrashFilterLabel(Number(data.trash_count) || 0);
+  const rows = Array.isArray(data.tanks) ? data.tanks : [];
   if (!rows.length) {
-    tankBody.innerHTML = `<tr><td colspan="10" class="muted">${tankEmptyMessage(statusFilter)}</td></tr>`;
+    renderTankTableMessage(statusFilter, tankEmptyMessage(statusFilter));
+    return;
+  }
+  if (statusFilter === 'trash') {
+    tankBody.innerHTML = rows
+      .map((t) => {
+        const pcs = `${Number(t.current_piece_number) || 1}/${Number(t.piece_count) || 1}`;
+        const deletedAt = t.deleted_at
+          ? `<span class="tank-lifecycle-muted">${escapeHtml(fmtTankDateTime(t.deleted_at))}</span>`
+          : '—';
+        return `<tr>
+      <td><strong>${escapeHtml(t.tank_number)}</strong></td>
+      <td>${escapeHtml(t.customer || '—')}</td>
+      <td>${escapeHtml(t.model || '—')}</td>
+      <td>${escapeHtml(pcs)}</td>
+      <td>${escapeHtml(previousStatusLabel(t.previous_status || t.status))}</td>
+      <td>${deletedAt}</td>
+      <td>${escapeHtml(t.deleted_by || '—')}</td>
+      ${renderTrashTankActionsCell(t)}
+    </tr>`;
+      })
+      .join('');
     return;
   }
   tankBody.innerHTML = rows
     .map((t) => {
-      const isActive = tankIsActive(t);
       const started = t.first_scanned_at || t.started_at
         ? `<span class="tank-lifecycle-muted">${escapeHtml(fmtTankDateTime(t.first_scanned_at || t.started_at))}</span>`
         : '<span class="tank-lifecycle-muted">—</span>';
@@ -334,19 +585,7 @@ async function loadTanks() {
       <td>${renderTankCreatedCell(t)}</td>
       <td>${started}</td>
       <td>${renderTankDurationBadge(t)}</td>
-      <td>
-        <div class="toolbar" style="justify-content:flex-start">
-          <button class="btn btn-sm" data-act="report" data-id="${t.id}">View Report</button>
-          <button class="btn btn-sm" data-act="edit-phase" data-id="${t.id}">Edit Phase Time</button>
-          <button class="btn btn-sm" data-act="edit" data-id="${t.id}">Edit</button>
-          <button class="btn btn-sm" data-act="print" data-tank="${escapeHtml(t.tank_number)}">Print</button>
-          ${
-            isActive && String(t.status).toLowerCase() !== 'archived'
-              ? `<button class="btn btn-sm" data-act="archive" data-id="${t.id}">Complete Tank</button>`
-              : `<button class="btn btn-sm" data-act="restore" data-id="${t.id}">Restore</button>`
-          }
-        </div>
-      </td>
+      ${renderNormalTankActionsCell(t)}
     </tr>`;
     })
     .join('');
@@ -375,7 +614,11 @@ async function createTank() {
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
-    tankHint.textContent = (data && data.message) || 'Could not create tank.';
+    if (data && data.error === 'tank_in_trash') {
+      tankHint.textContent = data.message || 'Tank number exists in Trash.';
+    } else {
+      tankHint.textContent = (data && data.message) || 'Could not create tank.';
+    }
     return;
   }
   tankNumber.value = '';
@@ -505,6 +748,156 @@ async function setTankStatus(id, nextStatus) {
     : filter === 'active'
       ? 'Tank completed. Switch to Completed or All to see it.'
       : 'Tank completed.';
+  await loadTanks();
+}
+
+function closeTankTrashConfirm() {
+  pendingTrashTank = null;
+  if (tankTrashConfirmHint) tankTrashConfirmHint.textContent = '';
+  if (!tankTrashConfirmBackdrop) return;
+  tankTrashConfirmBackdrop.classList.remove('show');
+  tankTrashConfirmBackdrop.setAttribute('aria-hidden', 'true');
+}
+
+function openTankTrashConfirm(tank) {
+  pendingTrashTank = tank;
+  if (tankTrashConfirmHint) tankTrashConfirmHint.textContent = '';
+  if (tankTrashConfirmTitle) tankTrashConfirmTitle.textContent = `Move Tank ${tank.tank_number} to Trash?`;
+  if (tankTrashConfirmMessage) {
+    tankTrashConfirmMessage.textContent =
+      'The tank will be removed from normal Tank Management views but can still be restored from Trash.';
+  }
+  const hasHistory =
+    String(tank.status || '').toLowerCase() === 'archived' ||
+    Boolean(tank.first_scanned_at || tank.started_at);
+  if (tankTrashHistoryWarning) tankTrashHistoryWarning.hidden = !hasHistory;
+  if (tankTrashConfirmBackdrop) {
+    tankTrashConfirmBackdrop.classList.add('show');
+    tankTrashConfirmBackdrop.setAttribute('aria-hidden', 'false');
+  }
+}
+
+async function confirmMoveTankToTrash() {
+  if (!pendingTrashTank || tankActionInFlight) return;
+  tankActionInFlight = true;
+  if (btnConfirmTankTrash) btnConfirmTankTrash.disabled = true;
+  if (tankTrashConfirmHint) tankTrashConfirmHint.textContent = '';
+  const id = Number(pendingTrashTank.id);
+  const tankNumber = pendingTrashTank.tank_number;
+  const { res, data } = await apiJson(`/api/tanks/${id}/trash`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  tankActionInFlight = false;
+  if (btnConfirmTankTrash) btnConfirmTankTrash.disabled = false;
+  if (!res.ok) {
+    const msg = apiErrorMessage(data, 'Could not move tank to Trash.');
+    if (tankTrashConfirmHint) tankTrashConfirmHint.textContent = msg;
+    if (tankHint) tankHint.textContent = msg;
+    return;
+  }
+  closeTankTrashConfirm();
+  if (tankHint) tankHint.textContent = `Tank ${tankNumber} moved to Trash.`;
+  pendingTrashTank = null;
+  await loadTanks();
+}
+
+function closeTankTrashRestore() {
+  pendingTrashRestoreTank = null;
+  if (!tankTrashRestoreBackdrop) return;
+  tankTrashRestoreBackdrop.classList.remove('show');
+  tankTrashRestoreBackdrop.setAttribute('aria-hidden', 'true');
+}
+
+function openTankTrashRestore(tank) {
+  pendingTrashRestoreTank = tank;
+  if (tankTrashRestoreMessage) {
+    tankTrashRestoreMessage.textContent = `Restore Tank ${tank.tank_number}?`;
+  }
+  if (tankTrashRestoreBackdrop) {
+    tankTrashRestoreBackdrop.classList.add('show');
+    tankTrashRestoreBackdrop.setAttribute('aria-hidden', 'false');
+  }
+}
+
+async function confirmRestoreTankFromTrash() {
+  if (!pendingTrashRestoreTank || tankActionInFlight) return;
+  tankActionInFlight = true;
+  const id = Number(pendingTrashRestoreTank.id);
+  const tankNumber = pendingTrashRestoreTank.tank_number;
+  const { res, data } = await apiJson(`/api/tanks/${id}/trash-restore`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  tankActionInFlight = false;
+  if (!res.ok) {
+    if (tankHint) tankHint.textContent = apiErrorMessage(data, 'Could not restore tank.');
+    return;
+  }
+  closeTankTrashRestore();
+  if (tankHint) tankHint.textContent = `Tank ${tankNumber} restored.`;
+  pendingTrashRestoreTank = null;
+  await loadTanks();
+}
+
+function closeTankPermanentDelete() {
+  pendingPermanentDeleteTank = null;
+  if (tankPermanentDeleteConfirmInput) tankPermanentDeleteConfirmInput.value = '';
+  if (tankPermanentDeleteHint) tankPermanentDeleteHint.textContent = '';
+  if (btnConfirmTankPermanentDelete) btnConfirmTankPermanentDelete.disabled = true;
+  if (!tankPermanentDeleteBackdrop) return;
+  tankPermanentDeleteBackdrop.classList.remove('show');
+  tankPermanentDeleteBackdrop.setAttribute('aria-hidden', 'true');
+}
+
+function openTankPermanentDelete(tank) {
+  pendingPermanentDeleteTank = tank;
+  if (tankPermanentDeleteMessage) {
+    tankPermanentDeleteMessage.textContent = `PERMANENTLY DELETE TANK ${tank.tank_number}?\n\nThis will permanently remove this tank and all related production history.\n\nThis action cannot be undone.`;
+  }
+  if (tankPermanentDeleteConfirmInput) {
+    tankPermanentDeleteConfirmInput.value = '';
+    tankPermanentDeleteConfirmInput.placeholder = tank.tank_number;
+  }
+  if (btnConfirmTankPermanentDelete) btnConfirmTankPermanentDelete.disabled = true;
+  if (tankPermanentDeleteBackdrop) {
+    tankPermanentDeleteBackdrop.classList.add('show');
+    tankPermanentDeleteBackdrop.setAttribute('aria-hidden', 'false');
+    if (tankPermanentDeleteConfirmInput) tankPermanentDeleteConfirmInput.focus();
+  }
+}
+
+function syncPermanentDeleteButton() {
+  if (!btnConfirmTankPermanentDelete || !pendingPermanentDeleteTank || !tankPermanentDeleteConfirmInput) return;
+  const typed = String(tankPermanentDeleteConfirmInput.value || '').trim().toUpperCase();
+  const expected = String(pendingPermanentDeleteTank.tank_number || '').trim().toUpperCase();
+  btnConfirmTankPermanentDelete.disabled = typed !== expected;
+}
+
+async function confirmPermanentDeleteTank() {
+  if (!pendingPermanentDeleteTank || tankActionInFlight) return;
+  const typed = String(tankPermanentDeleteConfirmInput && tankPermanentDeleteConfirmInput.value
+    ? tankPermanentDeleteConfirmInput.value
+    : '').trim();
+  const id = Number(pendingPermanentDeleteTank.id);
+  tankActionInFlight = true;
+  const { res, data } = await apiJson(`/api/tanks/${id}/permanent`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirm_tank_number: typed }),
+  });
+  tankActionInFlight = false;
+  if (!res.ok) {
+    if (tankPermanentDeleteHint) {
+      tankPermanentDeleteHint.textContent = (data && data.message) || 'Permanent delete failed.';
+    }
+    return;
+  }
+  const tankNumber = pendingPermanentDeleteTank.tank_number;
+  closeTankPermanentDelete();
+  tankHint.textContent = `Tank ${tankNumber} permanently deleted.`;
   await loadTanks();
 }
 
@@ -1105,21 +1498,22 @@ if (btnClearTankSearch) btnClearTankSearch.addEventListener('click', () => clear
 if (tankStatusFilter) tankStatusFilter.addEventListener('change', () => void loadTanks());
 if (btnPrintSelectedTanks) btnPrintSelectedTanks.addEventListener('click', () => printSelectedTanks());
 if (btnPrintAllTanks) btnPrintAllTanks.addEventListener('click', () => printAllTanks());
-if (btnSelectAllTanks || tankSelectAll) {
+if (btnSelectAllTanks || document.getElementById('tankSelectAll')) {
   const toggleAll = () => {
     const boxes = document.querySelectorAll('.tank-select-cb');
-    const checked = tankSelectAll ? tankSelectAll.checked : true;
+    const master = document.getElementById('tankSelectAll');
+    const checked = master ? master.checked : true;
     boxes.forEach((b) => {
       b.checked = checked;
     });
   };
   if (btnSelectAllTanks) {
     btnSelectAllTanks.addEventListener('click', () => {
-      if (tankSelectAll) tankSelectAll.checked = true;
+      const master = document.getElementById('tankSelectAll');
+      if (master) master.checked = true;
       toggleAll();
     });
   }
-  if (tankSelectAll) tankSelectAll.addEventListener('change', toggleAll);
 }
 if (btnSaveTankEdit) btnSaveTankEdit.addEventListener('click', () => void saveTankEdit());
 if (btnCancelTankEdit) btnCancelTankEdit.addEventListener('click', closeTankEdit);
@@ -1127,6 +1521,34 @@ if (btnCloseTankEdit) btnCloseTankEdit.addEventListener('click', closeTankEdit);
 if (tankEditBackdrop) {
   tankEditBackdrop.addEventListener('click', (e) => {
     if (e.target === tankEditBackdrop) closeTankEdit();
+  });
+}
+if (btnConfirmTankTrash) btnConfirmTankTrash.addEventListener('click', () => void confirmMoveTankToTrash());
+if (btnCancelTankTrash) btnCancelTankTrash.addEventListener('click', closeTankTrashConfirm);
+if (tankTrashConfirmBackdrop) {
+  tankTrashConfirmBackdrop.addEventListener('click', (e) => {
+    if (e.target === tankTrashConfirmBackdrop) closeTankTrashConfirm();
+  });
+}
+if (btnConfirmTankTrashRestore) {
+  btnConfirmTankTrashRestore.addEventListener('click', () => void confirmRestoreTankFromTrash());
+}
+if (btnCancelTankTrashRestore) btnCancelTankTrashRestore.addEventListener('click', closeTankTrashRestore);
+if (tankTrashRestoreBackdrop) {
+  tankTrashRestoreBackdrop.addEventListener('click', (e) => {
+    if (e.target === tankTrashRestoreBackdrop) closeTankTrashRestore();
+  });
+}
+if (btnConfirmTankPermanentDelete) {
+  btnConfirmTankPermanentDelete.addEventListener('click', () => void confirmPermanentDeleteTank());
+}
+if (btnCancelTankPermanentDelete) btnCancelTankPermanentDelete.addEventListener('click', closeTankPermanentDelete);
+if (tankPermanentDeleteConfirmInput) {
+  tankPermanentDeleteConfirmInput.addEventListener('input', syncPermanentDeleteButton);
+}
+if (tankPermanentDeleteBackdrop) {
+  tankPermanentDeleteBackdrop.addEventListener('click', (e) => {
+    if (e.target === tankPermanentDeleteBackdrop) closeTankPermanentDelete();
   });
 }
 if (btnDailySummaryRefresh) btnDailySummaryRefresh.addEventListener('click', () => void loadDailySummary());
@@ -1154,30 +1576,38 @@ if (dailySummaryTable) {
 if (btnNotesRefresh) btnNotesRefresh.addEventListener('click', () => void loadProductionNotes());
 
 if (tankBody) tankBody.addEventListener('click', (e) => {
-  const btn = e.target.closest('button[data-act]');
-  if (!btn) return;
-  const act = btn.getAttribute('data-act');
-  if (act === 'print') {
-    const tank = btn.getAttribute('data-tank');
-    if (tank) window.open(`/manager/tank-print?tank=${encodeURIComponent(tank)}`, '_blank', 'noopener,noreferrer');
+  const moreBtn = e.target.closest('[data-tank-more]');
+  if (moreBtn) {
+    e.preventDefault();
+    e.stopPropagation();
+    openTankActionsMenu(moreBtn);
     return;
   }
-  const id = Number(btn.getAttribute('data-id'));
-  if (!Number.isFinite(id)) return;
-  if (act === 'edit') void editTank(id);
-  if (act === 'report') void openTankReport(id);
-  if (act === 'edit-phase') {
-    if (window.PhaseTimeEditor) {
-      window.PhaseTimeEditor.open(id, {
-        onSaved: () => {
-          if (currentTankReportId === id) void openTankReport(id);
-        },
-      });
-    }
-  }
-  if (act === 'archive') void setTankStatus(id, 'archived');
-  if (act === 'restore') void setTankStatus(id, 'active');
+  const btn = e.target.closest('button[data-act]');
+  if (!btn || !tankBody.contains(btn)) return;
+  handleTankActionButton(btn);
 });
+
+document.addEventListener('click', (e) => {
+  const menu = document.getElementById('tankActionsMenu');
+  if (!menu || !menu.classList.contains('is-open')) return;
+  if (e.target.closest('#tankActionsMenu')) {
+    const btn = e.target.closest('button[data-act]');
+    if (btn) handleTankActionButton(btn);
+    return;
+  }
+  if (e.target.closest('[data-tank-more]')) return;
+  closeTankActionsMenu();
+});
+
+window.addEventListener('resize', () => closeTankActionsMenu());
+window.addEventListener(
+  'scroll',
+  () => {
+    if (document.getElementById('tankActionsMenu')?.classList.contains('is-open')) closeTankActionsMenu();
+  },
+  true
+);
 
 if (btnCloseTankReport) btnCloseTankReport.addEventListener('click', closeTankReport);
 if (btnPrintTankReport) {

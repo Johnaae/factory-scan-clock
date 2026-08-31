@@ -116,6 +116,7 @@
                 <option value="active" selected>Active / Waiting</option>
                 <option value="waiting">Waiting</option>
                 <option value="archived">Completed</option>
+                <option value="trash">Trash</option>
                 <option value="all">All</option>
               </select>
             </div>
@@ -130,7 +131,7 @@
         <div class="card-body card-body--flush">
           <div class="table-wrap table-scroll manager-table-wrap">
             <table class="manager-table">
-              <thead>
+              <thead id="tankTableHead">
                 <tr>
                   <th><input type="checkbox" id="tankSelectAll" aria-label="Select all" /></th>
                   <th>Tank #</th><th>Customer</th><th>Model</th><th>Pieces</th><th>Status</th><th>Created</th><th>Started</th><th>Duration</th><th>Actions</th>
@@ -423,17 +424,69 @@
       </div>
     </div>
 
+    <div id="tankTrashConfirmBackdrop" class="modal-backdrop" role="dialog" aria-modal="true" aria-hidden="true">
+      <div class="modal" role="document">
+        <div class="modal-head">
+          <h3 class="modal-title" id="tankTrashConfirmTitle">Move to Trash</h3>
+        </div>
+        <div class="modal-body">
+          <p id="tankTrashConfirmMessage"></p>
+          <p class="muted" id="tankTrashHistoryWarning" hidden>This tank contains completed production history.</p>
+          <div class="toastline manager-alert" id="tankTrashConfirmHint"></div>
+        </div>
+        <div class="modal-footer">
+          <button id="btnConfirmTankTrash" class="btn btn-primary" type="button">Move to Trash</button>
+          <button id="btnCancelTankTrash" class="btn" type="button">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="tankTrashRestoreBackdrop" class="modal-backdrop" role="dialog" aria-modal="true" aria-hidden="true">
+      <div class="modal" role="document">
+        <div class="modal-head">
+          <h3 class="modal-title" id="tankTrashRestoreTitle">Restore Tank</h3>
+        </div>
+        <div class="modal-body">
+          <p id="tankTrashRestoreMessage"></p>
+        </div>
+        <div class="modal-footer">
+          <button id="btnConfirmTankTrashRestore" class="btn btn-primary" type="button">Restore</button>
+          <button id="btnCancelTankTrashRestore" class="btn" type="button">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="tankPermanentDeleteBackdrop" class="modal-backdrop" role="dialog" aria-modal="true" aria-hidden="true">
+      <div class="modal modal-wide" role="document">
+        <div class="modal-head">
+          <h3 class="modal-title" id="tankPermanentDeleteTitle">Permanently Delete Tank</h3>
+        </div>
+        <div class="modal-body">
+          <p id="tankPermanentDeleteMessage" style="white-space:pre-line"></p>
+          <div class="field" style="margin-top:16px">
+            <label for="tankPermanentDeleteConfirmInput">Type tank number to confirm</label>
+            <input id="tankPermanentDeleteConfirmInput" type="text" autocomplete="off" />
+          </div>
+          <div class="toastline manager-alert" id="tankPermanentDeleteHint"></div>
+        </div>
+        <div class="modal-footer">
+          <button id="btnConfirmTankPermanentDelete" class="btn btn-primary" type="button" disabled>Permanently Delete</button>
+          <button id="btnCancelTankPermanentDelete" class="btn" type="button">Cancel</button>
+        </div>
+      </div>
+    </div>
+
     <script src="/i18n.js"></script>
     <script src="/status-styles.js"></script>
     <script src="/tank-activity.js?v=2"></script>
-    <script src="/session-details.js?v=3"></script>
+    <script src="/session-details.js?v=5"></script>
     <script src="/phase-time-editor.js?v=3"></script>
-    <script src="/team-member-picker.js"></script>
+    <script src="/team-member-picker.js?v=6"></script>
     <script src="/team-member-details.js"></script>
-    <script src="/machine-dashboard.js?v=9"></script>
-    <script src="/team-dashboard.js?v=2"></script>
+    <script src="/machine-dashboard.js?v=10"></script>
+    <script src="/team-dashboard.js?v=5"></script>
     <script src="/alert-sound.js"></script>
-    <script src="/manager.js?v=14"></script>
+    <script src="/manager.js?v=18"></script>
     <script>
       document.addEventListener('DOMContentLoaded', () => {
         if (window.FactoryI18n) {

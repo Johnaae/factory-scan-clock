@@ -52,9 +52,10 @@
     return `<span class="team-member-detail-name">${escapeHtml(name)}</span>${code}`;
   }
 
-  function renderAddMemberForm(teamId) {
+  function renderAddMemberForm(teamId, opts = {}) {
     const id = Number(teamId);
-    return `<div class="team-employee-picker" data-team-id="${id}">
+    const floatDropdown = Boolean(opts.floatDropdown);
+    return `<div class="team-employee-picker" data-team-id="${id}"${floatDropdown ? ' data-float-dropdown="1"' : ''}>
       <div class="team-add-member-row">
         <div class="team-emp-combobox" role="combobox" aria-haspopup="listbox" aria-expanded="false">
           <label class="sr-only" for="team-emp-input-${id}">Select employee</label>
@@ -82,6 +83,49 @@
     </div>`;
   }
 
+  function getPickerRefs(picker) {
+    return {
+      listEl: picker._listEl || picker.querySelector('.team-emp-combobox-list'),
+      combobox: picker._combobox || picker.querySelector('.team-emp-combobox'),
+      inputEl: picker._inputEl || picker.querySelector('.team-emp-combobox-input'),
+    };
+  }
+
+  function getDropdownShell(picker, combobox) {
+    const refs = picker ? getPickerRefs(picker) : { listEl: null };
+    if (refs.listEl) return refs.listEl;
+    if (!combobox) return null;
+    return combobox.querySelector('.team-emp-combobox-list');
+  }
+
+  function usesFloatingDropdown(picker) {
+    return Boolean(picker && picker.dataset.floatDropdown === '1');
+  }
+
+  function attachFloatingShell(shell) {
+    if (!shell || shell.dataset.floatingAttached === '1') return;
+    shell._floatHome = { parent: shell.parentNode, next: shell.nextSibling };
+    document.body.appendChild(shell);
+    shell.dataset.floatingAttached = '1';
+    shell.classList.add('team-emp-combobox-list--floating');
+  }
+
+  function detachFloatingShell(shell) {
+    if (!shell || shell.dataset.floatingAttached !== '1') return;
+    const home = shell._floatHome;
+    if (home && home.parent) {
+      home.parent.insertBefore(shell, home.next || null);
+    }
+    shell.classList.remove('team-emp-combobox-list--floating');
+    delete shell.dataset.floatingAttached;
+    delete shell._floatHome;
+  }
+
+  function isDropdownOpen(picker, combobox) {
+    const shell = getDropdownShell(picker, combobox);
+    return Boolean(shell && !shell.hidden);
+  }
+
   function filterEmployees(employees, query) {
     const needle = String(query || '').trim().toLowerCase();
     if (!needle) return employees;
@@ -104,17 +148,89 @@
     hint.classList.toggle('team-emp-combobox-hint--error', !!isError);
   }
 
-  function closeList(combobox, listEl, inputEl) {
-    listEl.hidden = true;
-    listEl.innerHTML = '';
+  function resetDropdownListPosition(shell) {
+    if (!shell) return;
+    shell.style.position = '';
+    shell.style.top = '';
+    shell.style.bottom = '';
+    shell.style.left = '';
+    shell.style.width = '';
+    shell.style.right = '';
+    shell.style.maxHeight = '';
+    shell.style.overflowY = '';
+    shell.style.zIndex = '';
+  }
+
+  function positionDropdownList(picker, combobox, listEl, inputEl) {
+    if (!inputEl || !listEl || !combobox) return;
+    const shell = getDropdownShell(picker, combobox);
+    if (!shell) return;
+
+    const floating = usesFloatingDropdown(picker);
+    const rect = inputEl.getBoundingClientRect();
+    const gap = 2;
+    const maxPreferred = 260;
+    const minVisible = 48;
+    const spaceBelow = window.innerHeight - rect.bottom - gap - 8;
+    const spaceAbove = rect.top - gap - 8;
+
+    if (floating) attachFloatingShell(shell);
+    resetDropdownListPosition(shell);
+
+    const openUp = spaceBelow < minVisible && spaceAbove > spaceBelow + 80;
+    const maxHeight = Math.max(120, Math.min(maxPreferred, openUp ? spaceAbove : spaceBelow));
+
+    if (floating || openUp) {
+      shell.style.position = 'fixed';
+      shell.style.left = `${Math.max(8, rect.left)}px`;
+      shell.style.width = `${rect.width}px`;
+      shell.style.maxHeight = `${maxHeight}px`;
+      shell.style.zIndex = floating ? '5000' : '1200';
+      if (openUp) {
+        shell.style.top = 'auto';
+        shell.style.bottom = `${window.innerHeight - rect.top + gap}px`;
+      } else {
+        shell.style.top = `${rect.bottom + gap}px`;
+        shell.style.bottom = 'auto';
+      }
+      return;
+    }
+
+    shell.style.maxHeight = `${maxHeight}px`;
+  }
+
+  function closeList(picker, combobox, listEl, inputEl) {
+    const shell = getDropdownShell(picker, combobox);
+    if (listEl) listEl.innerHTML = '';
+    if (shell) {
+      resetDropdownListPosition(shell);
+      if (usesFloatingDropdown(picker)) detachFloatingShell(shell);
+      shell.hidden = true;
+    }
+    combobox.classList.remove('team-emp-combobox--open');
     combobox.setAttribute('aria-expanded', 'false');
     if (inputEl) inputEl.setAttribute('aria-expanded', 'false');
   }
 
-  function openList(combobox, listEl, inputEl) {
-    listEl.hidden = false;
+  function openList(picker, combobox, listEl, inputEl) {
+    const shell = getDropdownShell(picker, combobox);
+    positionDropdownList(picker, combobox, listEl, inputEl);
+    if (shell) shell.hidden = false;
+    combobox.classList.add('team-emp-combobox--open');
     combobox.setAttribute('aria-expanded', 'true');
     if (inputEl) inputEl.setAttribute('aria-expanded', 'true');
+  }
+
+  function bindDropdownReposition(picker, combobox, listEl, inputEl) {
+    if (picker._repositionBound) return;
+    picker._repositionBound = true;
+    const reposition = () => {
+      if (!isDropdownOpen(picker, combobox)) return;
+      positionDropdownList(picker, combobox, listEl, inputEl);
+    };
+    window.addEventListener('scroll', reposition, true);
+    window.addEventListener('resize', reposition);
+    picker._repositionDropdown = reposition;
   }
 
   function renderOptions(listEl, employees, onSelect) {
@@ -140,16 +256,14 @@
   }
 
   function clearPickerSelection(picker) {
+    const { inputEl, listEl, combobox } = getPickerRefs(picker);
     const hidden = picker.querySelector('.team-employee-selected-id');
-    const input = picker.querySelector('.team-emp-combobox-input');
-    const listEl = picker.querySelector('.team-emp-combobox-list');
-    const combobox = picker.querySelector('.team-emp-combobox');
     if (hidden) hidden.value = '';
-    if (input) {
-      input.value = '';
-      input.dataset.selectedLabel = '';
+    if (inputEl) {
+      inputEl.value = '';
+      inputEl.dataset.selectedLabel = '';
     }
-    if (listEl && combobox) closeList(combobox, listEl, input);
+    if (listEl && combobox) closeList(picker, combobox, listEl, inputEl);
     setHint(picker, '');
     picker._employeeCache = null;
   }
@@ -162,34 +276,30 @@
   }
 
   async function showFilteredOptions(picker, query) {
-    const listEl = picker.querySelector('.team-emp-combobox-list');
-    const combobox = picker.querySelector('.team-emp-combobox');
-    const inputEl = picker.querySelector('.team-emp-combobox-input');
+    const { listEl, combobox, inputEl } = getPickerRefs(picker);
     if (!listEl || !combobox || !inputEl) return;
     try {
       const all = await loadEmployeeCache(picker);
       const filtered = filterEmployees(all, query);
       renderOptions(listEl, filtered, (emp) => selectEmployee(picker, emp));
-      openList(combobox, listEl, inputEl);
+      openList(picker, combobox, listEl, inputEl);
     } catch (err) {
       listEl.innerHTML = `<li class="team-emp-combobox-option team-emp-combobox-option--empty muted" role="presentation">${escapeHtml(err.message || 'Could not load employees.')}</li>`;
-      openList(combobox, listEl, inputEl);
+      openList(picker, combobox, listEl, inputEl);
     }
   }
 
   function selectEmployee(picker, emp) {
     const hidden = picker.querySelector('.team-employee-selected-id');
-    const input = picker.querySelector('.team-emp-combobox-input');
-    const listEl = picker.querySelector('.team-emp-combobox-list');
-    const combobox = picker.querySelector('.team-emp-combobox');
+    const { inputEl, listEl, combobox } = getPickerRefs(picker);
     const label = formatEmployeeLabel(emp);
     if (hidden) hidden.value = String(emp.id);
-    if (input) {
-      input.value = label;
-      input.dataset.selectedLabel = label;
+    if (inputEl) {
+      inputEl.value = label;
+      inputEl.dataset.selectedLabel = label;
     }
     setHint(picker, '');
-    if (listEl && combobox) closeList(combobox, listEl, input);
+    if (listEl && combobox) closeList(picker, combobox, listEl, inputEl);
   }
 
   function wirePicker(picker, onAdded) {
@@ -205,24 +315,32 @@
     const addBtn = picker.querySelector('.btn-add-member');
     if (!teamId || !combobox || !inputEl || !toggleBtn || !listEl || !hiddenId || !addBtn) return;
 
-    let listOpen = false;
+    picker._listEl = listEl;
+    picker._combobox = combobox;
+    picker._inputEl = inputEl;
+
+    bindDropdownReposition(picker, combobox, listEl, inputEl);
 
     async function toggleDropdown(forceOpen) {
-      const shouldOpen = forceOpen != null ? forceOpen : !listOpen;
+      const openNow = isDropdownOpen(picker, combobox);
+      const shouldOpen = forceOpen != null ? forceOpen : !openNow;
       if (!shouldOpen) {
-        closeList(combobox, listEl, inputEl);
-        listOpen = false;
+        closeList(picker, combobox, listEl, inputEl);
         return;
       }
       await showFilteredOptions(picker, inputEl.value.trim());
-      listOpen = true;
     }
 
     toggleBtn.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
       void toggleDropdown();
-      inputEl.focus();
+    });
+
+    inputEl.addEventListener('focus', () => {
+      if (!isDropdownOpen(picker, combobox) && !hiddenId.value) {
+        void showFilteredOptions(picker, inputEl.value.trim());
+      }
     });
 
     inputEl.addEventListener('input', () => {
@@ -235,32 +353,22 @@
       setHint(picker, '');
       if (filterTimer) clearTimeout(filterTimer);
       filterTimer = setTimeout(() => {
-        void showFilteredOptions(picker, current).then(() => {
-          listOpen = true;
-        });
+        void showFilteredOptions(picker, current);
       }, 120);
-    });
-
-    inputEl.addEventListener('focus', () => {
-      if (!listOpen && !hiddenId.value) {
-        void showFilteredOptions(picker, inputEl.value.trim()).then(() => {
-          listOpen = true;
-        });
-      }
     });
 
     inputEl.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
-        closeList(combobox, listEl, inputEl);
-        listOpen = false;
+        closeList(picker, combobox, listEl, inputEl);
       }
     });
 
     document.addEventListener('click', (e) => {
-      if (!picker.contains(e.target)) {
-        closeList(combobox, listEl, inputEl);
-        listOpen = false;
-      }
+      const shell = getDropdownShell(picker, combobox);
+      if (picker.contains(e.target)) return;
+      if (shell && shell.contains(e.target)) return;
+      if (!isDropdownOpen(picker, combobox)) return;
+      closeList(picker, combobox, listEl, inputEl);
     });
 
     addBtn.addEventListener('click', async () => {
@@ -285,7 +393,6 @@
         }
         if (roleInput) roleInput.value = '';
         clearPickerSelection(picker);
-        listOpen = false;
         if (onAdded) await onAdded();
       } catch (err) {
         setHint(picker, err.message || 'Could not add team member.', true);

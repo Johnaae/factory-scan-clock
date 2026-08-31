@@ -246,6 +246,24 @@ ALTER TABLE machine_sessions ADD COLUMN IF NOT EXISTS piece_id BIGINT;
 ALTER TABLE machine_sessions ADD COLUMN IF NOT EXISTS notes TEXT;
 ALTER TABLE part_complete_events ADD COLUMN IF NOT EXISTS piece_number INTEGER;
 ALTER TABLE part_complete_events ADD COLUMN IF NOT EXISTS piece_id BIGINT;
+ALTER TABLE tanks ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+ALTER TABLE tanks ADD COLUMN IF NOT EXISTS deleted_by TEXT;
+ALTER TABLE tanks ADD COLUMN IF NOT EXISTS deleted_reason TEXT;
+ALTER TABLE tanks ADD COLUMN IF NOT EXISTS previous_status TEXT;
+ALTER TABLE tanks ADD COLUMN IF NOT EXISTS restored_at TIMESTAMPTZ;
+ALTER TABLE tanks ADD COLUMN IF NOT EXISTS restored_by TEXT;
+
+CREATE TABLE IF NOT EXISTS tank_admin_audit (
+  id BIGSERIAL PRIMARY KEY,
+  action TEXT NOT NULL CHECK (action IN ('move_to_trash', 'restore_from_trash', 'permanent_delete')),
+  tank_id BIGINT,
+  tank_number TEXT NOT NULL,
+  performed_by TEXT NOT NULL,
+  performed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  reason TEXT,
+  previous_status TEXT,
+  details JSONB
+);
 
 CREATE TABLE IF NOT EXISTS employee_team_memberships (
   id BIGSERIAL PRIMARY KEY,
@@ -346,6 +364,8 @@ const INDEXES_SQL = `
 CREATE INDEX IF NOT EXISTS idx_employees_code ON employees(code);
 CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 CREATE INDEX IF NOT EXISTS idx_tanks_tank_number ON tanks(tank_number);
+CREATE INDEX IF NOT EXISTS idx_tanks_deleted_at ON tanks(deleted_at) WHERE deleted_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_tank_admin_audit_tank ON tank_admin_audit(tank_number, performed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_scan_logs_employee_code ON scan_logs(employee_code);
 CREATE INDEX IF NOT EXISTS idx_scan_logs_scanned_at ON scan_logs(scanned_at);
 CREATE INDEX IF NOT EXISTS idx_scan_logs_tank_number ON scan_logs(tank_number);
@@ -376,6 +396,9 @@ CREATE INDEX IF NOT EXISTS idx_production_notes_tank ON production_notes(tank_id
 CREATE INDEX IF NOT EXISTS idx_machine_sessions_tank_id ON machine_sessions(tank_id);
 CREATE INDEX IF NOT EXISTS idx_machine_sessions_piece_id ON machine_sessions(piece_id);
 CREATE INDEX IF NOT EXISTS idx_machine_sessions_tank_piece_phase ON machine_sessions(tank_id, piece_number, activity_code);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_machine_sessions_open_tank_piece
+  ON machine_sessions(tank_id, piece_number)
+  WHERE status IN ('running', 'stopped') AND piece_number IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_employee_team_memberships_emp ON employee_team_memberships(employee_id, joined_at DESC);
 CREATE INDEX IF NOT EXISTS idx_employee_team_memberships_team ON employee_team_memberships(team_id, joined_at DESC);
 CREATE INDEX IF NOT EXISTS idx_employee_team_memberships_open ON employee_team_memberships(employee_id) WHERE left_at IS NULL;
@@ -560,6 +583,97 @@ async function allRequiredTablesExist(client) {
   return status.every((row) => row.ok);
 }
 
+const TANK_TRASH_COLUMNS = [
+  'deleted_at',
+  'deleted_by',
+  'deleted_reason',
+  'previous_status',
+  'restored_at',
+  'restored_by',
+];
+
+/** Idempotent additive pass — always safe on existing production databases. */
+async function runAdditiveSchemaPass(client, log = console) {
+  await client.query(ADD_COLUMNS_SQL);
+  await client.query(EXTENDED_TABLES_SQL);
+  await client.query(`
+    CREATE INDEX IF NOT EXISTS idx_tank_pieces_tank ON tank_pieces(tank_id);
+    CREATE INDEX IF NOT EXISTS idx_production_notes_created ON production_notes(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_production_notes_tank ON production_notes(tank_id);
+    CREATE INDEX IF NOT EXISTS idx_machine_sessions_tank_id ON machine_sessions(tank_id);
+    CREATE INDEX IF NOT EXISTS idx_machine_sessions_piece_id ON machine_sessions(piece_id);
+    CREATE INDEX IF NOT EXISTS idx_machine_sessions_tank_piece_phase ON machine_sessions(tank_id, piece_number, activity_code);
+    CREATE INDEX IF NOT EXISTS idx_downtime_intervals_tank ON downtime_intervals(tank_id);
+    CREATE INDEX IF NOT EXISTS idx_downtime_intervals_started ON downtime_intervals(started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_tanks_deleted_at ON tanks(deleted_at) WHERE deleted_at IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_tank_admin_audit_tank ON tank_admin_audit(tank_number, performed_at DESC);
+  `);
+  await client.query(`
+    UPDATE machine_sessions ms
+    SET piece_id = tp.id
+    FROM tank_pieces tp
+    WHERE ms.piece_id IS NULL
+      AND ms.tank_id = tp.tank_id
+      AND ms.piece_number = tp.piece_number
+  `);
+  await client.query(`
+    UPDATE tanks t
+    SET status = 'waiting'
+    WHERE LOWER(TRIM(COALESCE(t.status,''))) = 'active'
+      AND t.first_scanned_at IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM machine_sessions ms WHERE ms.tank_id = t.id
+      )
+  `);
+  await client.query(`
+    UPDATE tanks t
+    SET first_scanned_at = sub.first_at
+    FROM (
+      SELECT tank_id, MIN(started_at) AS first_at
+      FROM machine_sessions
+      GROUP BY tank_id
+    ) sub
+    WHERE t.id = sub.tank_id AND t.first_scanned_at IS NULL
+  `);
+  try {
+    await client.query(`
+      INSERT INTO employee_team_memberships (employee_id, team_id, joined_at, left_at, source, reason)
+      SELECT tm.employee_id, tm.team_id, COALESCE(tm.created_at, NOW()), NULL, 'migrate', 'Backfill from team_members'
+      FROM team_members tm
+      WHERE tm.active = 1 AND tm.employee_id IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM employee_team_memberships m
+          WHERE m.employee_id = tm.employee_id AND m.left_at IS NULL
+        )
+    `);
+  } catch (err) {
+    log.warn('[migration] employee_team_memberships backfill (noncritical):', err.message);
+  }
+}
+
+/** Verify tank soft-delete columns + audit table exist (throws if missing after additive pass). */
+async function ensureTankTrashSchema(client) {
+  const { rows: colRows } = await client.query(
+    `SELECT column_name
+     FROM information_schema.columns
+     WHERE table_schema = current_schema()
+       AND table_name = 'tanks'
+       AND column_name = ANY($1::text[])`,
+    [TANK_TRASH_COLUMNS]
+  );
+  const found = new Set(colRows.map((r) => r.column_name));
+  const missing = TANK_TRASH_COLUMNS.filter((c) => !found.has(c));
+  if (missing.length) {
+    throw new Error(`Tank trash columns missing on tanks: ${missing.join(', ')}`);
+  }
+  const { rows: auditRows } = await client.query(
+    `SELECT to_regclass('public.tank_admin_audit') AS reg`
+  );
+  if (!auditRows[0] || !auditRows[0].reg) {
+    throw new Error('tank_admin_audit table is missing');
+  }
+}
+
 /**
  * Run full required schema migration. Throws on required failure.
  * Fast-path: if all required tables already exist, skip lock + DDL + backfills.
@@ -571,66 +685,9 @@ async function runSchemaMigration(client, options = {}) {
   const forceFull = Boolean(options.forceFull);
 
     if (!forceFull && (await allRequiredTablesExist(client))) {
-      // Light additive column + extended table pass only (idempotent).
-      try {
-        await client.query(ADD_COLUMNS_SQL);
-        await client.query(EXTENDED_TABLES_SQL);
-        await client.query(`
-          CREATE INDEX IF NOT EXISTS idx_tank_pieces_tank ON tank_pieces(tank_id);
-          CREATE INDEX IF NOT EXISTS idx_production_notes_created ON production_notes(created_at DESC);
-          CREATE INDEX IF NOT EXISTS idx_production_notes_tank ON production_notes(tank_id);
-          CREATE INDEX IF NOT EXISTS idx_machine_sessions_tank_id ON machine_sessions(tank_id);
-          CREATE INDEX IF NOT EXISTS idx_machine_sessions_piece_id ON machine_sessions(piece_id);
-          CREATE INDEX IF NOT EXISTS idx_machine_sessions_tank_piece_phase ON machine_sessions(tank_id, piece_number, activity_code);
-          CREATE INDEX IF NOT EXISTS idx_downtime_intervals_tank ON downtime_intervals(tank_id);
-          CREATE INDEX IF NOT EXISTS idx_downtime_intervals_started ON downtime_intervals(started_at DESC);
-        `);
-        await client.query(`
-          UPDATE machine_sessions ms
-          SET piece_id = tp.id
-          FROM tank_pieces tp
-          WHERE ms.piece_id IS NULL
-            AND ms.tank_id = tp.tank_id
-            AND ms.piece_number = tp.piece_number
-        `);
-        // Waiting backfill: tanks never scanned stay waiting (only when status still active and no sessions).
-        await client.query(`
-          UPDATE tanks t
-          SET status = 'waiting'
-          WHERE LOWER(TRIM(COALESCE(t.status,''))) = 'active'
-            AND t.first_scanned_at IS NULL
-            AND NOT EXISTS (
-              SELECT 1 FROM machine_sessions ms WHERE ms.tank_id = t.id
-            )
-        `);
-        await client.query(`
-          UPDATE tanks t
-          SET first_scanned_at = sub.first_at
-          FROM (
-            SELECT tank_id, MIN(started_at) AS first_at
-            FROM machine_sessions
-            GROUP BY tank_id
-          ) sub
-          WHERE t.id = sub.tank_id AND t.first_scanned_at IS NULL
-        `);
-      } catch (err) {
-        log.warn('[migration] additive columns (noncritical):', err.message);
-      }
-              try {
-          await client.query(`
-            INSERT INTO employee_team_memberships (employee_id, team_id, joined_at, left_at, source, reason)
-            SELECT tm.employee_id, tm.team_id, COALESCE(tm.created_at, NOW()), NULL, 'migrate', 'Backfill from team_members'
-            FROM team_members tm
-            WHERE tm.active = 1 AND tm.employee_id IS NOT NULL
-              AND NOT EXISTS (
-                SELECT 1 FROM employee_team_memberships m
-                WHERE m.employee_id = tm.employee_id AND m.left_at IS NULL
-              )
-          `);
-        } catch (err) {
-          log.warn('[migration] employee_team_memberships backfill (noncritical):', err.message);
-        }
-        log.log('[migration] schema already present — skipped full migrate');
+      await runAdditiveSchemaPass(client, log);
+      await ensureTankTrashSchema(client);
+      log.log('[migration] schema already present — additive pass complete');
       return { skipped: true };
     }
 
@@ -647,6 +704,8 @@ async function runSchemaMigration(client, options = {}) {
       for (let i = 0; i < 20; i += 1) {
         await new Promise((r) => setTimeout(r, 500));
         if (await allRequiredTablesExist(client)) {
+          await runAdditiveSchemaPass(client, log);
+          await ensureTankTrashSchema(client);
           log.log('[migration] schema became ready while waiting for lock');
           return { skipped: true, waited: true };
         }
@@ -656,7 +715,9 @@ async function runSchemaMigration(client, options = {}) {
 
     // Re-check under lock (another process may have finished).
     if (await allRequiredTablesExist(client)) {
-      log.log('[migration] schema already present under lock — skipped full migrate');
+      await runAdditiveSchemaPass(client, log);
+      await ensureTankTrashSchema(client);
+      log.log('[migration] schema already present under lock — additive pass complete');
       return { skipped: true };
     }
 
@@ -720,8 +781,11 @@ module.exports = {
   EXTENDED_TABLES_SQL,
   ADD_COLUMNS_SQL,
   INDEXES_SQL,
+  TANK_TRASH_COLUMNS,
   runSchemaMigration,
   runSchemaMigrationWithPool,
+  runAdditiveSchemaPass,
+  ensureTankTrashSchema,
   runOptionalBackfills,
   verifyRequiredTables,
   listRequiredTableStatus,

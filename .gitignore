@@ -12,3 +12,5 @@ installer-assets/app-staging/
 installer-assets/**/app-staging/
 installer-assets/**/*.tmp
 **/installer-assets/app-staging/**
+
+logs/

@@ -15,16 +15,10 @@
       .replace(/"/g, '&quot;');
   }
 
-  function fmtMoney(v) {
-    const n = Number(v);
-    if (!Number.isFinite(n)) return '—';
-    return '$' + n.toFixed(2);
-  }
-
   function fmtHours(v) {
     const n = Number(v);
     if (!Number.isFinite(n)) return '—';
-    return n.toFixed(2);
+    return `${n.toFixed(2)} h`;
   }
 
   function fmtDateTime(iso) {
@@ -168,46 +162,48 @@
       ? (session.members || [])
           .map(
             (m) => `<tr>
-          <td>${escapeHtml(m.employee_name || '—')}</td>
+          <td class="session-details-member-name">${escapeHtml(m.employee_name || '—')}</td>
           <td>${escapeHtml(m.employee_code || '—')}</td>
-          <td>${fmtMoney(m.hourly_rate)}</td>
-          <td>${fmtHours(m.hours)}</td>
-          <td>${fmtMoney(m.estimated_cost)}</td>
+          <td class="td-num">${escapeHtml(fmtHours(m.hours))}</td>
         </tr>`
           )
           .join('')
-      : '<tr><td colspan="5" class="muted">No team members snapshotted for this session.</td></tr>';
+      : '<tr><td colspan="3" class="muted">No team members snapshotted for this session.</td></tr>';
 
     return `
-    <p class="muted session-details-note">Read-only history. Use <strong>Edit Phase Time</strong> on the Tank Report to correct times.</p>
-    <dl class="session-details-grid">
-      ${detailRow('Phase', escapeHtml(session.phase_name || '—'))}
-      ${detailRow('Piece', escapeHtml(session.piece_number != null ? `Piece ${session.piece_number}` : '—'))}
-      ${detailRow('Team', escapeHtml(session.team_name || '—'))}
-      ${detailRow('Machine', escapeHtml(session.machine_name || '—'))}
-      ${detailRow('Tank', escapeHtml(session.tank_number || '—'))}
-      ${detailRow('Start', escapeHtml(fmtDateTime(session.started_at)))}
-      ${detailRow('End', escapeHtml(endLabel(session)))}
-      ${detailRow('Duration', escapeHtml(session.duration_display || '—'))}
-      ${detailRow(
-        'Status',
-        `${escapeHtml(session.status_label || session.status || '—')}${
-          edits.length ? ' <span class="badge badge-warn">Edited</span>' : ''
-        }`
-      )}
-    </dl>
+    <div class="session-details-content">
+      <section class="session-details-summary" aria-label="Session information">
+        <dl class="session-details-grid session-details-grid--compact">
+          ${detailRow('Phase', escapeHtml(session.phase_name || '—'))}
+          ${detailRow('Piece', escapeHtml(session.piece_number != null ? `Piece ${session.piece_number}` : '—'))}
+          ${detailRow('Team', escapeHtml(session.team_name || '—'))}
+          ${detailRow('Machine', escapeHtml(session.machine_name || '—'))}
+          ${detailRow('Tank', escapeHtml(session.tank_number || '—'))}
+          ${detailRow('Start', escapeHtml(fmtDateTime(session.started_at)))}
+          ${detailRow('End', escapeHtml(endLabel(session)))}
+          ${detailRow('Duration', escapeHtml(session.duration_display || '—'))}
+          ${detailRow(
+            'Status',
+            `${escapeHtml(session.status_label || session.status || '—')}${
+              edits.length ? ' <span class="badge badge-warn">Edited</span>' : ''
+            }`
+          )}
+        </dl>
+      </section>
 
-    ${renderAuditBlock(session, edits)}
+      ${renderAuditBlock(session, edits)}
 
-    <h4 class="session-details-section-title">Member cost breakdown</h4>
-    <p class="muted session-details-note">Snapshot rates for estimate only — tank labor hours use membership history.</p>
-    <div class="table-wrap table-scroll">
-      <table class="session-details-table">
-        <thead>
-          <tr><th>Member</th><th>Code</th><th>Hourly rate</th><th>Hours</th><th>Est. cost</th></tr>
-        </thead>
-        <tbody>${memberRows}</tbody>
-      </table>
+      <section class="session-details-members" aria-label="Member hours">
+        <h4 class="session-details-section-title">Member Hours</h4>
+        <table class="session-details-table">
+          <thead>
+            <tr><th>Member</th><th>Code</th><th>Hours</th></tr>
+          </thead>
+          <tbody>${memberRows}</tbody>
+        </table>
+      </section>
+
+      <p class="muted session-details-footnote">Read-only history. Use <strong>Edit Phase Time</strong> on the Tank Report to correct times.</p>
     </div>`;
   }
 

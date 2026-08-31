@@ -28,7 +28,7 @@ const {
 } = require('./scripts/pg-backup');
 const { readAppVersion } = require('./scripts/app-version');
 const { createAlertEmailService } = require('./scripts/alert-email');
-const { runSchemaMigrationWithPool } = require('./scripts/schema-migrate');
+const { runSchemaMigrationWithPool, ensureTankTrashSchema } = require('./scripts/schema-migrate');
 const { getSystemHealthSummary, getServerStatus, checkDatabase, checkPm2Status, getDatabaseSize, toIsoTime } = require('./scripts/system-health');
 const {
   createPhase1ProductionLogic,
@@ -100,6 +100,12 @@ async function runPostgresSchema() {
   await withDbRetry(
     async () => {
       await runSchemaMigrationWithPool(pool);
+      const client = await pool.connect();
+      try {
+        await ensureTankTrashSchema(client);
+      } finally {
+        client.release();
+      }
     },
     { label: 'schema', maxAttempts: 3, delayMs: 1000 }
   );
@@ -719,16 +725,9 @@ async function resumeFromStop({ employee, code, auth, activity: activityOverride
   if (!tankRow) {
     return { ok: false, status: 404, body: tankNotFoundBody() };
   }
-  if (normalizeTankStatus(tankRow.status) === 'archived') {
-    return {
-      ok: false,
-      status: 403,
-      body: {
-        ok: false,
-        error: 'tank_archived',
-        message: 'This tank is completed. Restore it in Tank Management before resuming work.',
-      },
-    };
+  const tankBlock = tankProductionBlockBody(tankRow);
+  if (tankBlock) {
+    return { ok: false, status: tankBlock.error === 'tank_in_trash' ? 403 : 403, body: tankBlock };
   }
   const row = await insertScanLogForEmployee({
     employee,
@@ -1053,16 +1052,12 @@ async function performAssignWorkWhileClockedIn({ employee, code, auth, activity,
   if (!tankRow) {
     return { ok: false, status: 404, body: tankNotFoundBody() };
   }
-  if (normalizeTankStatus(tankRow.status) === 'archived') {
-    return {
-      ok: false,
-      status: 403,
-      body: {
-        ok: false,
-        error: 'tank_archived',
-        message: 'This tank is completed. Restore it in Tank Management before assigning work.',
-      },
-    };
+  const tankBlock = tankProductionBlockBody(tankRow);
+  if (tankBlock) {
+    if (tankBlock.error === 'tank_archived') {
+      tankBlock.message = 'This tank is completed. Restore it in Tank Management before assigning work.';
+    }
+    return { ok: false, status: 403, body: tankBlock };
   }
   const baseMs = Date.now();
   const outIso = new Date(baseMs).toISOString();
@@ -1652,12 +1647,12 @@ async function performKioskWorkAction(req, res) {
     if (!tankRow) {
       return res.status(404).json(tankNotFoundBody());
     }
-    if (normalizeTankStatus(tankRow.status) === 'archived') {
-      return res.status(403).json({
-        ok: false,
-        error: 'tank_archived',
-        message: 'This tank is completed. Restore it in Tank Management before assigning work.',
-      });
+    const tankBlock = tankProductionBlockBody(tankRow);
+    if (tankBlock) {
+      if (tankBlock.error === 'tank_archived') {
+        tankBlock.message = 'This tank is completed. Restore it in Tank Management before assigning work.';
+      }
+      return res.status(403).json(tankBlock);
     }
     const row = await insertScanLogForEmployee({
       employee,
@@ -1903,12 +1898,12 @@ async function performKioskWorkAction(req, res) {
       if (!tankRow) {
         return res.status(404).json(tankNotFoundBody());
       }
-      if (normalizeTankStatus(tankRow.status) === 'archived') {
-        return res.status(403).json({
-          ok: false,
-          error: 'tank_archived',
-          message: 'This tank is completed. Restore it in Tank Management before assigning work.',
-        });
+      const tankBlock = tankProductionBlockBody(tankRow);
+      if (tankBlock) {
+        if (tankBlock.error === 'tank_archived') {
+          tankBlock.message = 'This tank is completed. Restore it in Tank Management before assigning work.';
+        }
+        return res.status(403).json(tankBlock);
       }
       if (prevTank && prevTank === tankRaw) {
         return res.json({
@@ -1932,12 +1927,12 @@ async function performKioskWorkAction(req, res) {
       if (!tankRow) {
         return res.status(404).json(tankNotFoundBody());
       }
-      if (normalizeTankStatus(tankRow.status) === 'archived') {
-        return res.status(403).json({
-          ok: false,
-          error: 'tank_archived',
-          message: 'This tank is completed. Restore it in Tank Management before assigning work.',
-        });
+      const tankBlock = tankProductionBlockBody(tankRow);
+      if (tankBlock) {
+        if (tankBlock.error === 'tank_archived') {
+          tankBlock.message = 'This tank is completed. Restore it in Tank Management before assigning work.';
+        }
+        return res.status(403).json(tankBlock);
       }
       nextActivity = act;
       nextTank = tankRaw;
@@ -1978,7 +1973,7 @@ function normalizeTankStatus(raw) {
 }
 
 const TANK_SELECT_COLUMNS =
-  'id, tank_number, description, status, created_at, completed_at, updated_at, first_scanned_at, customer, model, priority, due_date, notes, piece_count, current_piece_number';
+  'id, tank_number, description, status, created_at, completed_at, updated_at, first_scanned_at, customer, model, priority, due_date, notes, piece_count, current_piece_number, deleted_at, deleted_by, deleted_reason, previous_status, restored_at, restored_by';
 
 function tankTimestampToIso(value) {
   if (value == null || value === '') return null;
@@ -2043,6 +2038,13 @@ function mapTankRowForApi(row) {
     updated_at: tankTimestampToIso(row.updated_at),
     duration_ms,
     duration_display: formatTankDurationDisplay(duration_ms),
+    deleted_at: tankTimestampToIso(row.deleted_at),
+    deleted_by: row.deleted_by || null,
+    deleted_reason: row.deleted_reason || null,
+    previous_status: row.previous_status ? normalizeTankStatus(row.previous_status) : null,
+    restored_at: tankTimestampToIso(row.restored_at),
+    restored_by: row.restored_by || null,
+    is_deleted: row.deleted_at != null,
   };
 }
 
@@ -2805,6 +2807,171 @@ async function validateTankExists(rawTankNumber) {
   const tankNumber = normalizeTankNumber(rawTankNumber);
   if (!tankNumber) return null;
   return getTankByNumber(tankNumber);
+}
+
+function isTankDeleted(row) {
+  return !!(row && row.deleted_at != null && row.deleted_at !== '');
+}
+
+function tankNotDeletedClause(alias) {
+  const p = alias ? `${alias}.` : '';
+  return `${p}deleted_at IS NULL`;
+}
+
+function tankInTrashClause(alias) {
+  const p = alias ? `${alias}.` : '';
+  return `${p}deleted_at IS NOT NULL`;
+}
+
+function tankProductionBlockBody(tankRow) {
+  if (!tankRow) return tankNotFoundBody();
+  if (isTankDeleted(tankRow)) {
+    return {
+      ok: false,
+      error: 'tank_in_trash',
+      message: `Tank ${tankRow.tank_number} is in Trash and cannot be used. Contact a manager.`,
+    };
+  }
+  if (normalizeTankStatus(tankRow.status) === 'archived') {
+    return {
+      ok: false,
+      error: 'tank_archived',
+      message: 'This tank is completed. Restore it in Tank Management before resuming work.',
+    };
+  }
+  return null;
+}
+
+function managerAuditName(req) {
+  const auth = currentManagerFromSession(req);
+  return auth && auth.username ? String(auth.username) : 'manager';
+}
+
+async function writeTankAdminAudit(client, { action, tankId, tankNumber, performedBy, reason, previousStatus, details }) {
+  await client.query(
+    `INSERT INTO tank_admin_audit (action, tank_id, tank_number, performed_by, performed_at, reason, previous_status, details)
+     VALUES ($1, $2, $3, $4, NOW(), $5, $6, $7::jsonb)`,
+    [
+      action,
+      tankId != null ? Number(tankId) : null,
+      String(tankNumber),
+      String(performedBy),
+      reason != null && String(reason).trim() !== '' ? String(reason).trim().slice(0, 500) : null,
+      previousStatus != null ? String(previousStatus) : null,
+      details != null ? JSON.stringify(details) : null,
+    ]
+  );
+}
+
+async function getTankTrashBlockers(tankId) {
+  const tid = Number(tankId);
+  if (!Number.isInteger(tid) || tid <= 0) return { blocked: true, reasons: ['invalid tank'] };
+  const reasons = [];
+  const { rows: running } = await pool.query(
+    `SELECT 1 FROM machine_sessions WHERE tank_id = $1 AND status = 'running' LIMIT 1`,
+    [tid]
+  );
+  if (running.length) reasons.push('running phase');
+  const { rows: openSessions } = await pool.query(
+    `SELECT 1 FROM machine_sessions WHERE tank_id = $1 AND status IN ('running', 'stopped') LIMIT 1`,
+    [tid]
+  );
+  if (openSessions.length) reasons.push('active piece session');
+  const { rows: openAlerts } = await pool.query(
+    `SELECT 1 FROM alert_events WHERE tank_id = $1 AND status = 'open' LIMIT 1`,
+    [tid]
+  );
+  if (openAlerts.length) reasons.push('open QA/QC');
+  const { rows: openDowntime } = await pool.query(
+    `SELECT 1 FROM downtime_intervals WHERE tank_id = $1 AND ended_at IS NULL LIMIT 1`,
+    [tid]
+  );
+  if (openDowntime.length) reasons.push('active downtime');
+  // Only treat WIP as active when the tank is paused (End Shift). Stale wip_* on
+  // active/waiting/archived tanks must not block Trash — those fields are cleared on trash.
+  const { rows: wipRows } = await pool.query(
+    `SELECT 1 FROM tanks
+     WHERE id = $1
+       AND LOWER(TRIM(COALESCE(status, ''))) = 'paused'
+       AND (wip_team_id IS NOT NULL OR wip_machine_id IS NOT NULL)
+     LIMIT 1`,
+    [tid]
+  );
+  if (wipRows.length) reasons.push('active team/winder assignment (paused End Shift WIP)');
+  const { rows: machineRows } = await pool.query(
+    `SELECT 1 FROM machines WHERE active_tank_id = $1 LIMIT 1`,
+    [tid]
+  );
+  if (machineRows.length) reasons.push('active winder assignment');
+  return { blocked: reasons.length > 0, reasons };
+}
+
+async function tankHasProductionHistory(tankId) {
+  return phase1.tankHasProductionActivity(tankId);
+}
+
+async function permanentlyDeleteTank(client, tankId, auditMeta) {
+  const tid = Number(tankId);
+  const tankRes = await client.query(
+    `SELECT id, tank_number, status, deleted_at FROM tanks WHERE id = $1`,
+    [tid]
+  );
+  if (!tankRes.rows.length) return { ok: false, error: 'not_found' };
+  const tank = tankRes.rows[0];
+  if (!isTankDeleted(tank)) {
+    return { ok: false, error: 'not_in_trash', message: 'Tank must be in Trash before permanent deletion.' };
+  }
+
+  await writeTankAdminAudit(client, {
+    action: 'permanent_delete',
+    tankId: tid,
+    tankNumber: tank.tank_number,
+    performedBy: auditMeta.performedBy,
+    reason: auditMeta.reason || null,
+    previousStatus: tank.status,
+    details: { tank_id: tid, tank_number: tank.tank_number },
+  });
+
+  await client.query(`UPDATE machines SET active_tank_id = NULL, updated_at = NOW() WHERE active_tank_id = $1`, [tid]);
+  await client.query(`DELETE FROM machine_sessions WHERE tank_id = $1`, [tid]);
+  await client.query(`DELETE FROM part_complete_events WHERE tank_id = $1`, [tid]);
+  await client.query(`DELETE FROM downtime_intervals WHERE tank_id = $1`, [tid]);
+  await client.query(`UPDATE alert_events SET tank_id = NULL WHERE tank_id = $1`, [tid]);
+  await client.query(`UPDATE production_notes SET tank_id = NULL WHERE tank_id = $1`, [tid]);
+  await client.query(`UPDATE job_finish_events SET tank_id = NULL WHERE tank_id = $1`, [tid]);
+  await client.query(`DELETE FROM tank_pieces WHERE tank_id = $1`, [tid]);
+  await client.query(`DELETE FROM tanks WHERE id = $1`, [tid]);
+  return { ok: true, tank_number: tank.tank_number };
+}
+
+async function getTrashTankCount() {
+  const { rows } = await pool.query(`SELECT COUNT(*)::int AS n FROM tanks WHERE deleted_at IS NOT NULL`);
+  return Number(rows[0] && rows[0].n) || 0;
+}
+
+async function assertTankTrashSchemaReady() {
+  const client = await pool.connect();
+  try {
+    await ensureTankTrashSchema(client);
+  } finally {
+    client.release();
+  }
+}
+
+function formatTankTrashServerError(err) {
+  const msg = err && err.message ? String(err.message) : 'Unknown error';
+  if (/column .* does not exist|tank_admin_audit|trash columns missing/i.test(msg)) {
+    return 'Trash is not available because the database schema is not fully migrated. Restart the server to run migrations, then try again.';
+  }
+  return `Could not move tank to Trash. ${msg}`;
+}
+
+async function findTankNumberConflict(tankNumber) {
+  const { rows } = await pool.query(
+    `SELECT id, tank_number, deleted_at FROM tanks WHERE tank_number = $1 LIMIT 1`,
+    [tankNumber]
+  );
+  return rows[0] || null;
 }
 
 function tankNotFoundBody() {
@@ -4489,6 +4656,82 @@ function confirmerFromBody(body) {
 
 const NEED_TEAM_MESSAGE = 'Please scan a Team barcode first.';
 
+async function resolveWindingFocusedSession(machine, pending, openRowsOptional) {
+  const openRows = openRowsOptional || (await phase1.getOpenSessionsForMachine(machine.id));
+  if (pending.piece != null) {
+    const pieceNum = Number(pending.piece);
+    if (pending.tank) {
+      const tankNorm = String(pending.tank).toUpperCase();
+      const match = openRows.find(
+        (r) =>
+          String(r.tank_number || '').toUpperCase() === tankNorm &&
+          Number(r.piece_number || 1) === pieceNum
+      );
+      return match || null;
+    }
+    const activeTankId = machine.active_tank_id != null ? Number(machine.active_tank_id) : null;
+    if (activeTankId) {
+      const match = await phase1.getOpenSessionForPiece(machine.id, activeTankId, pieceNum);
+      return match || null;
+    }
+    return null;
+  }
+  if (pending.tank) {
+    const tankNorm = String(pending.tank).toUpperCase();
+    const sameTank = openRows.filter((r) => String(r.tank_number || '').toUpperCase() === tankNorm);
+    if (sameTank.length === 1) return sameTank[0];
+    return null;
+  }
+  return (await phase1.getOpenSession(machine.id)) || openRows[0] || null;
+}
+
+async function resolvePhaseTargetSession(machine, pending, openRows) {
+  const pieceNum = pending.piece != null ? Number(pending.piece) : null;
+  let tankRow = null;
+  if (pending.tank) {
+    tankRow = await validateTankExists(pending.tank);
+  } else if (machine.active_tank_id) {
+    const r = await pool.query(`SELECT * FROM tanks WHERE id = $1`, [Number(machine.active_tank_id)]);
+    tankRow = r.rows[0] || null;
+  }
+  if (pieceNum != null) {
+    if (!tankRow) return null;
+    return (await phase1.getOpenSessionForPiece(machine.id, tankRow.id, pieceNum)) || null;
+  }
+  if (tankRow) {
+    const sameTank = openRows.filter((r) => Number(r.tank_id) === Number(tankRow.id));
+    if (sameTank.length === 1) return sameTank[0];
+    return null;
+  }
+  return (await phase1.getOpenSession(machine.id)) || openRows[0] || null;
+}
+
+async function mapOpenSessionsPayload(machineId, activeTankIdOptional) {
+  const openRows = await phase1.getOpenSessionsForMachine(machineId);
+  const open_sessions = [];
+  for (const row of openRows) {
+    open_sessions.push(await phase1.mapSession(row));
+  }
+  const activeTankId =
+    activeTankIdOptional != null
+      ? Number(activeTankIdOptional)
+      : null;
+  const tank_open_sessions = activeTankId
+    ? open_sessions.filter((s) => Number(s.tank_id) === activeTankId)
+    : open_sessions;
+  const active_work = open_sessions.map((s) => ({
+    tank_id: s.tank_id,
+    tank_number: s.tank_number,
+    piece_number: Number(s.piece_number) || 1,
+    phase_code: s.phase_code || s.activity_code,
+    phase_name: s.phase_name || s.activity_name,
+    status: s.status,
+    status_label: s.status_label,
+    session_id: s.id,
+  }));
+  return { open_sessions, tank_open_sessions, active_work };
+}
+
 async function handleWindingScanAction(machine, body) {
   const barcode = body.barcode;
   const pendingIn = body.pending || {};
@@ -4500,7 +4743,8 @@ async function handleWindingScanAction(machine, body) {
     pending.piece = null;
   }
   const parsed = phase1.parseScan(barcode);
-  const session = await phase1.getOpenSession(machine.id);
+  const openRows = await phase1.getOpenSessionsForMachine(machine.id);
+  const session = await resolveWindingFocusedSession(machine, pending, openRows);
   const assignment = await phase1.getMachineAssignment(machine.id);
 
   // Global Winder/team actions (apply to ALL open tanks — not just selected).
@@ -4515,6 +4759,8 @@ async function handleWindingScanAction(machine, body) {
     const result = await phase1.pauseDowntimeSession(machine, {
       tank_number: pending.tank || (session && session.tank_number) || null,
       tank_id: body.tank_id != null ? Number(body.tank_id) : session ? Number(session.tank_id) : null,
+      piece_number:
+        pending.piece != null ? pending.piece : session && session.piece_number != null ? session.piece_number : null,
       reason_code: body.reason_code || body.downtime_reason || null,
       reason_note: body.reason_note || body.downtime_note || null,
     });
@@ -4569,14 +4815,16 @@ async function handleWindingScanAction(machine, body) {
   // Resume: selected Downtime tank only, OR all Break/Lunch on Winder, OR all End Shift WIP.
   // QA/QC uses Resolve QA/QC (not normal Resume).
   if (parsed.type === 'resume') {
-    const openRows = await phase1.getOpenSessionsForMachine(machine.id);
     const selected =
       (pending.tank
-        ? openRows.find(
-            (r) => String(r.tank_number || '').toUpperCase() === String(pending.tank).toUpperCase()
-          )
-        : null) ||
-      (await phase1.getOpenSession(machine.id));
+        ? openRows.find((r) => {
+            const tankMatch =
+              String(r.tank_number || '').toUpperCase() === String(pending.tank).toUpperCase();
+            if (!tankMatch) return false;
+            if (pending.piece != null) return Number(r.piece_number || 1) === Number(pending.piece);
+            return true;
+          })
+        : null) || session;
 
     if (
       selected &&
@@ -4601,6 +4849,8 @@ async function handleWindingScanAction(machine, body) {
     ) {
       const result = await phase1.resumeSelectedSession(machine, {
         tank_id: Number(selected.tank_id),
+        piece_number:
+          pending.piece != null ? pending.piece : selected.piece_number != null ? selected.piece_number : null,
       });
       if (!result.ok) return result;
       return { ok: true, status: 200, body: { ok: true, ...result.body, assignment } };
@@ -4663,16 +4913,12 @@ async function handleWindingScanAction(machine, body) {
     if (!tankRow) {
       return { ok: false, status: 404, body: tankNotFoundBody() };
     }
-    if (normalizeTankStatus(tankRow.status) === 'archived') {
-      return {
-        ok: false,
-        status: 403,
-        body: {
-          ok: false,
-          error: 'tank_archived',
-          message: 'This tank is completed. Restore it in Tank Management before use.',
-        },
-      };
+    const tankBlock = tankProductionBlockBody(tankRow);
+    if (tankBlock) {
+      if (tankBlock.error === 'tank_archived') {
+        tankBlock.message = 'This tank is completed. Restore it in Tank Management before use.';
+      }
+      return { ok: false, status: 403, body: tankBlock };
     }
     const pieceCount = Math.min(4, Math.max(1, Number(tankRow.piece_count) || 1));
     await phase1.ensureTankPieces(tankRow.id, pieceCount);
@@ -4685,17 +4931,24 @@ async function handleWindingScanAction(machine, body) {
     );
     if (match) {
       await phase1.setMachineActiveTank(machine.id, match.tank_id);
+      const tankSessions = openRows.filter((r) => Number(r.tank_id) === Number(match.tank_id));
+      if (pieceCount === 1) pending.piece = 1;
       return {
         ok: true,
         status: 200,
         body: {
           ok: true,
-          action: 'switch_tank',
-          session: await phase1.mapSession(match),
+          action: 'tank_selected',
           assignment,
+          pending,
           pieces: configuredPieces,
           piece_count: pieceCount,
-          pending: { tank: null, piece: null },
+          open_sessions: await Promise.all(openRows.map((r) => phase1.mapSession(r))),
+          tank_open_sessions: await Promise.all(tankSessions.map((r) => phase1.mapSession(r))),
+          message:
+            pieceCount === 1
+              ? 'Piece 1 selected. Scan a phase to begin.'
+              : `Select Piece 1–${pieceCount} for this tank.`,
         },
       };
     }
@@ -4725,84 +4978,26 @@ async function handleWindingScanAction(machine, body) {
 
   if (parsed.type === 'piece') {
     const pieceNum = Number(parsed.value);
-    // Mid-session piece switch only when the pending tank is this open session's tank.
-    // If another tank is pending (multi-tank add), select piece for that tank instead.
-    const pendingTankNorm = pending.tank ? String(pending.tank).toUpperCase() : null;
-    const sessionTankNorm = session && session.tank_number ? String(session.tank_number).toUpperCase() : null;
-    const pieceTargetsOpenSession =
-      Boolean(session) && (!pendingTankNorm || pendingTankNorm === sessionTankNorm);
-    if (pieceTargetsOpenSession) {
-      const resolved = await phase1.resolvePieceForTank(session.tank_id, pieceNum);
-      if (!resolved.ok) return resolved;
-      if (String(resolved.piece.status) === 'completed') {
-        return {
-          ok: false,
-          status: 409,
-          body: {
-            ok: false,
-            error: 'piece_completed',
-            message: `Piece ${pieceNum} is already completed. Select another piece.`,
-            pieces: resolved.pieces,
-          },
-        };
-      }
-      const conflict = await phase1.findOpenPieceSession(session.tank_id, pieceNum, machine.id);
-      if (conflict) {
-        return {
-          ok: false,
-          status: 409,
-          body: {
-            ok: false,
-            error: 'piece_in_use',
-            message: `Piece ${pieceNum} is currently being worked on by ${conflict.team_name || 'another team'} / ${conflict.machine_name || 'another winder'}.`,
-            conflicting_team: conflict.team_name,
-            conflicting_machine: conflict.machine_name,
-          },
-        };
-      }
-      await pool.query(`UPDATE tanks SET current_piece_number = $1, updated_at = NOW() WHERE id = $2`, [
-        pieceNum,
-        session.tank_id,
-      ]);
-      await pool.query(
-        `UPDATE machine_sessions SET piece_number = $1, piece_id = $2, updated_at = NOW() WHERE id = $3`,
-        [pieceNum, resolved.piece.id, session.id]
-      );
-      await pool.query(
-        `UPDATE tank_pieces
-         SET status = CASE WHEN status = 'completed' THEN status ELSE 'in_progress' END,
-             started_at = COALESCE(started_at, NOW()),
-             updated_at = NOW()
-         WHERE id = $1`,
-        [resolved.piece.id]
-      );
-      const refreshed = await phase1.getOpenSession(machine.id, session.tank_id);
-      return {
-        ok: true,
-        status: 200,
-        body: {
-          ok: true,
-          action: 'piece_selected',
-          piece_number: pieceNum,
-          piece_id: resolved.piece.id,
-          session: refreshed ? await phase1.mapSession(refreshed) : null,
-          pieces: resolved.pieces.filter((p) => Number(p.piece_number) <= resolved.piece_count),
-          piece_count: resolved.piece_count,
-          assignment,
-          pending: { tank: null, piece: pieceNum },
-        },
-      };
+    if (!assignment) {
+      return { ok: false, status: 409, body: { ok: false, error: 'need_team', message: NEED_TEAM_MESSAGE } };
     }
-    // Pre-session: require tank first, then store selected piece.
-    if (!pending.tank) {
+    let tankRow = null;
+    if (pending.tank) {
+      tankRow = await validateTankExists(pending.tank);
+    } else if (machine.active_tank_id) {
+      const r = await pool.query(`SELECT * FROM tanks WHERE id = $1`, [Number(machine.active_tank_id)]);
+      tankRow = r.rows[0] || null;
+    } else if (session) {
+      const r = await pool.query(`SELECT * FROM tanks WHERE id = $1`, [Number(session.tank_id)]);
+      tankRow = r.rows[0] || null;
+    }
+    if (!tankRow) {
       return {
         ok: false,
         status: 409,
         body: { ok: false, error: 'need_tank', message: 'Scan a tank before selecting a piece.' },
       };
     }
-    const tankRow = await validateTankExists(pending.tank);
-    if (!tankRow) return { ok: false, status: 404, body: tankNotFoundBody() };
     const resolved = await phase1.resolvePieceForTank(tankRow.id, pieceNum);
     if (!resolved.ok) return resolved;
     if (String(resolved.piece.status) === 'completed') {
@@ -4817,11 +5012,28 @@ async function handleWindingScanAction(machine, body) {
         },
       };
     }
+    const conflict = await phase1.findOpenPieceSession(tankRow.id, pieceNum, machine.id);
+    if (conflict) {
+      return {
+        ok: false,
+        status: 409,
+        body: {
+          ok: false,
+          error: 'piece_in_use',
+          message: `Piece ${pieceNum} is currently being worked on by ${conflict.team_name || 'another team'} / ${conflict.machine_name || 'another winder'}.`,
+          conflicting_team: conflict.team_name,
+          conflicting_machine: conflict.machine_name,
+        },
+      };
+    }
+    pending.tank = tankRow.tank_number;
     pending.piece = pieceNum;
     await pool.query(`UPDATE tanks SET current_piece_number = $1, updated_at = NOW() WHERE id = $2`, [
       pieceNum,
       tankRow.id,
     ]);
+    await phase1.setMachineActiveTank(machine.id, tankRow.id);
+    const existingOnMachine = await phase1.getOpenSessionForPiece(machine.id, tankRow.id, pieceNum);
     return {
       ok: true,
       status: 200,
@@ -4830,13 +5042,41 @@ async function handleWindingScanAction(machine, body) {
         action: 'piece_selected',
         piece_number: pieceNum,
         piece_id: resolved.piece.id,
+        session: existingOnMachine ? await phase1.mapSession(existingOnMachine) : null,
         pieces: resolved.pieces.filter((p) => Number(p.piece_number) <= resolved.piece_count),
         piece_count: resolved.piece_count,
         assignment,
         pending,
-        message: `Piece ${pieceNum} selected. Scan a phase to begin.`,
+        open_sessions: await Promise.all(openRows.map((r) => phase1.mapSession(r))),
+        message: existingOnMachine
+          ? `Piece ${pieceNum} selected — ${existingOnMachine.activity_name || existingOnMachine.activity_code} in progress. Scan a phase to change.`
+          : `Piece ${pieceNum} selected. Scan a phase to begin.`,
       },
     };
+  }
+
+  if (parsed.type === 'employee_out') {
+    if (!assignment) {
+      return { ok: false, status: 409, body: { ok: false, error: 'need_team', message: NEED_TEAM_MESSAGE } };
+    }
+    const confirmer = confirmerFromBody(body);
+    if (!confirmer) {
+      return {
+        ok: false,
+        status: 409,
+        body: {
+          ok: false,
+          error: 'need_employee',
+          message: 'Scan employee barcode first, then Employee Out.',
+        },
+      };
+    }
+    const out = await phase1.employeeOutFromTeam(confirmer.id, assignment.team_id, {
+      source: 'kiosk_employee_out',
+      reason: 'Kiosk employee out scan',
+    });
+    if (!out.ok) return out;
+    return { ok: true, status: 200, body: { ok: true, ...out.body, assignment } };
   }
 
   if (parsed.type === 'phase') {
@@ -4845,8 +5085,9 @@ async function handleWindingScanAction(machine, body) {
       return { ok: false, status: 400, body: { ok: false, error: 'validation', message: 'Unknown phase barcode.' } };
     }
     // Piece Complete / Tank Complete / Part Complete
+    const focusedSession = await resolvePhaseTargetSession(machine, pending, openRows);
     if (ph.piece_complete || ph.completes) {
-      if (!session) {
+      if (!focusedSession) {
         // Tank Complete after all pieces are done (no open session).
         if (ph.code === 'TANK_COMPLETE' || ph.code === 'PART_COMPLETE') {
           const tankId =
@@ -4920,15 +5161,35 @@ async function handleWindingScanAction(machine, body) {
         confirmedByEmployeeId: confirmer ? confirmer.id : null,
         confirmedByEmployeeName: confirmer ? confirmer.name : null,
         forceTankComplete: ph.code === 'TANK_COMPLETE' || ph.code === 'PART_COMPLETE',
+        pieceNumber:
+          pending.piece != null
+            ? pending.piece
+            : focusedSession
+              ? focusedSession.piece_number
+              : null,
+        tankId: focusedSession ? Number(focusedSession.tank_id) : null,
+        session: focusedSession,
       });
       if (!fin.ok) return fin;
-      return { ok: true, status: 200, body: { ok: true, ...fin.body, assignment } };
+      const sessionsPayload = await mapOpenSessionsPayload(machine.id, machine.active_tank_id);
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          ok: true,
+          ...fin.body,
+          assignment,
+          pending: { tank: pending.tank, piece: pending.piece },
+          ...sessionsPayload,
+        },
+      };
     }
-    // Option 2 / phase change: an open session exists -> switch phase automatically
-    // UNLESS a different tank is pending (multi-tank: start/resume that tank instead).
-    if (session) {
+    // Existing session on SELECTED piece -> change phase. No session on selected piece -> start new.
+    if (focusedSession) {
       const pendingTankNorm = pending.tank ? String(pending.tank).toUpperCase() : null;
-      const sessionTankNorm = session.tank_number ? String(session.tank_number).toUpperCase() : null;
+      const sessionTankNorm = focusedSession.tank_number
+        ? String(focusedSession.tank_number).toUpperCase()
+        : null;
       if (pendingTankNorm && pendingTankNorm !== sessionTankNorm) {
         const pieceForStart =
           body.piece_number != null ? Number(body.piece_number) : pending.piece != null ? Number(pending.piece) : null;
@@ -4952,23 +5213,53 @@ async function handleWindingScanAction(machine, body) {
           notes: body.notes || null,
         });
         if (!startOther.ok) return startOther;
+        const sessionsPayload = await mapOpenSessionsPayload(machine.id, machine.active_tank_id);
         return {
           ok: true,
           status: 200,
-          body: { ok: true, ...startOther.body, assignment, pending: { tank: null, piece: null } },
+          body: {
+            ok: true,
+            ...startOther.body,
+            assignment,
+            pending: { tank: pending.tank, piece: pending.piece },
+            ...sessionsPayload,
+          },
         };
       }
       const ch = await phase1.changePhase(machine, ph.barcode, {
         notes: body.notes || body.correction_note || null,
-        pieceNumber: body.piece_number != null ? Number(body.piece_number) : session.piece_number,
+        pieceNumber:
+          pending.piece != null
+            ? pending.piece
+            : body.piece_number != null
+              ? Number(body.piece_number)
+              : focusedSession.piece_number,
+        tankId: Number(focusedSession.tank_id),
+        session: focusedSession,
         confirmedByEmployeeId: confirmerFromBody(body) ? confirmerFromBody(body).id : null,
         confirmedByEmployeeName: confirmerFromBody(body) ? confirmerFromBody(body).name : null,
       });
       if (!ch.ok) return ch;
-      return { ok: true, status: 200, body: { ok: true, ...ch.body, assignment } };
+      const sessionsPayload = await mapOpenSessionsPayload(machine.id, machine.active_tank_id);
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          ok: true,
+          ...ch.body,
+          assignment,
+          pending: { tank: pending.tank, piece: pending.piece },
+          ...sessionsPayload,
+        },
+      };
     }
-    // Option 2 (from paused tank) or Option 3 (new tank): need a tank selected.
-    if (!pending.tank) {
+    // No open session on selected piece — start new phase for pending tank+piece.
+    let tankForStart = pending.tank;
+    if (!tankForStart && machine.active_tank_id) {
+      const r = await pool.query(`SELECT tank_number FROM tanks WHERE id = $1`, [Number(machine.active_tank_id)]);
+      tankForStart = r.rows[0] ? r.rows[0].tank_number : null;
+    }
+    if (!tankForStart) {
       return {
         ok: false,
         status: 409,
@@ -4991,13 +5282,24 @@ async function handleWindingScanAction(machine, body) {
     }
     const start = await phase1.startSession(machine, {
       team: { id: assignment.team_id, name: assignment.team_name, barcode: assignment.team_barcode, active: 1 },
-      tankNumber: pending.tank,
+      tankNumber: tankForStart,
       phaseRaw: ph.barcode,
       pieceNumber: pieceForStart,
       notes: body.notes || null,
     });
     if (!start.ok) return start;
-    return { ok: true, status: 200, body: { ok: true, ...start.body, assignment, pending: { tank: null, piece: null } } };
+    const sessionsPayload = await mapOpenSessionsPayload(machine.id, machine.active_tank_id);
+    return {
+      ok: true,
+      status: 200,
+      body: {
+        ok: true,
+        ...start.body,
+        assignment,
+        pending: { tank: tankForStart, piece: pieceForStart },
+        ...sessionsPayload,
+      },
+    };
   }
 
   const employee = await lookupActiveEmployeeByScan(barcode);
@@ -5009,6 +5311,46 @@ async function handleWindingScanAction(machine, body) {
         body: { ok: false, error: 'need_team', message: 'Scan Team first.' },
       };
     }
+    if (body.employee_out === true) {
+      const out = await phase1.employeeOutFromTeam(employee.id, assignment.team_id, {
+        source: 'kiosk_employee_out',
+        reason: 'Kiosk employee out button',
+      });
+      if (!out.ok) return out;
+      return {
+        ok: true,
+        status: 200,
+        body: { ok: true, ...out.body, assignment },
+      };
+    }
+
+    const activeShift = await phase1.getEmployeeActiveShiftTeam(employee.id);
+    const currentTeamId = Number(assignment.team_id);
+    if (activeShift && Number(activeShift.team_id) === currentTeamId) {
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          ok: true,
+          action: 'employee_selected',
+          employee: {
+            id: Number(employee.id),
+            code: employee.code,
+            name: employee.name,
+          },
+          team: { id: currentTeamId, name: assignment.team_name },
+          active_shift_team_id: currentTeamId,
+          confirmation_line: `Selected Employee: ${employee.name}. Tap Employee Out when ready.`,
+          confirmer: {
+            id: Number(employee.id),
+            code: employee.code,
+            name: employee.name,
+          },
+          assignment,
+        },
+      };
+    }
+
     const transfer = await phase1.transferEmployeeToTeam(employee.id, assignment.team_id, {
       source: 'kiosk_transfer',
       reason: 'Kiosk employee barcode scan',
@@ -5082,6 +5424,20 @@ app.get('/api/kiosk/winding/config', async (req, res) => {
         open_qa_qc = null;
       }
     }
+    const tank_open_sessions = activeTankId
+      ? open_sessions.filter((s) => Number(s.tank_id) === activeTankId)
+      : [];
+    const active_work = open_sessions.map((s) => ({
+      tank_id: s.tank_id,
+      tank_number: s.tank_number,
+      piece_number: Number(s.piece_number) || 1,
+      phase_code: s.phase_code || s.activity_code,
+      phase_name: s.phase_name || s.activity_name,
+      status: s.status,
+      status_label: s.status_label,
+      session_id: s.id,
+    }));
+    const productionCounts = phase1.countActiveProduction(open_sessions);
     return res.json({
       ok: true,
       workflow: 'winding_production',
@@ -5095,9 +5451,14 @@ app.get('/api/kiosk/winding/config', async (req, res) => {
       end_shift: PAUSE_REASONS.END_SHIFT,
       resume_barcode: 'RESUME',
       qa_qc_resolve_barcode: 'QA_QC_RESOLVE',
+      employee_out_barcode: 'EMPLOYEE_OUT',
       assignment,
       session: mappedSession,
       open_sessions,
+      tank_open_sessions,
+      active_work,
+      active_tank_count: productionCounts.active_tank_count,
+      active_piece_count: productionCounts.active_piece_count,
       open_qa_qc,
       pieces,
       piece_count,
@@ -5771,7 +6132,10 @@ app.get('/api/manager/teams/:teamId/members/:memberId/details', async (req, res)
     const m = memberRes.rows[0];
     const employeeId = m.employee_id != null ? Number(m.employee_id) : null;
     const rate = Number.isFinite(Number(m.hourly_rate)) ? Number(m.hourly_rate) : 0;
-    const isActive = Number(m.active) !== 0 && (m.employee_active == null || Number(m.employee_active) !== 0);
+    const activeShift = employeeId ? await phase1.getEmployeeActiveShiftTeam(employeeId) : null;
+    const isActive =
+      Boolean(activeShift) && (m.employee_active == null || Number(m.employee_active) !== 0);
+    const onShift = Boolean(activeShift);
 
     let todayHours = 0;
     let weekHours = 0;
@@ -5817,6 +6181,7 @@ app.get('/api/manager/teams/:teamId/members/:memberId/details', async (req, res)
         code: m.employee_code || null,
         role: m.role || null,
         active: isActive,
+        on_shift: onShift,
         has_time_data: hasTimeData,
         hourly_rate: roundMoney2(rate),
         today_hours: roundHours2(todayHours),
@@ -6208,12 +6573,12 @@ async function postScanRecord(req, res) {
       if (!tankRow) {
         return res.status(404).json(tankNotFoundBody());
       }
-      if (normalizeTankStatus(tankRow.status) === 'archived') {
-        return res.status(403).json({
-          ok: false,
-          error: 'tank_archived',
-          message: 'This tank is completed. Restore it in Tank Management before assigning work.',
-        });
+      const tankBlock = tankProductionBlockBody(tankRow);
+      if (tankBlock) {
+        if (tankBlock.error === 'tank_archived') {
+          tankBlock.message = 'This tank is completed. Restore it in Tank Management before assigning work.';
+        }
+        return res.status(403).json(tankBlock);
       }
     }
   }
@@ -7271,32 +7636,56 @@ app.get('/api/tanks', async (req, res) => {
   const search = String(req.query.search || '').trim();
   const statusFilter = String(req.query.status || 'active').trim().toLowerCase();
   const activeOnly = String(req.query.active_only || '').toLowerCase() === '1';
+  if (statusFilter === 'trash') {
+    try {
+      await assertTankTrashSchemaReady();
+    } catch (err) {
+      console.error('[tanks trash list] schema:', err);
+      return res.status(503).json({
+        ok: false,
+        error: 'schema_not_ready',
+        message: 'Trash is not available because the database schema is not fully migrated. Restart the server to run migrations.',
+      });
+    }
+  }
   let sql = `SELECT ${TANK_SELECT_COLUMNS} FROM tanks WHERE 1=1`;
   const params = [];
   let n = 1;
-  if (statusFilter === 'active') {
-    sql += ` AND LOWER(TRIM(COALESCE(status, ''))) IN ('active', 'paused', 'waiting', '')`;
-  } else if (statusFilter === 'waiting') {
-    sql += ` AND LOWER(TRIM(COALESCE(status, ''))) = 'waiting'`;
-  } else if (statusFilter === 'archived') {
-    sql += ` AND LOWER(TRIM(status)) = 'archived'`;
-  } else if (statusFilter === 'all') {
-    if (activeOnly) sql += ` AND (LOWER(TRIM(COALESCE(status, ''))) IN ('active', 'waiting', 'paused') OR TRIM(COALESCE(status, '')) = '')`;
+  if (statusFilter === 'trash') {
+    sql += ` AND ${tankInTrashClause()}`;
   } else {
-    return res.status(400).json({
-      ok: false,
-      error: 'validation',
-      message: 'status filter must be active, waiting, completed, or all.',
-    });
+    sql += ` AND ${tankNotDeletedClause()}`;
+    if (statusFilter === 'active') {
+      sql += ` AND LOWER(TRIM(COALESCE(status, ''))) IN ('active', 'paused', 'waiting', '')`;
+    } else if (statusFilter === 'waiting') {
+      sql += ` AND LOWER(TRIM(COALESCE(status, ''))) = 'waiting'`;
+    } else if (statusFilter === 'archived') {
+      sql += ` AND LOWER(TRIM(status)) = 'archived'`;
+    } else if (statusFilter === 'all') {
+      if (activeOnly) {
+        sql += ` AND (LOWER(TRIM(COALESCE(status, ''))) IN ('active', 'waiting', 'paused') OR TRIM(COALESCE(status, '')) = '')`;
+      }
+    } else {
+      return res.status(400).json({
+        ok: false,
+        error: 'validation',
+        message: 'status filter must be active, waiting, completed, trash, or all.',
+      });
+    }
   }
   if (search) {
     sql += ` AND (tank_number ILIKE $${n} OR COALESCE(description, '') ILIKE $${n})`;
     params.push(`%${search}%`);
     n += 1;
   }
-  sql += ` ORDER BY CASE WHEN LOWER(TRIM(COALESCE(status, ''))) IN ('active', '') THEN 0 ELSE 1 END, updated_at DESC, tank_number ASC`;
+  if (statusFilter === 'trash') {
+    sql += ` ORDER BY deleted_at DESC NULLS LAST, tank_number ASC`;
+  } else {
+    sql += ` ORDER BY CASE WHEN LOWER(TRIM(COALESCE(status, ''))) IN ('active', '') THEN 0 ELSE 1 END, updated_at DESC, tank_number ASC`;
+  }
   const { rows } = await pool.query(sql, params);
-  res.json({ ok: true, tanks: rows.map(mapTankRowForApi) });
+  const trashCount = await getTrashTankCount();
+  res.json({ ok: true, tanks: rows.map(mapTankRowForApi), trash_count: trashCount });
 });
 
 app.post('/api/tanks', async (req, res) => {
@@ -7333,6 +7722,14 @@ app.post('/api/tanks', async (req, res) => {
     return res.status(201).json({ ok: true, tank: mapTankRowForApi(tankRes.rows[0]) });
   } catch (e) {
     if (e && e.code === '23505') {
+      const existing = await findTankNumberConflict(tank_number);
+      if (existing && isTankDeleted(existing)) {
+        return res.status(409).json({
+          ok: false,
+          error: 'tank_in_trash',
+          message: `Tank ${tank_number} exists in Trash. Restore it or permanently delete it before reusing this tank number.`,
+        });
+      }
       return res.status(409).json({ ok: false, error: 'duplicate_tank', message: 'Tank number already exists.' });
     }
     return res.status(500).json({ ok: false, error: 'server', message: 'Could not create tank.' });
@@ -7344,6 +7741,9 @@ app.put('/api/tanks/:id', async (req, res) => {
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ ok: false, error: 'invalid_id' });
   const current = await pool.query(`SELECT * FROM tanks WHERE id = $1`, [id]);
   if (!current.rows.length) return res.status(404).json({ ok: false, error: 'not_found' });
+  if (isTankDeleted(current.rows[0])) {
+    return res.status(409).json({ ok: false, error: 'tank_in_trash', message: 'This tank is in Trash. Restore it from Trash to edit.' });
+  }
   const body = req.body || {};
   const tank_number = normalizeTankNumber(body.tank_number != null ? body.tank_number : current.rows[0].tank_number);
   const description =
@@ -7406,6 +7806,14 @@ app.put('/api/tanks/:id', async (req, res) => {
     await phase1.ensureTankPieces(id, piece_count, { pruneExtras: piece_count < prevPieceCount });
   } catch (e) {
     if (e && e.code === '23505') {
+      const existing = await findTankNumberConflict(tank_number);
+      if (existing && isTankDeleted(existing) && Number(existing.id) !== id) {
+        return res.status(409).json({
+          ok: false,
+          error: 'tank_in_trash',
+          message: `Tank ${tank_number} exists in Trash. Restore it or permanently delete it before reusing this tank number.`,
+        });
+      }
       return res.status(409).json({ ok: false, error: 'duplicate_tank', message: 'Tank number already exists.' });
     }
     return res.status(500).json({ ok: false, error: 'server', message: 'Could not update tank.' });
@@ -7417,8 +7825,11 @@ app.put('/api/tanks/:id', async (req, res) => {
 app.patch('/api/tanks/:id/archive', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ ok: false, error: 'invalid_id' });
-  const rowRes = await pool.query(`SELECT id FROM tanks WHERE id = $1`, [id]);
+  const rowRes = await pool.query(`SELECT id, deleted_at FROM tanks WHERE id = $1`, [id]);
   if (!rowRes.rows.length) return res.status(404).json({ ok: false, error: 'not_found' });
+  if (isTankDeleted(rowRes.rows[0])) {
+    return res.status(409).json({ ok: false, error: 'tank_in_trash', message: 'This tank is in Trash.' });
+  }
   const status = normalizeTankStatus(req.body && req.body.status ? req.body.status : 'archived');
   const ts = nowIso();
   await pool.query(`UPDATE tanks SET status = $1, completed_at = $2::timestamptz, updated_at = $2::timestamptz WHERE id = $3`, [
@@ -7433,8 +7844,11 @@ app.patch('/api/tanks/:id/archive', async (req, res) => {
 app.patch('/api/tanks/:id/restore', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ ok: false, error: 'invalid_id' });
-  const rowRes = await pool.query(`SELECT id FROM tanks WHERE id = $1`, [id]);
+  const rowRes = await pool.query(`SELECT id, deleted_at FROM tanks WHERE id = $1`, [id]);
   if (!rowRes.rows.length) return res.status(404).json({ ok: false, error: 'not_found' });
+  if (isTankDeleted(rowRes.rows[0])) {
+    return res.status(409).json({ ok: false, error: 'tank_in_trash', message: 'This tank is in Trash. Use Restore from the Trash view.' });
+  }
   const ts = nowIso();
   await pool.query(
     `UPDATE tanks SET status = 'waiting', completed_at = NULL, updated_at = $1::timestamptz WHERE id = $2`,
@@ -7442,6 +7856,176 @@ app.patch('/api/tanks/:id/restore', async (req, res) => {
   );
   const tankRes = await pool.query(`SELECT ${TANK_SELECT_COLUMNS} FROM tanks WHERE id = $1`, [id]);
   res.json({ ok: true, tank: mapTankRowForApi(tankRes.rows[0]) });
+});
+
+app.patch('/api/tanks/:id/trash', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ ok: false, error: 'invalid_id' });
+  try {
+    await assertTankTrashSchemaReady();
+  } catch (err) {
+    console.error('[tank trash] schema:', err);
+    return res.status(503).json({
+      ok: false,
+      error: 'schema_not_ready',
+      message: 'Trash is not available because the database schema is not fully migrated. Restart the server to run migrations.',
+    });
+  }
+  const rowRes = await pool.query(`SELECT * FROM tanks WHERE id = $1`, [id]);
+  if (!rowRes.rows.length) return res.status(404).json({ ok: false, error: 'not_found' });
+  const tank = rowRes.rows[0];
+  if (isTankDeleted(tank)) {
+    return res.status(409).json({ ok: false, error: 'already_in_trash', message: 'Tank is already in Trash.' });
+  }
+  const blockers = await getTankTrashBlockers(id);
+  if (blockers.blocked) {
+    return res.status(409).json({
+      ok: false,
+      error: 'tank_active_production',
+      message: `Tank ${tank.tank_number} currently has active production activity.\n\nStop or resolve all active sessions before deleting this tank.`,
+      reasons: blockers.reasons,
+    });
+  }
+  const performedBy = managerAuditName(req);
+  const reason = req.body && req.body.reason != null ? String(req.body.reason).trim().slice(0, 500) : null;
+  const previousStatus = normalizeTankStatus(tank.status);
+  const hasHistory = await tankHasProductionHistory(id);
+  const ts = nowIso();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `UPDATE tanks SET
+         deleted_at = $1::timestamptz,
+         deleted_by = $2,
+         deleted_reason = $3,
+         previous_status = $4,
+         restored_at = NULL,
+         restored_by = NULL,
+         paused_reason = NULL,
+         wip_team_id = NULL,
+         wip_phase_code = NULL,
+         wip_phase_name = NULL,
+         wip_machine_id = NULL,
+         updated_at = $1::timestamptz
+       WHERE id = $5`,
+      [ts, performedBy, reason, previousStatus, id]
+    );
+    await client.query(
+      `UPDATE machines SET active_tank_id = NULL, updated_at = NOW() WHERE active_tank_id = $1`,
+      [id]
+    );
+    await writeTankAdminAudit(client, {
+      action: 'move_to_trash',
+      tankId: id,
+      tankNumber: tank.tank_number,
+      performedBy,
+      reason,
+      previousStatus,
+      details: { tank_id: id, tank_number: tank.tank_number },
+    });
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[tank trash]', err);
+    return res.status(500).json({ ok: false, error: 'server', message: formatTankTrashServerError(err) });
+  } finally {
+    client.release();
+  }
+  const tankRes = await pool.query(`SELECT ${TANK_SELECT_COLUMNS} FROM tanks WHERE id = $1`, [id]);
+  return res.json({
+    ok: true,
+    tank: mapTankRowForApi(tankRes.rows[0]),
+    has_production_history: hasHistory,
+  });
+});
+
+app.patch('/api/tanks/:id/trash-restore', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ ok: false, error: 'invalid_id' });
+  const rowRes = await pool.query(`SELECT * FROM tanks WHERE id = $1`, [id]);
+  if (!rowRes.rows.length) return res.status(404).json({ ok: false, error: 'not_found' });
+  const tank = rowRes.rows[0];
+  if (!isTankDeleted(tank)) {
+    return res.status(409).json({ ok: false, error: 'not_in_trash', message: 'Tank is not in Trash.' });
+  }
+  const performedBy = managerAuditName(req);
+  const restoreStatus = normalizeTankStatus(tank.previous_status || 'waiting');
+  const ts = nowIso();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `UPDATE tanks SET
+         status = $1,
+         deleted_at = NULL,
+         deleted_by = NULL,
+         deleted_reason = NULL,
+         previous_status = NULL,
+         restored_at = $2::timestamptz,
+         restored_by = $3,
+         updated_at = $2::timestamptz
+       WHERE id = $4`,
+      [restoreStatus, ts, performedBy, id]
+    );
+    await writeTankAdminAudit(client, {
+      action: 'restore_from_trash',
+      tankId: id,
+      tankNumber: tank.tank_number,
+      performedBy,
+      reason: null,
+      previousStatus: restoreStatus,
+      details: { tank_id: id, tank_number: tank.tank_number, restored_status: restoreStatus },
+    });
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[tank trash-restore]', err);
+    return res.status(500).json({ ok: false, error: 'server', message: 'Could not restore tank from Trash.' });
+  } finally {
+    client.release();
+  }
+  const tankRes = await pool.query(`SELECT ${TANK_SELECT_COLUMNS} FROM tanks WHERE id = $1`, [id]);
+  return res.json({ ok: true, tank: mapTankRowForApi(tankRes.rows[0]) });
+});
+
+app.delete('/api/tanks/:id/permanent', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ ok: false, error: 'invalid_id' });
+  const rowRes = await pool.query(`SELECT id, tank_number, deleted_at FROM tanks WHERE id = $1`, [id]);
+  if (!rowRes.rows.length) return res.status(404).json({ ok: false, error: 'not_found' });
+  const tank = rowRes.rows[0];
+  const confirmNumber = normalizeTankNumber(req.body && req.body.confirm_tank_number);
+  if (!confirmNumber || confirmNumber !== normalizeTankNumber(tank.tank_number)) {
+    return res.status(400).json({
+      ok: false,
+      error: 'confirmation_required',
+      message: `Type "${tank.tank_number}" to confirm permanent deletion.`,
+    });
+  }
+  const performedBy = managerAuditName(req);
+  const reason = req.body && req.body.reason != null ? String(req.body.reason).trim().slice(0, 500) : null;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await permanentlyDeleteTank(client, id, { performedBy, reason });
+    if (!result.ok) {
+      await client.query('ROLLBACK');
+      return res.status(result.error === 'not_in_trash' ? 409 : 404).json({
+        ok: false,
+        error: result.error,
+        message: result.message || 'Permanent delete failed.',
+      });
+    }
+    await client.query('COMMIT');
+    return res.json({ ok: true, tank_number: result.tank_number, permanently_deleted: true });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[tank permanent delete]', err);
+    return res.status(500).json({ ok: false, error: 'server', message: 'Permanent delete failed and was rolled back.' });
+  } finally {
+    client.release();
+  }
 });
 
 /**
@@ -7492,12 +8076,15 @@ async function buildTankDailySummary(date) {
        ORDER BY COALESCE(ms.finished_at, ms.stopped_at, ms.updated_at, ms.started_at) DESC NULLS LAST, ms.id DESC
        LIMIT 1
      ) last_ms ON TRUE
-     WHERE EXISTS (
+     WHERE tk.deleted_at IS NULL
+       AND (
+       EXISTS (
        SELECT 1 FROM machine_sessions ms
        WHERE ms.tank_id = tk.id
          AND ms.started_at >= $1::timestamptz AND ms.started_at <= $2::timestamptz
      )
      OR (tk.completed_at IS NOT NULL AND tk.completed_at >= $1::timestamptz AND tk.completed_at <= $2::timestamptz)
+     )
      ORDER BY tk.tank_number ASC`,
     [day.startIso, day.endIso]
   );
@@ -7824,7 +8411,7 @@ app.get('/api/manager/tanks/print-selected', async (req, res) => {
     let rows;
     if (printAll) {
       const r = await pool.query(
-        `SELECT tank_number FROM tanks WHERE LOWER(TRIM(COALESCE(status,''))) <> 'archived' ORDER BY tank_number ASC LIMIT 200`
+        `SELECT tank_number FROM tanks WHERE deleted_at IS NULL AND LOWER(TRIM(COALESCE(status,''))) <> 'archived' ORDER BY tank_number ASC LIMIT 200`
       );
       rows = r.rows;
     } else if (ids.length) {
@@ -9175,7 +9762,7 @@ async function renderMachineBarcodesPrintPage() {
 
 async function renderTankBarcodesIndexPrintPage() {
   const { rows } = await pool.query(
-    `SELECT tank_number FROM tanks WHERE LOWER(TRIM(COALESCE(status,''))) IN ('active','') ORDER BY tank_number ASC LIMIT 48`
+    `SELECT tank_number FROM tanks WHERE deleted_at IS NULL AND LOWER(TRIM(COALESCE(status,''))) IN ('active','') ORDER BY tank_number ASC LIMIT 48`
   );
   if (!rows.length) {
     return `<!doctype html><html><body><p>No active tanks to print.</p></body></html>`;

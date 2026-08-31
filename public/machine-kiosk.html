@@ -56,6 +56,13 @@
       .wk-piece-touch { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; margin-top: 4px; }
       .wk-piece-touch .btn-touch.is-selected { outline: 2px solid #2563eb; background: #eff6ff; }
       .wk-piece-touch .btn-touch.is-done { opacity: 0.65; }
+      .wk-piece-status-grid { display: grid; gap: 8px; margin-top: 10px; }
+      .wk-piece-status { border: 1px solid #cbd5e1; border-radius: 10px; padding: 10px 12px; background: #fff; cursor: pointer; }
+      .wk-piece-status.is-selected { outline: 2px solid #2563eb; background: #eff6ff; border-color: #93c5fd; }
+      .wk-piece-status.is-running { border-color: #86efac; }
+      .wk-piece-status-head { font-weight: 800; color: #1e3a5f; margin-bottom: 4px; }
+      .wk-piece-status-body { font-size: 0.92rem; font-weight: 600; color: #334155; }
+      .btn-touch--employee-out { background: #fff7ed; border-color: #fdba74; color: #9a3412; }
       .modal-note { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: none; align-items: center; justify-content: center; z-index: 80; padding: 16px; }
       .modal-note.show { display: flex; }
       .modal-note-card { background: #fff; border-radius: 14px; padding: 18px; width: min(480px, 100%); display: grid; gap: 10px; }
@@ -106,6 +113,7 @@
           <div class="wk-item"><p class="wk-label">Piece</p><p id="valPiece" class="wk-value">—</p></div>
         </div>
         <div id="pieceChips" class="wk-pieces" hidden></div>
+        <div id="pieceStatusPanel" class="wk-piece-status-grid" hidden></div>
         <div id="openTanksPanel" class="wk-open-tanks" hidden></div>
         <div id="phaseSummaryPanel" class="wk-phase-summary" hidden>
           <h3 class="wk-phase-summary-title">Phase Time Summary</h3>
@@ -133,6 +141,7 @@
           <button type="button" class="btn-primary btn-touch" data-barcode="PHASE:TANK_COMPLETE" data-i18n="kiosk.tankComplete">Tank Complete</button>
           <button type="button" class="btn-secondary btn-touch" data-barcode="REASON:END_SHIFT" data-i18n="kiosk.endShift">End Shift</button>
           <div id="pieceTouchButtons" class="wk-piece-touch" aria-label="Piece selection"></div>
+          <button type="button" class="btn-secondary btn-touch btn-touch--employee-out" id="btnEmployeeOut" data-barcode="EMPLOYEE_OUT">Employee Out</button>
           <button type="button" class="btn-secondary btn-touch" id="btnOpenNotes" data-i18n="kiosk.notes">Notes</button>
           <button type="button" class="btn-secondary btn-touch" id="btnShowPhases" data-i18n="kiosk.changePhase">Change Phase</button>
         </div>
@@ -199,6 +208,6 @@
       </div>
     </div>
     <script src="/i18n.js"></script>
-    <script src="/machine-kiosk.js?v=8"></script>
+    <script src="/machine-kiosk.js?v=10"></script>
   </body>
 </html>
