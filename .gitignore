@@ -14,3 +14,8 @@ installer-assets/**/*.tmp
 **/installer-assets/app-staging/**
 
 logs/
+
+scripts/test-*.js
+scripts/debug-*.js
+scripts/check-*.js
+scripts/cleanup-*.js
