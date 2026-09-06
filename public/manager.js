@@ -40,14 +40,9 @@ const btnSaveTankEdit = document.getElementById('btnSaveTankEdit');
 const btnCancelTankEdit = document.getElementById('btnCancelTankEdit');
 const btnCloseTankEdit = document.getElementById('btnCloseTankEdit');
 const logoutBtn = document.getElementById('logoutBtn');
-const pinWm1 = document.getElementById('pinWm1');
-const pinWm2 = document.getElementById('pinWm2');
-const pinWm3 = document.getElementById('pinWm3');
-const showPinWm1 = document.getElementById('showPinWm1');
-const showPinWm2 = document.getElementById('showPinWm2');
-const showPinWm3 = document.getElementById('showPinWm3');
 const btnSaveKioskPins = document.getElementById('btnSaveKioskPins');
 const kioskPinHint = document.getElementById('kioskPinHint');
+const kioskPinGrid = document.getElementById('kioskPinGrid');
 const ownerSecuritySection = document.getElementById('ownerSecuritySection');
 const ownerCurrentPassword = document.getElementById('ownerCurrentPassword');
 const ownerNewPassword = document.getElementById('ownerNewPassword');
@@ -65,6 +60,8 @@ const tankReportTitle = document.getElementById('tankReportTitle');
 const tankReportBody = document.getElementById('tankReportBody');
 const btnCloseTankReport = document.getElementById('btnCloseTankReport');
 const btnPrintTankReport = document.getElementById('btnPrintTankReport');
+const btnExportTankReportCsv = document.getElementById('btnExportTankReportCsv');
+const btnExportTankReportXlsx = document.getElementById('btnExportTankReportXlsx');
 const tankTableHead = document.getElementById('tankTableHead');
 const tankTrashConfirmBackdrop = document.getElementById('tankTrashConfirmBackdrop');
 const tankTrashConfirmTitle = document.getElementById('tankTrashConfirmTitle');
@@ -231,10 +228,29 @@ function fmtMoney(v) {
   return new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' }).format(n);
 }
 
+/** Tank Report durations: always "Xh Ym" (never show decimal hours). */
 function fmtHours(v) {
   const n = Number(v);
-  if (!Number.isFinite(n)) return '0.00';
-  return n.toFixed(2);
+  if (!Number.isFinite(n) || n < 0) return '0h 0m';
+  const totalMin = Math.round(n * 60);
+  return `${Math.floor(totalMin / 60)}h ${totalMin % 60}m`;
+}
+
+function fmtMsXhYm(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n < 0) return '0h 0m';
+  const totalMin = Math.round(n / 60000);
+  return `${Math.floor(totalMin / 60)}h ${totalMin % 60}m`;
+}
+
+/** Prefer ms, then hours, then an existing display string. */
+function fmtReportDuration(opts = {}) {
+  if (opts.ms != null && Number.isFinite(Number(opts.ms))) return fmtMsXhYm(opts.ms);
+  if (opts.hours != null && Number.isFinite(Number(opts.hours))) return fmtHours(opts.hours);
+  if (opts.display != null && String(opts.display).trim() !== '' && String(opts.display) !== '—') {
+    return String(opts.display);
+  }
+  return '—';
 }
 
 function displayAreaName(area) {
@@ -977,17 +993,31 @@ function renderTankReport(data) {
         <div class="tank-lifecycle-item">
           <div class="tank-lifecycle-label">Total Running Time</div>
           <div class="tank-lifecycle-value">${escapeHtml(
-            (teamProduction && teamProduction.total_running_display) ||
-              (laborHours.total_running_display) ||
-              fmtHours(totalRunningHours)
+            fmtReportDuration({
+              ms:
+                (teamProduction && teamProduction.total_running_ms) != null
+                  ? teamProduction.total_running_ms
+                  : laborHours.total_running_ms,
+              hours: totalRunningHours,
+              display:
+                (teamProduction && teamProduction.total_running_display) ||
+                laborHours.total_running_display,
+            })
           )}</div>
         </div>
         <div class="tank-lifecycle-item">
           <div class="tank-lifecycle-label">Total Labor Hours</div>
           <div class="tank-lifecycle-value">${escapeHtml(
-            (teamProduction && teamProduction.total_labor_display) ||
-              (laborHours.total_labor_display) ||
-              fmtHours(totalLaborHours)
+            fmtReportDuration({
+              ms:
+                (teamProduction && teamProduction.total_labor_ms) != null
+                  ? teamProduction.total_labor_ms
+                  : laborHours.total_labor_ms,
+              hours: totalLaborHours,
+              display:
+                (teamProduction && teamProduction.total_labor_display) ||
+                laborHours.total_labor_display,
+            })
           )}</div>
         </div>
         <div class="tank-lifecycle-item">
@@ -1032,7 +1062,12 @@ function renderTankReport(data) {
         </div>
         <div class="tank-lifecycle-item">
           <div class="tank-lifecycle-label">Duration</div>
-          <div class="tank-lifecycle-value">${renderTankDurationBadge(tank)}</div>
+          <div class="tank-lifecycle-value">${escapeHtml(
+            fmtReportDuration({
+              ms: computeTankDurationMsClient(tank),
+              display: tank.duration_display,
+            })
+          )}</div>
         </div>
         <div class="tank-lifecycle-item tank-lifecycle-item--wide">
           <div class="tank-lifecycle-label">Description</div>
@@ -1051,7 +1086,11 @@ function renderTankReport(data) {
                        <td>${escapeHtml(m.employee_name || '—')}</td>
                        <td>${escapeHtml(m.team_name || '—')}</td>
                        <td>${escapeHtml(
-                         m.total_hours != null ? Number(m.total_hours).toFixed(2) + 'h' : '—'
+                         fmtReportDuration({
+                           ms: m.total_ms,
+                           hours: m.total_hours,
+                           display: m.total_hours_display,
+                         })
                        )}</td>
                      </tr>`
                    )
@@ -1069,7 +1108,13 @@ function renderTankReport(data) {
           (row) => `<tr>
             <td>${escapeHtml(row.phase_name || row.phase_code || '—')}</td>
             <td>${escapeHtml(row.status_label || row.status || '—')}</td>
-            <td>${escapeHtml(row.total_duration_display || '—')}</td>
+            <td>${escapeHtml(
+              fmtReportDuration({
+                ms: row.total_duration_ms,
+                hours: row.total_duration_hours,
+                display: row.total_duration_display,
+              })
+            )}</td>
             <td>${escapeHtml(row.summary_line || '—')}</td>
           </tr>`
         )
@@ -1097,7 +1142,12 @@ function renderTankReport(data) {
             <td>${escapeHtml(s.machine_name || '—')}</td>
             <td>${fmtIso(s.started_at)}</td>
             <td>${endLabel === 'In progress' ? 'In progress' : escapeHtml(endLabel)}</td>
-            <td>${escapeHtml(s.duration_display || fmtHours(s.duration_hours))}${
+            <td>${escapeHtml(
+              fmtReportDuration({
+                display: s.duration_display,
+                hours: s.duration_hours,
+              })
+            )}${
                   s.is_edited
                     ? ` <span class="badge badge-warn" title="${escapeHtml(s.latest_edit_reason || '')}">Edited</span>`
                     : ''
@@ -1112,7 +1162,13 @@ function renderTankReport(data) {
               })
               .join('');
             return `<div class="tank-phase-group">
-          <h5 class="tank-report-subsection-title">${escapeHtml(phase.phase_name || phase.phase_code || 'Phase')} · ${fmtHours(phase.phase_total_hours)} hrs</h5>
+          <h5 class="tank-report-subsection-title">${escapeHtml(phase.phase_name || phase.phase_code || 'Phase')} · ${escapeHtml(
+            fmtReportDuration({
+              ms: phase.phase_total_duration_ms,
+              hours: phase.phase_total_hours,
+              display: phase.phase_total_display,
+            })
+          )}</h5>
           <div class="table-wrap">
             <table class="tank-report-table">
               <thead><tr><th>Phase</th><th>Piece</th><th>Team</th><th>Machine</th><th>Start</th><th>End</th><th>Duration</th><th>Status</th><th></th></tr></thead>
@@ -1174,7 +1230,13 @@ function renderTankReport(data) {
                       (row) => `<tr>
                       <td>${escapeHtml(row.phase_name || row.phase_code || '—')}</td>
                       <td>${escapeHtml(row.status_label || row.status || '—')}</td>
-                      <td>${escapeHtml(row.total_duration_display || '—')}</td>
+                      <td>${escapeHtml(
+                        fmtReportDuration({
+                          ms: row.total_duration_ms,
+                          hours: row.total_duration_hours,
+                          display: row.total_duration_display,
+                        })
+                      )}</td>
                     </tr>`
                     )
                     .join('');
@@ -1185,7 +1247,13 @@ function renderTankReport(data) {
                       <span class="piece-history-chevron" aria-hidden="true"></span>
                       <span class="piece-history-title">Piece ${Number(pr.piece_number)} — ${escapeHtml(
                     statusLabel
-                  )} — ${escapeHtml(pr.total_duration_display || '0m')}</span>
+                  )} — ${escapeHtml(
+                    fmtReportDuration({
+                      ms: pr.total_duration_ms,
+                      hours: pr.total_duration_hours,
+                      display: pr.total_duration_display || '0h 0m',
+                    })
+                  )}</span>
                     </summary>
                     <div class="piece-history-body">
                       <div class="table-wrap">
@@ -1616,6 +1684,18 @@ if (btnPrintTankReport) {
     window.location.href = `/api/tanks/${currentTankReportId}/report.pdf`;
   });
 }
+if (btnExportTankReportCsv) {
+  btnExportTankReportCsv.addEventListener('click', () => {
+    if (!currentTankReportId) return;
+    window.location.href = `/api/tanks/${currentTankReportId}/report.csv`;
+  });
+}
+if (btnExportTankReportXlsx) {
+  btnExportTankReportXlsx.addEventListener('click', () => {
+    if (!currentTankReportId) return;
+    window.location.href = `/api/tanks/${currentTankReportId}/report.xlsx`;
+  });
+}
 if (tankReportBackdrop) {
   tankReportBackdrop.addEventListener('click', (e) => {
     if (e.target === tankReportBackdrop) closeTankReport();
@@ -1650,14 +1730,55 @@ function wirePinShow(checkbox, input) {
     input.type = checkbox.checked ? 'text' : 'password';
   });
 }
-wirePinShow(showPinWm1, pinWm1);
-wirePinShow(showPinWm2, pinWm2);
-wirePinShow(showPinWm3, pinWm3);
 wirePinShow(showOwnerPasswords, ownerCurrentPassword);
 wirePinShow(showOwnerPasswords, ownerNewPassword);
 wirePinShow(showOwnerPasswords, ownerConfirmPassword);
 wirePinShow(showManagerResetPassword, managerResetPassword);
 wirePinShow(showManagerResetPassword, managerResetConfirmPassword);
+
+function escapePinHtml(s) {
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+async function loadKioskPinMachines() {
+  if (!kioskPinGrid) return;
+  kioskPinGrid.innerHTML = '<p class="muted">Loading machines…</p>';
+  const { res, data } = await apiJson('/api/manager/kiosk-pins');
+  if (!res.ok || !data.ok) {
+    kioskPinGrid.innerHTML = `<p class="muted">${escapePinHtml((data && data.message) || 'Could not load machines.')}</p>`;
+    return;
+  }
+  const machines = Array.isArray(data.machines) ? data.machines : [];
+  if (!machines.length) {
+    kioskPinGrid.innerHTML = '<p class="muted">No active winding machines. Add one in Manage Machines.</p>';
+    return;
+  }
+  kioskPinGrid.innerHTML = machines
+    .map((m) => {
+      const id = Number(m.id);
+      const status = m.has_pin
+        ? '<span class="muted" style="font-size:0.85rem;font-weight:700;">PIN configured</span>'
+        : '<span class="muted" style="font-size:0.85rem;font-weight:700;color:#b45309;">No PIN set</span>';
+      return `<article class="manager-subcard" data-machine-id="${id}">
+        <h3 class="manager-subcard-title">${escapePinHtml(m.name)}</h3>
+        <div class="field">
+          <label for="pinMachine${id}">New PIN</label>
+          <input id="pinMachine${id}" class="kiosk-pin-input" data-machine-id="${id}" type="password" inputmode="numeric" maxlength="6" placeholder="4-6 digit PIN" autocomplete="new-password" />
+        </div>
+        <label class="pw-inline manager-checkbox"><input class="kiosk-pin-show" type="checkbox" data-pin-input="pinMachine${id}" /> Show PIN</label>
+        <div style="margin-top:8px">${status}</div>
+      </article>`;
+    })
+    .join('');
+  kioskPinGrid.querySelectorAll('.kiosk-pin-show').forEach((cb) => {
+    const input = document.getElementById(cb.getAttribute('data-pin-input'));
+    wirePinShow(cb, input);
+  });
+}
 
 async function refreshAuthUi() {
   const { res, data } = await apiJson('/api/auth/me');
@@ -1669,22 +1790,27 @@ async function refreshAuthUi() {
 async function saveKioskPins() {
   if (!kioskPinHint) return;
   setAlert(kioskPinHint, '', null);
-  const body = {};
-  const wm1 = pinWm1 && String(pinWm1.value || '').trim();
-  const wm2 = pinWm2 && String(pinWm2.value || '').trim();
-  const wm3 = pinWm3 && String(pinWm3.value || '').trim();
-  if (wm1) body.wm_1_pin = wm1;
-  if (wm2) body.wm_2_pin = wm2;
-  if (wm3) body.wm_3_pin = wm3;
-  if (!Object.keys(body).length) {
+  const pins = [];
+  (kioskPinGrid ? kioskPinGrid.querySelectorAll('.kiosk-pin-input') : []).forEach((input) => {
+    const digits = String(input.value || '').trim();
+    if (!digits) return;
+    pins.push({ machine_id: Number(input.getAttribute('data-machine-id')), pin: digits });
+  });
+  if (!pins.length) {
     setAlert(kioskPinHint, 'Enter at least one new PIN to update.', 'error');
     return;
+  }
+  for (const item of pins) {
+    if (!/^\d{4,6}$/.test(item.pin)) {
+      setAlert(kioskPinHint, 'Each PIN must be exactly 4–6 digits.', 'error');
+      return;
+    }
   }
   if (btnSaveKioskPins) btnSaveKioskPins.disabled = true;
   const { res, data } = await apiJson('/api/manager/kiosk-pins', {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ pins }),
   });
   if (!res.ok) {
     setAlert(kioskPinHint, (data && data.message) || 'Could not save PINs.', 'error');
@@ -1692,13 +1818,12 @@ async function saveKioskPins() {
     return;
   }
   setAlert(kioskPinHint, 'Kiosk PINs updated.', 'success');
-  if (pinWm1) pinWm1.value = '';
-  if (pinWm2) pinWm2.value = '';
-  if (pinWm3) pinWm3.value = '';
   if (btnSaveKioskPins) btnSaveKioskPins.disabled = false;
+  await loadKioskPinMachines();
 }
 
 if (btnSaveKioskPins) btnSaveKioskPins.addEventListener('click', () => void saveKioskPins());
+void loadKioskPinMachines();
 
 async function resetManagerPassword() {
   if (!managerResetHint || !managerResetPassword) return;

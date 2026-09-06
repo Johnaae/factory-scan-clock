@@ -25,6 +25,30 @@ function moneyishHours(n) {
   return v.toFixed(2);
 }
 
+/** Tank Report durations: always "Xh Ym". */
+function formatXhYmFromHours(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v < 0) return '0h 0m';
+  const totalMin = Math.round(v * 60);
+  return `${Math.floor(totalMin / 60)}h ${totalMin % 60}m`;
+}
+
+function formatXhYmFromMs(ms) {
+  const v = Number(ms);
+  if (!Number.isFinite(v) || v < 0) return '0h 0m';
+  const totalMin = Math.round(v / 60000);
+  return `${Math.floor(totalMin / 60)}h ${totalMin % 60}m`;
+}
+
+function formatReportDuration(opts = {}) {
+  if (opts.ms != null && Number.isFinite(Number(opts.ms))) return formatXhYmFromMs(opts.ms);
+  if (opts.hours != null && Number.isFinite(Number(opts.hours))) return formatXhYmFromHours(opts.hours);
+  if (opts.display != null && String(opts.display).trim() !== '' && String(opts.display) !== '—') {
+    return String(opts.display);
+  }
+  return '—';
+}
+
 function fmtWhen(iso) {
   if (!iso) return '—';
   const d = new Date(iso);
@@ -294,8 +318,20 @@ function buildTankReportPdfBuffer(data) {
     { label: 'Machine', value: meta.machine_name || '—' },
     { label: 'Status', value: meta.production_status || tank.status || '—' },
     { label: 'Progress', value: `${meta.percent_complete != null ? meta.percent_complete : '—'}%` },
-    { label: 'Total Running Hours', value: moneyishHours(totalRunning) },
-    { label: 'Total Labor Hours', value: moneyishHours(totalLabor) },
+    { label: 'Total Running Hours', value: formatReportDuration({
+      ms: (teamProduction && teamProduction.total_running_ms) != null
+        ? teamProduction.total_running_ms
+        : laborHours.total_running_ms,
+      hours: totalRunning,
+      display: (teamProduction && teamProduction.total_running_display) || laborHours.total_running_display,
+    }) },
+    { label: 'Total Labor Hours', value: formatReportDuration({
+      ms: (teamProduction && teamProduction.total_labor_ms) != null
+        ? teamProduction.total_labor_ms
+        : laborHours.total_labor_ms,
+      hours: totalLabor,
+      display: (teamProduction && teamProduction.total_labor_display) || laborHours.total_labor_display,
+    }) },
     { label: 'Current Phase', value: meta.current_phase || '—' },
     { label: 'Piece', value: meta.piece_label || `Piece ${tank.current_piece_number || 1}` },
     { label: 'Started', value: fmtWhen(tank.first_scanned_at || tank.started_at || meta.started_at) },
@@ -319,7 +355,11 @@ function buildTankReportPdfBuffer(data) {
   const phaseRows = (phaseSummary || []).map((p) => ({
     phase: p.phase_name || p.phase_code || '—',
     status: p.status_label || p.status || '—',
-    time: p.total_duration_display || '—',
+    time: formatReportDuration({
+      ms: p.total_duration_ms,
+      hours: p.total_duration_hours,
+      display: p.total_duration_display,
+    }),
     detail: p.summary_line || '',
   }));
   y = drawTable(
@@ -336,9 +376,45 @@ function buildTankReportPdfBuffer(data) {
     { emptyText: 'No phase activity recorded.' }
   );
 
+  // Labor breakdown (membership history) — same source as on-screen Tank Report
+  const memberBreakdown = (teamProduction && teamProduction.member_breakdown) || [];
+  if (memberBreakdown.length) {
+    y = drawSectionHeading(doc, M, w, y, 'Labor Breakdown (membership history)');
+    y = drawTable(
+      doc,
+      M,
+      y,
+      [
+        { key: 'employee', label: 'Employee', width: 160 },
+        { key: 'team', label: 'Team(s)', width: 220 },
+        { key: 'time', label: 'Time on tank', width: 148, align: 'right' },
+      ],
+      memberBreakdown.map((m) => ({
+        employee: m.employee_name || '—',
+        team: m.team_name || '—',
+        time: formatReportDuration({
+          ms: m.total_ms,
+          hours: m.total_hours,
+          display: m.total_hours_display,
+        }),
+      })),
+      { emptyText: 'No labor membership history.' }
+    );
+  }
+
   const phases = (teamProduction && teamProduction.phases) || [];
   for (const phase of phases) {
-    y = drawSectionHeading(doc, M, w, y, `${phase.phase_name || phase.phase_code || 'Phase'} · ${moneyishHours(phase.phase_total_hours)} hrs`);
+    y = drawSectionHeading(
+      doc,
+      M,
+      w,
+      y,
+      `${phase.phase_name || phase.phase_code || 'Phase'} · ${formatReportDuration({
+        ms: phase.phase_total_duration_ms,
+        hours: phase.phase_total_hours,
+        display: phase.phase_total_display,
+      })}`
+    );
     const sessionRows = (phase.sessions || []).map((s) => ({
       team: s.team_name || '—',
       start: fmtWhen(s.started_at),
@@ -346,7 +422,10 @@ function buildTankReportPdfBuffer(data) {
         s.status === 'running'
           ? 'In progress'
           : fmtWhen(s.ended_at || s.finished_at || s.stopped_at),
-      duration: s.duration_display || moneyishHours(s.duration_hours),
+      duration: formatReportDuration({
+        hours: s.duration_hours,
+        display: s.duration_display,
+      }),
       status: s.status_label || s.status || '—',
     }));
     y = drawTable(
@@ -386,7 +465,11 @@ function buildTankReportPdfBuffer(data) {
         M,
         w,
         y,
-        `Piece ${pr.piece_number} · ${pr.status || '—'} · ${pr.total_duration_display || '0m'}${
+        `Piece ${pr.piece_number} · ${pr.status || '—'} · ${formatReportDuration({
+          ms: pr.total_duration_ms,
+          hours: pr.total_duration_hours,
+          display: pr.total_duration_display || '0h 0m',
+        })}${
           pr.completed_at ? ` · Completed ${fmtWhen(pr.completed_at)}` : ''
         }`
       );
@@ -402,7 +485,11 @@ function buildTankReportPdfBuffer(data) {
         (phaseRows.length ? phaseRows : pr.phase_time_summary || []).map((row) => ({
           phase: row.phase_name || row.phase_code || '—',
           status: row.status_label || row.status || '—',
-          time: row.total_duration_display || '—',
+          time: formatReportDuration({
+            ms: row.total_duration_ms,
+            hours: row.total_duration_hours,
+            display: row.total_duration_display,
+          }),
         })),
         { emptyText: 'No phase activity for this piece.' }
       );

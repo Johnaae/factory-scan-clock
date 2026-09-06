@@ -92,7 +92,7 @@ const WINDING_MACHINES = [
 
 const WINDING_MACHINE_AREA_NAMES = WINDING_MACHINES.map((m) => m.areaName);
 
-/** Only WM-01/02/03 are rendered on dashboards and production UIs. */
+/** Seed defaults for WM-01/02/03. Live lists come from the machines table. */
 const CANONICAL_WINDING_MACHINE_CODES = WINDING_MACHINES.map((m) => m.code);
 
 function isCanonicalWindingMachineCode(code) {
@@ -142,7 +142,12 @@ function normalizeWindingMachineAreaName(area) {
 }
 
 function isWindingMachineAreaName(area) {
-  return WINDING_MACHINE_AREA_NAMES.includes(normalizeWindingMachineAreaName(area));
+  const raw = String(area || '').trim();
+  if (!raw) return false;
+  const n = normalizeWindingMachineAreaName(raw);
+  if (WINDING_MACHINE_AREA_NAMES.includes(n)) return true;
+  // Machines created in Manage Machines (Winding Machine 04, etc.)
+  return /^winding\s+machine\b/i.test(raw) || /^winding\s+machine\b/i.test(n);
 }
 
 function slugFromMachineName(name) {
@@ -792,15 +797,25 @@ function createPhase1ProductionLogic(deps) {
   }
 
   async function getMachineByAreaName(areaName) {
-    const canonical = normalizeWindingMachineAreaName(areaName);
-    if (!canonical || !isWindingMachineAreaName(canonical)) return null;
+    const raw = String(areaName || '').trim();
+    if (!raw) return null;
+    const canonical = normalizeWindingMachineAreaName(raw) || raw;
     const slug = slugFromMachineName(canonical);
     const spec = WINDING_MACHINES.find((m) => m.areaName === canonical);
     const { rows } = await pool.query(
-      `SELECT id, name, code, barcode, kiosk_slug, sort_order, active FROM machines
-       WHERE active = 1 AND (
-         name = $1 OR LOWER(TRIM(kiosk_slug)) = $2 OR ($3::text IS NOT NULL AND code = $3)
-       ) LIMIT 1`,
+      `SELECT id, name, code, barcode, kiosk_slug, sort_order, active, active_tank_id FROM machines
+       WHERE (
+         name = $1
+         OR LOWER(TRIM(name)) = LOWER($1)
+         OR LOWER(TRIM(kiosk_slug)) = $2
+         OR ($3::text IS NOT NULL AND code = $3)
+       )
+       AND NOT (
+         UPPER(TRIM(COALESCE(code, ''))) LIKE 'WS-%'
+         OR name ILIKE 'Winding Station%'
+       )
+       ORDER BY active DESC, sort_order ASC, id ASC
+       LIMIT 1`,
       [canonical, slug, spec ? spec.code : null]
     );
     return rows[0] || null;
@@ -810,7 +825,9 @@ function createPhase1ProductionLogic(deps) {
     const bc = normalizeTeamBarcode(barcode);
     if (!bc) return null;
     const { rows } = await pool.query(
-      `SELECT id, name, barcode, active FROM teams WHERE UPPER(TRIM(barcode)) = $1 LIMIT 1`,
+      `SELECT id, name, barcode, active FROM teams
+       WHERE active = 1 AND UPPER(REPLACE(TRIM(barcode), ' ', '')) = $1
+       LIMIT 1`,
       [bc]
     );
     return rows[0] || null;
@@ -1297,7 +1314,8 @@ function createPhase1ProductionLogic(deps) {
     return rows;
   }
 
-  async function fetchManagedWindingMachines() {
+  async function fetchManagedWindingMachines(opts = {}) {
+    const includeInactive = opts.includeInactive !== false;
     const { rows } = await pool.query(
       `SELECT id, name, code, barcode, kiosk_slug, sort_order, active, active_tank_id
        FROM machines
@@ -1305,9 +1323,39 @@ function createPhase1ProductionLogic(deps) {
          UPPER(TRIM(COALESCE(code, ''))) LIKE 'WS-%'
          OR name ILIKE 'Winding Station%'
        )
+       ${includeInactive ? '' : 'AND active = 1'}
        ORDER BY sort_order ASC, name ASC`
     );
     return rows;
+  }
+
+  async function getMachineUsageSummary(machineId) {
+    const mid = Number(machineId);
+    if (!Number.isInteger(mid) || mid <= 0) {
+      return { open_sessions: 0, history_sessions: 0, alerts: 0, notes: 0, has_history: false, has_open_production: false };
+    }
+    const [openRes, histRes, alertRes, noteRes] = await Promise.all([
+      pool.query(
+        `SELECT COUNT(*)::int AS n FROM machine_sessions
+         WHERE machine_id = $1 AND status IN ('running', 'stopped')`,
+        [mid]
+      ),
+      pool.query(`SELECT COUNT(*)::int AS n FROM machine_sessions WHERE machine_id = $1`, [mid]),
+      pool.query(`SELECT COUNT(*)::int AS n FROM alert_events WHERE machine_id = $1`, [mid]).catch(() => ({ rows: [{ n: 0 }] })),
+      pool.query(`SELECT COUNT(*)::int AS n FROM production_notes WHERE machine_id = $1`, [mid]).catch(() => ({ rows: [{ n: 0 }] })),
+    ]);
+    const open_sessions = Number(openRes.rows[0] && openRes.rows[0].n) || 0;
+    const history_sessions = Number(histRes.rows[0] && histRes.rows[0].n) || 0;
+    const alerts = Number(alertRes.rows[0] && alertRes.rows[0].n) || 0;
+    const notes = Number(noteRes.rows[0] && noteRes.rows[0].n) || 0;
+    return {
+      open_sessions,
+      history_sessions,
+      alerts,
+      notes,
+      has_open_production: open_sessions > 0,
+      has_history: history_sessions > 0 || alerts > 0 || notes > 0,
+    };
   }
 
   async function fetchCanonicalWindingMachines() {
@@ -3749,6 +3797,7 @@ function createPhase1ProductionLogic(deps) {
     mapSession,
     fetchActiveWindingMachines,
     fetchManagedWindingMachines,
+    getMachineUsageSummary,
     fetchCanonicalWindingMachines,
     buildDashboardCards,
     buildTeamDashboardCards,
@@ -3785,6 +3834,7 @@ function createPhase1ProductionLogic(deps) {
     fetchTankPhaseTimeSummary,
     transferEmployeeToTeam: (...args) => getMembershipApi().transferEmployeeToTeam(...args),
     employeeOutFromTeam: (...args) => getMembershipApi().employeeOutFromTeam(...args),
+    listOpenShiftEmployeesForTeam: (...args) => getMembershipApi().listOpenShiftEmployeesForTeam(...args),
     getEmployeeActiveShiftTeam: (...args) => getMembershipApi().getEmployeeActiveShiftTeam(...args),
     startTeamShiftMemberships: (...args) => getMembershipApi().startTeamShiftMemberships(...args),
     closeTeamShiftMemberships: (...args) => getMembershipApi().closeTeamShiftMemberships(...args),

@@ -61,6 +61,22 @@ const els = {
   btnSkipDowntimeReason: document.getElementById('btnSkipDowntimeReason'),
   btnCancelDowntime: document.getElementById('btnCancelDowntime'),
   btnEmployeeOut: document.getElementById('btnEmployeeOut'),
+  employeeOutModal: document.getElementById('employeeOutModal'),
+  employeeOutHint: document.getElementById('employeeOutHint'),
+  employeeOutList: document.getElementById('employeeOutList'),
+  employeeOutEmpty: document.getElementById('employeeOutEmpty'),
+  employeeOutConfirm: document.getElementById('employeeOutConfirm'),
+  btnCancelEmployeeOut: document.getElementById('btnCancelEmployeeOut'),
+  btnConfirmEmployeeOut: document.getElementById('btnConfirmEmployeeOut'),
+  changePhaseModal: document.getElementById('changePhaseModal'),
+  changePhaseContext: document.getElementById('changePhaseContext'),
+  changePhaseTarget: document.getElementById('changePhaseTarget'),
+  changePhaseCurrent: document.getElementById('changePhaseCurrent'),
+  changePhaseEmpty: document.getElementById('changePhaseEmpty'),
+  changePhaseList: document.getElementById('changePhaseList'),
+  changePhaseConfirm: document.getElementById('changePhaseConfirm'),
+  btnCancelChangePhase: document.getElementById('btnCancelChangePhase'),
+  btnConfirmChangePhase: document.getElementById('btnConfirmChangePhase'),
 };
 
 let config = null;
@@ -75,8 +91,11 @@ let pendingTank = null;
 let pendingPiece = null;
 let resumablePhase = null;
 let pendingConfirmer = null;
-let selectedEmployeeForOut = null;
-let employeeOutMode = false;
+let employeeOutPick = null;
+let employeeOutSubmitting = false;
+let changePhasePick = null;
+let changePhaseContext = null;
+let changePhaseSubmitting = false;
 let phases = [];
 let elapsedTimer = null;
 let scanBuffer = '';
@@ -86,13 +105,48 @@ let pendingCorrectionBarcode = null;
 let downtimeReasons = [];
 let openQaQc = null;
 
+function isEmployeeOutModalOpen() {
+  return Boolean(
+    els.employeeOutModal && !els.employeeOutModal.hidden && els.employeeOutModal.classList.contains('show')
+  );
+}
+
+function isChangePhaseModalOpen() {
+  return Boolean(
+    els.changePhaseModal && !els.changePhaseModal.hidden && els.changePhaseModal.classList.contains('show')
+  );
+}
+
 function isTextEntryModalOpen() {
   const noteOpen = els.noteModal && !els.noteModal.hidden && els.noteModal.classList.contains('show');
   const downtimeOpen =
     els.downtimeModal && !els.downtimeModal.hidden && els.downtimeModal.classList.contains('show');
   const resolveOpen =
     els.resolveQaQcModal && !els.resolveQaQcModal.hidden && els.resolveQaQcModal.classList.contains('show');
-  return Boolean(noteOpen || downtimeOpen || resolveOpen);
+  return Boolean(
+    noteOpen || downtimeOpen || resolveOpen || isEmployeeOutModalOpen() || isChangePhaseModalOpen()
+  );
+}
+
+function blurScanInputs() {
+  try {
+    if (els.manual && typeof els.manual.blur === 'function') els.manual.blur();
+  } catch (_err) {
+    /* ignore */
+  }
+  try {
+    if (els.scannerTrap && typeof els.scannerTrap.blur === 'function') els.scannerTrap.blur();
+  } catch (_err) {
+    /* ignore */
+  }
+  try {
+    if (document.activeElement && typeof document.activeElement.blur === 'function') {
+      const tag = String(document.activeElement.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea') document.activeElement.blur();
+    }
+  } catch (_err) {
+    /* ignore */
+  }
 }
 
 /**
@@ -159,6 +213,306 @@ function warn(msg) {
 
 function confirmerPayload() {
   return pendingConfirmer ? { confirmer: pendingConfirmer } : {};
+}
+
+function closeEmployeeOutModal() {
+  employeeOutPick = null;
+  employeeOutSubmitting = false;
+  if (!els.employeeOutModal) return;
+  els.employeeOutModal.classList.remove('show');
+  els.employeeOutModal.hidden = true;
+  if (els.employeeOutList) els.employeeOutList.innerHTML = '';
+  if (els.employeeOutEmpty) els.employeeOutEmpty.hidden = true;
+  if (els.employeeOutConfirm) {
+    els.employeeOutConfirm.hidden = true;
+    els.employeeOutConfirm.textContent = '';
+  }
+  if (els.btnConfirmEmployeeOut) {
+    els.btnConfirmEmployeeOut.hidden = true;
+    els.btnConfirmEmployeeOut.disabled = false;
+  }
+}
+
+function showEmployeeOutConfirm(emp) {
+  employeeOutPick = emp;
+  if (els.employeeOutConfirm) {
+    els.employeeOutConfirm.hidden = false;
+    els.employeeOutConfirm.textContent = `Mark ${emp.name} out for this shift?`;
+  }
+  if (els.btnConfirmEmployeeOut) {
+    els.btnConfirmEmployeeOut.hidden = false;
+    els.btnConfirmEmployeeOut.disabled = false;
+  }
+  if (els.employeeOutList) {
+    Array.from(els.employeeOutList.querySelectorAll('.employee-out-row')).forEach((btn) => {
+      btn.classList.toggle('is-selected', Number(btn.getAttribute('data-employee-id')) === Number(emp.id));
+    });
+  }
+}
+
+function renderEmployeeOutList(employees) {
+  employeeOutPick = null;
+  if (els.employeeOutConfirm) {
+    els.employeeOutConfirm.hidden = true;
+    els.employeeOutConfirm.textContent = '';
+  }
+  if (els.btnConfirmEmployeeOut) els.btnConfirmEmployeeOut.hidden = true;
+  if (!els.employeeOutList) return;
+  els.employeeOutList.innerHTML = '';
+  const list = Array.isArray(employees) ? employees : [];
+  if (!list.length) {
+    if (els.employeeOutEmpty) {
+      els.employeeOutEmpty.hidden = false;
+      els.employeeOutEmpty.textContent = 'No active employees available.';
+    }
+    return;
+  }
+  if (els.employeeOutEmpty) els.employeeOutEmpty.hidden = true;
+  list.forEach((emp) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'employee-out-row';
+    btn.setAttribute('data-employee-id', String(emp.id));
+    const name = document.createElement('span');
+    name.className = 'employee-out-name';
+    name.textContent = emp.name || 'Employee';
+    const meta = document.createElement('span');
+    meta.className = 'employee-out-meta';
+    meta.textContent = [emp.code, emp.role].filter(Boolean).join('  ·  ');
+    btn.appendChild(name);
+    btn.appendChild(meta);
+    btn.addEventListener('click', () => showEmployeeOutConfirm(emp));
+    els.employeeOutList.appendChild(btn);
+  });
+}
+
+async function openEmployeeOutModal() {
+  if (!assignment) {
+    warn('Scan a Team barcode first. Employee Out needs a team assigned to this machine.');
+    return;
+  }
+  if (!els.employeeOutModal) return;
+  blurScanInputs();
+  employeeOutPick = null;
+  employeeOutSubmitting = false;
+  els.employeeOutModal.hidden = false;
+  els.employeeOutModal.classList.add('show');
+  if (els.employeeOutHint) {
+    els.employeeOutHint.textContent = 'Select an active employee. Production continues for the rest of the team.';
+  }
+  if (els.employeeOutList) els.employeeOutList.innerHTML = '';
+  if (els.employeeOutEmpty) {
+    els.employeeOutEmpty.hidden = false;
+    els.employeeOutEmpty.textContent = 'Loading…';
+  }
+  if (els.employeeOutConfirm) els.employeeOutConfirm.hidden = true;
+  if (els.btnConfirmEmployeeOut) els.btnConfirmEmployeeOut.hidden = true;
+  const { res, data } = await api(`${API}/shift-employees`);
+  if (!res.ok || !data.ok) {
+    closeEmployeeOutModal();
+    warn((data && data.message) || 'Could not load active employees.');
+    focusScanInput();
+    return;
+  }
+  renderEmployeeOutList(data.employees || []);
+}
+
+async function confirmEmployeeOut() {
+  if (!employeeOutPick || !employeeOutPick.id || employeeOutSubmitting) return;
+  employeeOutSubmitting = true;
+  if (els.btnConfirmEmployeeOut) els.btnConfirmEmployeeOut.disabled = true;
+  const { res, data } = await api(`${API}/employee-out`, {
+    method: 'POST',
+    body: JSON.stringify({ employee_id: employeeOutPick.id }),
+  });
+  employeeOutSubmitting = false;
+  if (!res.ok || !data.ok) {
+    if (els.btnConfirmEmployeeOut) els.btnConfirmEmployeeOut.disabled = false;
+    warn((data && data.message) || 'Could not mark employee out.');
+    if (data && data.error === 'not_on_shift') {
+      await openEmployeeOutModal();
+    }
+    return;
+  }
+  await consumeScanResult(data);
+}
+
+function isEmployeeOutBarcode(value) {
+  const s = String(value || '').trim().toUpperCase();
+  return (
+    s === 'EMPLOYEE_OUT' ||
+    s === 'EMPLOYEE:OUT' ||
+    s === 'SCAN:EMPLOYEE_OUT' ||
+    s === 'ACTION:EMPLOYEE_OUT'
+  );
+}
+
+function selectablePhases() {
+  return (phases || []).filter((ph) => ph && !ph.completes && !ph.piece_complete);
+}
+
+function closeChangePhaseModal() {
+  changePhasePick = null;
+  changePhaseContext = null;
+  changePhaseSubmitting = false;
+  if (!els.changePhaseModal) return;
+  els.changePhaseModal.classList.remove('show');
+  els.changePhaseModal.hidden = true;
+  if (els.changePhaseList) els.changePhaseList.innerHTML = '';
+  if (els.changePhaseEmpty) {
+    els.changePhaseEmpty.hidden = true;
+    els.changePhaseEmpty.textContent = '';
+  }
+  if (els.changePhaseConfirm) {
+    els.changePhaseConfirm.hidden = true;
+    els.changePhaseConfirm.textContent = '';
+  }
+  if (els.changePhaseContext) els.changePhaseContext.hidden = true;
+  if (els.btnConfirmChangePhase) {
+    els.btnConfirmChangePhase.hidden = true;
+    els.btnConfirmChangePhase.disabled = false;
+  }
+}
+
+function showChangePhaseConfirm(ph) {
+  if (!changePhaseContext || !ph) return;
+  changePhasePick = ph;
+  const pieceLabel = `Piece ${changePhaseContext.piece}`;
+  const fromLabel = changePhaseContext.currentPhase || '—';
+  const toLabel = ph.label || ph.code || 'phase';
+  if (els.changePhaseConfirm) {
+    els.changePhaseConfirm.hidden = false;
+    els.changePhaseConfirm.textContent = changePhaseContext.hasCurrentPhase
+      ? `Change ${pieceLabel} from ${fromLabel} to ${toLabel}?`
+      : `Start ${toLabel} on ${pieceLabel}?`;
+  }
+  if (els.btnConfirmChangePhase) {
+    els.btnConfirmChangePhase.hidden = false;
+    els.btnConfirmChangePhase.disabled = false;
+  }
+  if (els.changePhaseList) {
+    Array.from(els.changePhaseList.querySelectorAll('.change-phase-btn')).forEach((btn) => {
+      const code = String(btn.getAttribute('data-phase-code') || '');
+      btn.classList.toggle('is-selected', code === String(ph.code || ''));
+    });
+  }
+}
+
+function renderChangePhaseList(list) {
+  changePhasePick = null;
+  if (els.changePhaseConfirm) {
+    els.changePhaseConfirm.hidden = true;
+    els.changePhaseConfirm.textContent = '';
+  }
+  if (els.btnConfirmChangePhase) els.btnConfirmChangePhase.hidden = true;
+  if (!els.changePhaseList) return;
+  els.changePhaseList.innerHTML = '';
+  const currentCode = changePhaseContext && changePhaseContext.currentCode
+    ? String(changePhaseContext.currentCode).toUpperCase()
+    : '';
+  list.forEach((ph) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'change-phase-btn';
+    btn.setAttribute('data-phase-code', String(ph.code || ''));
+    btn.textContent = ph.label || ph.code || 'Phase';
+    if (currentCode && String(ph.code || '').toUpperCase() === currentCode) {
+      btn.classList.add('is-current');
+    }
+    btn.addEventListener('mousedown', (e) => e.preventDefault());
+    btn.addEventListener('click', () => showChangePhaseConfirm(ph));
+    els.changePhaseList.appendChild(btn);
+  });
+}
+
+function openChangePhaseModal() {
+  blurScanInputs();
+  if (els.phasePanel) els.phasePanel.hidden = true;
+
+  if (!assignment) {
+    warn('Scan a Team barcode first before changing phase.');
+    return;
+  }
+  const tank = activeTankNumber();
+  if (!tank) {
+    warn('Scan or select a tank first, then Change Phase.');
+    return;
+  }
+  const piece = selectedPieceNumber();
+  if (piece == null) {
+    warn('Select the target piece first, then Change Phase.');
+    return;
+  }
+
+  const currentSession = focusedSession();
+  const currentPhase =
+    (currentSession && (currentSession.phase_name || currentSession.activity_name)) || null;
+  const currentCode =
+    (currentSession && (currentSession.activity_code || currentSession.phase_code)) || null;
+
+  changePhaseContext = {
+    tank: String(tank).toUpperCase(),
+    piece: Number(piece),
+    currentPhase: currentPhase || 'Not started',
+    currentCode,
+    hasCurrentPhase: Boolean(currentPhase),
+  };
+  changePhasePick = null;
+  changePhaseSubmitting = false;
+
+  if (!els.changePhaseModal) return;
+  els.changePhaseModal.hidden = false;
+  els.changePhaseModal.classList.add('show');
+  blurScanInputs();
+
+  if (els.changePhaseContext) els.changePhaseContext.hidden = false;
+  if (els.changePhaseTarget) {
+    els.changePhaseTarget.textContent = `Tank ${changePhaseContext.tank} — Piece ${changePhaseContext.piece}`;
+  }
+  if (els.changePhaseCurrent) {
+    els.changePhaseCurrent.textContent = `Current Phase: ${changePhaseContext.currentPhase}`;
+  }
+
+  const list = selectablePhases();
+  if (!list.length) {
+    if (els.changePhaseEmpty) {
+      els.changePhaseEmpty.hidden = false;
+      els.changePhaseEmpty.textContent = 'No phases available.';
+    }
+    if (els.changePhaseList) els.changePhaseList.innerHTML = '';
+    if (els.btnConfirmChangePhase) els.btnConfirmChangePhase.hidden = true;
+    return;
+  }
+  if (els.changePhaseEmpty) els.changePhaseEmpty.hidden = true;
+  renderChangePhaseList(list);
+  // Keep focus off inputs while the modal is open.
+  blurScanInputs();
+  window.setTimeout(blurScanInputs, 0);
+}
+
+async function confirmChangePhase() {
+  if (!changePhasePick || !changePhaseContext || changePhaseSubmitting) return;
+  changePhaseSubmitting = true;
+  if (els.btnConfirmChangePhase) els.btnConfirmChangePhase.disabled = true;
+
+  pendingTank = changePhaseContext.tank;
+  pendingPiece = changePhaseContext.piece;
+  const ph = changePhasePick;
+  closeChangePhaseModal();
+
+  const data = await postAction({
+    action: 'scan',
+    barcode: ph.barcode || ph.code,
+    pending: { tank: pendingTank, piece: pendingPiece },
+    ...confirmerPayload(),
+  });
+  changePhaseSubmitting = false;
+  if (!data) {
+    focusScanInput();
+    return;
+  }
+  await consumeScanResult(data);
+  if (!isTextEntryModalOpen()) focusScanInput();
 }
 
 function showFinishBanner(message) {
@@ -785,8 +1139,6 @@ function renderUi() {
     els.workflowTitle.textContent = stopReason === 'qa_qc' ? 'QA/QC in progress' : 'Production in progress';
     if (pendingConfirmer) {
       els.workflowSub.textContent = `${pendingConfirmer.name} will confirm completion — scan Piece/Tank Complete or tap a button.`;
-    } else if (employeeOutMode) {
-      els.workflowSub.textContent = 'Employee Out — scan employee barcode to mark them out of the team.';
     } else if (stopReason === 'qa_qc') {
       els.workflowSub.textContent =
         'QA/QC Issue Open. Scan QA_QC_RESOLVE or tap Resolve QA/QC to resume this piece (other tanks continue).';
@@ -822,24 +1174,6 @@ function renderUi() {
     if (els.phaseSummaryPanel) els.phaseSummaryPanel.hidden = true;
     return;
   }
-
-  if (employeeOutMode) {
-    els.workflowTitle.textContent = 'Employee Out';
-    els.workflowSub.textContent = 'Scan employee barcode to mark them out of the team. Production continues.';
-    els.phasePanel.hidden = true;
-    if (els.btnEmployeeOut) els.btnEmployeeOut.classList.add('is-selected');
-    return;
-  }
-
-  if (selectedEmployeeForOut) {
-    els.workflowTitle.textContent = 'Employee Selected';
-    els.workflowSub.textContent = `Selected Employee: ${selectedEmployeeForOut.name}. Tap Employee Out when ready. Production continues.`;
-    els.phasePanel.hidden = true;
-    if (els.btnEmployeeOut) els.btnEmployeeOut.classList.add('is-selected');
-    return;
-  }
-
-  if (els.btnEmployeeOut) els.btnEmployeeOut.classList.remove('is-selected');
 
   if (!pendingTank) {
     els.workflowTitle.textContent = 'Scan Tank barcode';
@@ -917,7 +1251,6 @@ async function loadConfig() {
     pendingTank = null;
     pendingPiece = null;
     resumablePhase = null;
-    employeeOutMode = false;
   }
   if (data.pending && data.pending.tank) pendingTank = data.pending.tank;
   if (data.pending && data.pending.piece != null) pendingPiece = Number(data.pending.piece);
@@ -983,9 +1316,12 @@ async function consumeScanResult(data) {
     focusScanInput();
     return;
   }
+  if (data.action === 'employee_out_prompt') {
+    await openEmployeeOutModal();
+    return;
+  }
   if (data.action === 'employee_out') {
-    employeeOutMode = false;
-    selectedEmployeeForOut = null;
+    closeEmployeeOutModal();
     pendingConfirmer = null;
     warn(data.confirmation_line || `${(data.employee && data.employee.name) || 'Employee'} marked out.`);
     await loadConfig();
@@ -993,17 +1329,14 @@ async function consumeScanResult(data) {
     return;
   }
   if (data.action === 'employee_selected') {
-    employeeOutMode = false;
-    selectedEmployeeForOut = data.employee || data.confirmer || null;
     if (data.confirmer) pendingConfirmer = data.confirmer;
+    else if (data.employee) pendingConfirmer = data.employee;
     warn(data.confirmation_line || `Selected Employee: ${(data.employee && data.employee.name) || 'Employee'}.`);
     renderUi();
     focusScanInput();
     return;
   }
   if (data.action === 'employee_transferred') {
-    employeeOutMode = false;
-    selectedEmployeeForOut = null;
     if (data.confirmer) pendingConfirmer = data.confirmer;
     else if (data.employee) pendingConfirmer = data.employee;
     warn(data.confirmation_line || `${(data.employee && data.employee.name) || 'Employee'} transferred.`);
@@ -1015,8 +1348,6 @@ async function consumeScanResult(data) {
     pendingTank = null;
     pendingPiece = null;
     resumablePhase = null;
-    selectedEmployeeForOut = null;
-    employeeOutMode = false;
     warn(`Team ${data.assignment ? data.assignment.team_name : ''} assigned for today. Scan a Tank to begin.`);
     await loadConfig();
     return;
@@ -1081,8 +1412,6 @@ async function consumeScanResult(data) {
     pendingPiece = null;
     resumablePhase = null;
     pendingConfirmer = null;
-    selectedEmployeeForOut = null;
-    employeeOutMode = false;
     warn(
       data.confirmation_line ||
         data.message ||
@@ -1105,7 +1434,6 @@ async function consumeScanResult(data) {
     return;
   }
   if (data.action === 'piece_selected') {
-    employeeOutMode = false;
     if (data.session) session = data.session;
     if (data.pieces) pieces = data.pieces;
     if (data.piece_count != null) pieceCount = Number(data.piece_count) || pieces.length;
@@ -1208,11 +1536,14 @@ async function handleScan(raw) {
     openResolveQaQcModal();
     return;
   }
+  if (isEmployeeOutBarcode(value)) {
+    await openEmployeeOutModal();
+    return;
+  }
   const data = await postAction({
     action: 'scan',
     barcode: value,
     pending: { tank: pendingTank, piece: pendingPiece },
-    employee_out: employeeOutMode === true,
     ...confirmerPayload(),
   });
   if (!data) {
@@ -1249,12 +1580,11 @@ if (els.btnOpenNotes) {
 }
 if (els.btnShowPhases) {
   els.btnShowPhases.addEventListener('mousedown', (e) => e.preventDefault());
-  els.btnShowPhases.addEventListener('click', () => {
-    if (els.phasePanel) {
-      els.phasePanel.hidden = !els.phasePanel.hidden;
-      if (!els.phasePanel.hidden) renderPhases();
-    }
-    focusScanInput();
+  els.btnShowPhases.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    blurScanInputs();
+    openChangePhaseModal();
   });
 }
 if (els.btnSaveNote) els.btnSaveNote.addEventListener('click', () => void saveNoteModal());
@@ -1278,24 +1608,45 @@ if (els.btnCancelResolveQaQc) {
 if (els.btnEmployeeOut) {
   els.btnEmployeeOut.addEventListener('mousedown', (e) => e.preventDefault());
   els.btnEmployeeOut.addEventListener('click', () => {
-    const target = selectedEmployeeForOut || pendingConfirmer;
-    if (target && target.id) {
-      void postAction({
-        action: 'scan',
-        barcode: 'EMPLOYEE_OUT',
-        pending: { tank: pendingTank, piece: pendingPiece },
-        confirmer: target,
-      }).then((data) => {
-        if (data) void consumeScanResult(data);
-        focusScanInput();
-      });
-      return;
-    }
-    employeeOutMode = true;
-    selectedEmployeeForOut = null;
-    warn('Employee Out — scan employee barcode.');
-    renderUi();
+    void openEmployeeOutModal();
+  });
+}
+if (els.btnCancelEmployeeOut) {
+  els.btnCancelEmployeeOut.addEventListener('mousedown', (e) => e.preventDefault());
+  els.btnCancelEmployeeOut.addEventListener('click', () => {
+    closeEmployeeOutModal();
     focusScanInput();
+  });
+}
+if (els.btnConfirmEmployeeOut) {
+  els.btnConfirmEmployeeOut.addEventListener('mousedown', (e) => e.preventDefault());
+  els.btnConfirmEmployeeOut.addEventListener('click', () => void confirmEmployeeOut());
+}
+if (els.employeeOutModal) {
+  els.employeeOutModal.addEventListener('click', (e) => {
+    if (e.target === els.employeeOutModal) {
+      closeEmployeeOutModal();
+      focusScanInput();
+    }
+  });
+}
+if (els.btnCancelChangePhase) {
+  els.btnCancelChangePhase.addEventListener('mousedown', (e) => e.preventDefault());
+  els.btnCancelChangePhase.addEventListener('click', () => {
+    closeChangePhaseModal();
+    focusScanInput();
+  });
+}
+if (els.btnConfirmChangePhase) {
+  els.btnConfirmChangePhase.addEventListener('mousedown', (e) => e.preventDefault());
+  els.btnConfirmChangePhase.addEventListener('click', () => void confirmChangePhase());
+}
+if (els.changePhaseModal) {
+  els.changePhaseModal.addEventListener('click', (e) => {
+    if (e.target === els.changePhaseModal) {
+      closeChangePhaseModal();
+      focusScanInput();
+    }
   });
 }
 if (els.touchControls) {

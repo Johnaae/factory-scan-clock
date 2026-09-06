@@ -66,6 +66,42 @@
       .modal-note { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: none; align-items: center; justify-content: center; z-index: 80; padding: 16px; }
       .modal-note.show { display: flex; }
       .modal-note-card { background: #fff; border-radius: 14px; padding: 18px; width: min(480px, 100%); display: grid; gap: 10px; }
+      .employee-out-modal.show { backdrop-filter: blur(8px); background: rgba(15,23,42,.55); }
+      .employee-out-card { width: min(560px, 100%); max-height: min(85vh, 720px); overflow: hidden; }
+      .employee-out-list { display: grid; gap: 10px; max-height: min(52vh, 420px); overflow-y: auto; -webkit-overflow-scrolling: touch; }
+      .employee-out-row {
+        display: block; width: 100%; text-align: left; min-height: 76px;
+        padding: 14px 16px; border: 2px solid #cbd5e1; border-radius: 14px;
+        background: #fff; cursor: pointer; font: inherit;
+      }
+      .employee-out-row:hover, .employee-out-row:focus { border-color: #ea580c; background: #fff7ed; outline: none; }
+      .employee-out-name { display: block; font-size: 1.25rem; font-weight: 800; color: #1e3a5f; }
+      .employee-out-meta { display: block; margin-top: 4px; font-size: 0.95rem; font-weight: 700; color: #64748b; }
+      .employee-out-confirm-text { margin: 0; font-size: 1.15rem; font-weight: 800; color: #9a3412; line-height: 1.35; }
+      .employee-out-empty { margin: 0; font-size: 1.05rem; font-weight: 700; color: #64748b; }
+      .employee-out-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }
+      .employee-out-actions .btn-primary, .employee-out-actions .btn-secondary { min-height: 52px; font-size: 16px; font-weight: 800; }
+      .change-phase-modal.show { backdrop-filter: blur(8px); background: rgba(15,23,42,.55); }
+      .change-phase-card { width: min(560px, 100%); max-height: min(88vh, 760px); overflow: hidden; }
+      .change-phase-context { margin: 0; padding: 12px 14px; border-radius: 12px; background: #eff6ff; border: 1px solid #bfdbfe; }
+      .change-phase-context strong { display: block; font-size: 1.1rem; font-weight: 800; color: #1e3a5f; }
+      .change-phase-context span { display: block; margin-top: 4px; font-size: 0.95rem; font-weight: 700; color: #334155; }
+      .change-phase-list {
+        display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px;
+        max-height: min(48vh, 400px); overflow-y: auto; -webkit-overflow-scrolling: touch;
+      }
+      .change-phase-btn {
+        min-height: 64px; padding: 12px 10px; border: 2px solid #cbd5e1; border-radius: 14px;
+        background: #fff; cursor: pointer; font: inherit; font-size: 1.05rem; font-weight: 800; color: #1e3a5f;
+      }
+      .change-phase-btn:hover, .change-phase-btn:focus { border-color: #2563eb; background: #eff6ff; outline: none; }
+      .change-phase-btn.is-selected { border-color: #2563eb; background: #dbeafe; }
+      .change-phase-btn.is-current { border-color: #86efac; background: #f0fdf4; }
+      .change-phase-confirm-text { margin: 0; font-size: 1.1rem; font-weight: 800; color: #1e3a5f; line-height: 1.35; }
+      .change-phase-empty { margin: 0; font-size: 1.05rem; font-weight: 700; color: #64748b; }
+      .change-phase-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }
+      .change-phase-actions .btn-primary, .change-phase-actions .btn-secondary { min-height: 52px; font-size: 16px; font-weight: 800; }
+      @media (max-width: 480px) { .change-phase-list { grid-template-columns: 1fr; } }
       .lang-bar { margin-left: auto; }
       @media (max-width: 640px) { .wk-grid { grid-template-columns: 1fr; } }
     </style>
@@ -141,7 +177,7 @@
           <button type="button" class="btn-primary btn-touch" data-barcode="PHASE:TANK_COMPLETE" data-i18n="kiosk.tankComplete">Tank Complete</button>
           <button type="button" class="btn-secondary btn-touch" data-barcode="REASON:END_SHIFT" data-i18n="kiosk.endShift">End Shift</button>
           <div id="pieceTouchButtons" class="wk-piece-touch" aria-label="Piece selection"></div>
-          <button type="button" class="btn-secondary btn-touch btn-touch--employee-out" id="btnEmployeeOut" data-barcode="EMPLOYEE_OUT">Employee Out</button>
+          <button type="button" class="btn-secondary btn-touch btn-touch--employee-out" id="btnEmployeeOut">Employee Out</button>
           <button type="button" class="btn-secondary btn-touch" id="btnOpenNotes" data-i18n="kiosk.notes">Notes</button>
           <button type="button" class="btn-secondary btn-touch" id="btnShowPhases" data-i18n="kiosk.changePhase">Change Phase</button>
         </div>
@@ -207,7 +243,36 @@
         </div>
       </div>
     </div>
+    <div id="employeeOutModal" class="modal-note employee-out-modal" role="dialog" aria-modal="true" aria-labelledby="employeeOutTitle" hidden>
+      <div class="modal-note-card employee-out-card">
+        <h3 id="employeeOutTitle">Employee Out</h3>
+        <p class="muted" id="employeeOutHint" style="margin:0">Select an active employee. Production continues for the rest of the team.</p>
+        <div id="employeeOutList" class="employee-out-list"></div>
+        <p id="employeeOutEmpty" class="employee-out-empty" hidden>No active employees available.</p>
+        <p id="employeeOutConfirm" class="employee-out-confirm-text" hidden></p>
+        <div class="employee-out-actions">
+          <button type="button" class="btn-secondary" id="btnCancelEmployeeOut">Cancel</button>
+          <button type="button" class="btn-primary" id="btnConfirmEmployeeOut" hidden>Confirm Employee Out</button>
+        </div>
+      </div>
+    </div>
+    <div id="changePhaseModal" class="modal-note change-phase-modal" role="dialog" aria-modal="true" aria-labelledby="changePhaseTitle" hidden>
+      <div class="modal-note-card change-phase-card">
+        <h3 id="changePhaseTitle">Change Phase</h3>
+        <div id="changePhaseContext" class="change-phase-context" hidden>
+          <strong id="changePhaseTarget">—</strong>
+          <span id="changePhaseCurrent">Current Phase: —</span>
+        </div>
+        <p id="changePhaseEmpty" class="change-phase-empty" hidden></p>
+        <div id="changePhaseList" class="change-phase-list"></div>
+        <p id="changePhaseConfirm" class="change-phase-confirm-text" hidden></p>
+        <div class="change-phase-actions">
+          <button type="button" class="btn-secondary" id="btnCancelChangePhase">Cancel</button>
+          <button type="button" class="btn-primary" id="btnConfirmChangePhase" hidden>Confirm</button>
+        </div>
+      </div>
+    </div>
     <script src="/i18n.js"></script>
-    <script src="/machine-kiosk.js?v=10"></script>
+    <script src="/machine-kiosk.js?v=12"></script>
   </body>
 </html>

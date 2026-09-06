@@ -319,35 +319,12 @@
         <div class="card-header">
           <div class="card-header-main">
             <h2 class="card-title">Kiosk PIN Codes</h2>
-            <p class="card-kicker">Leave blank to keep current PIN.</p>
+            <p class="card-kicker">Active winding machines only. Leave blank to keep the current PIN.</p>
           </div>
         </div>
         <div class="card-body">
-          <div class="manager-pin-grid">
-            <article class="manager-subcard">
-              <h3 class="manager-subcard-title">Winding Machine 01</h3>
-              <div class="field">
-                <label for="pinWm1">New PIN</label>
-                <input id="pinWm1" type="password" inputmode="numeric" maxlength="6" placeholder="4-6 digit PIN" autocomplete="new-password" />
-              </div>
-              <label class="pw-inline manager-checkbox"><input id="showPinWm1" type="checkbox" /> Show PIN</label>
-            </article>
-            <article class="manager-subcard">
-              <h3 class="manager-subcard-title">Winding Machine 02</h3>
-              <div class="field">
-                <label for="pinWm2">New PIN</label>
-                <input id="pinWm2" type="password" inputmode="numeric" maxlength="6" placeholder="4-6 digit PIN" autocomplete="new-password" />
-              </div>
-              <label class="pw-inline manager-checkbox"><input id="showPinWm2" type="checkbox" /> Show PIN</label>
-            </article>
-            <article class="manager-subcard">
-              <h3 class="manager-subcard-title">Winding Machine 03</h3>
-              <div class="field">
-                <label for="pinWm3">New PIN</label>
-                <input id="pinWm3" type="password" inputmode="numeric" maxlength="6" placeholder="4-6 digit PIN" autocomplete="new-password" />
-              </div>
-              <label class="pw-inline manager-checkbox"><input id="showPinWm3" type="checkbox" /> Show PIN</label>
-            </article>
+          <div class="manager-pin-grid" id="kioskPinGrid">
+            <p class="muted" id="kioskPinLoading">Loading machines…</p>
           </div>
           <div class="manager-pin-actions">
             <button id="btnSaveKioskPins" class="btn btn-primary" type="button">Save PIN Changes</button>
@@ -365,6 +342,8 @@
           <h3 class="modal-title" id="tankReportTitle">Tank Report</h3>
           <div class="toolbar">
             <button id="btnPrintTankReport" class="btn btn-sm" type="button">Export PDF</button>
+            <button id="btnExportTankReportCsv" class="btn btn-sm" type="button">Export CSV</button>
+            <button id="btnExportTankReportXlsx" class="btn btn-sm" type="button">Export Excel</button>
             <button id="btnCloseTankReport" class="btn btn-sm" type="button">Close</button>
           </div>
         </div>
@@ -482,11 +461,11 @@
     <script src="/session-details.js?v=5"></script>
     <script src="/phase-time-editor.js?v=3"></script>
     <script src="/team-member-picker.js?v=6"></script>
-    <script src="/team-member-details.js"></script>
+    <script src="/team-member-details.js?v=2"></script>
     <script src="/machine-dashboard.js?v=10"></script>
     <script src="/team-dashboard.js?v=5"></script>
     <script src="/alert-sound.js"></script>
-    <script src="/manager.js?v=18"></script>
+    <script src="/manager.js?v=21"></script>
     <script>
       document.addEventListener('DOMContentLoaded', () => {
         if (window.FactoryI18n) {

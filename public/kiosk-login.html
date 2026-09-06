@@ -371,10 +371,7 @@
               <path d="M12 12a2.4 2.4 0 1 0 0-4.8 2.4 2.4 0 0 0 0 4.8Z" stroke-width="1.8"></path>
             </svg>
             <select id="kioskArea" name="area" required>
-              <option value="">Select machine...</option>
-              <option value="Winding Machine 01">Winding Machine 01</option>
-              <option value="Winding Machine 02">Winding Machine 02</option>
-              <option value="Winding Machine 03">Winding Machine 03</option>
+              <option value="">Loading machines...</option>
             </select>
           </div>
           <label for="kioskPin">PIN (4-6 digits)</label>
@@ -408,33 +405,81 @@
       const hintKiosk = document.getElementById('hintKiosk');
       const showKioskPin = document.getElementById('showKioskPin');
       const kioskPinInput = document.getElementById('kioskPin');
+      const kioskAreaSelect = document.getElementById('kioskArea');
+      let loginMachines = [];
+
       showKioskPin.addEventListener('change', () => {
         kioskPinInput.type = showKioskPin.checked ? 'text' : 'password';
       });
+
+      async function loadLoginMachines() {
+        try {
+          const res = await fetch('/api/auth/kiosk-login-machines', {
+            headers: { Accept: 'application/json' },
+            cache: 'no-store',
+          });
+          const data = await res.json().catch(() => ({}));
+          loginMachines = res.ok && data.ok && Array.isArray(data.machines) ? data.machines : [];
+        } catch (_err) {
+          loginMachines = [];
+        }
+        if (!kioskAreaSelect) return;
+        if (!loginMachines.length) {
+          kioskAreaSelect.innerHTML = '<option value="">No active machines found</option>';
+          return;
+        }
+        const opts = ['<option value="">Select machine...</option>'].concat(
+          loginMachines.map(
+            (m) =>
+              `<option value="${String(m.id)}" data-slug="${String(m.slug || '').replace(/"/g, '&quot;')}">${String(
+                m.name || ''
+              )
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')}</option>`
+          )
+        );
+        kioskAreaSelect.innerHTML = opts.join('');
+        try {
+          const savedSlug = localStorage.getItem('windingKioskSlug');
+          if (savedSlug) {
+            const match = loginMachines.find((m) => String(m.slug) === String(savedSlug));
+            if (match) kioskAreaSelect.value = String(match.id);
+          }
+        } catch (_err) {
+          /* ignore */
+        }
+      }
+
       panelKiosk.addEventListener('submit', async (e) => {
         e.preventDefault();
         hintKiosk.textContent = '';
-        const area = document.getElementById('kioskArea').value.trim();
+        const machineId = Number(kioskAreaSelect.value);
         const pin = kioskPinInput.value.trim();
+        const selected = loginMachines.find((m) => Number(m.id) === machineId) || null;
+        if (!selected) {
+          hintKiosk.textContent = 'Select a winding machine.';
+          return;
+        }
         const res = await fetch('/api/auth/login-kiosk-pin', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ area, pin }),
+          body: JSON.stringify({
+            machine_id: selected.id,
+            machine_slug: selected.slug,
+            area: selected.name,
+            pin,
+          }),
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data.ok) {
           hintKiosk.textContent = (data && data.message) || 'Login failed. Check machine and PIN.';
           return;
         }
-        const slugByArea = {
-          'Winding Machine 01': 'winding-machine-01',
-          'Winding Machine 02': 'winding-machine-02',
-          'Winding Machine 03': 'winding-machine-03',
-        };
-        const slug = data.machine_slug || slugByArea[area] || null;
+        const slug = (data.machine && data.machine.slug) || data.machine_slug || selected.slug || null;
         try {
           if (slug) localStorage.setItem('windingKioskSlug', slug);
-          if (area) localStorage.setItem('windingKioskArea', area);
+          if (selected.name) localStorage.setItem('windingKioskArea', selected.name);
         } catch (_err) {
           /* ignore storage errors */
         }
@@ -443,6 +488,8 @@
           (slug ? '/kiosk/machine/' + encodeURIComponent(slug) : '/kiosk-login');
         window.location.href = redirect;
       });
+
+      void loadLoginMachines();
     </script>
     <script src="/pwa.js"></script>
   </body>

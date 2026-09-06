@@ -27,6 +27,51 @@ function createTeamMembershipAndLabor(pool, helpers = {}) {
     return Math.max(0, end - start);
   }
 
+  /** Always "Xh Ym" from milliseconds (minutes rounded; never treat decimal hour digits as minutes). */
+  function formatXhYmFromMs(ms) {
+    const totalMin = Math.round(Math.max(0, Number(ms) || 0) / 60000);
+    return `${Math.floor(totalMin / 60)}h ${totalMin % 60}m`;
+  }
+
+  /**
+   * Merge overlapping [start, end) intervals and return total covered ms.
+   * Ensures one employee-minute counts once across concurrent piece sessions.
+   */
+  function mergeIntervalsMs(intervals) {
+    const sorted = (intervals || [])
+      .filter((iv) => iv && Number.isFinite(iv.start) && Number.isFinite(iv.end) && iv.end > iv.start)
+      .map((iv) => ({ start: iv.start, end: iv.end }))
+      .sort((a, b) => a.start - b.start || a.end - b.end);
+    if (!sorted.length) return 0;
+    let total = 0;
+    let curStart = sorted[0].start;
+    let curEnd = sorted[0].end;
+    for (let i = 1; i < sorted.length; i += 1) {
+      const iv = sorted[i];
+      if (iv.start <= curEnd) {
+        curEnd = Math.max(curEnd, iv.end);
+      } else {
+        total += curEnd - curStart;
+        curStart = iv.start;
+        curEnd = iv.end;
+      }
+    }
+    total += curEnd - curStart;
+    return total;
+  }
+
+  function sessionWindowMs(row, closeMs = Date.now()) {
+    const startMs = toMs(row.started_at);
+    let endMs;
+    if (row.status === 'finished' && row.finished_at) endMs = toMs(row.finished_at);
+    else if (row.status === 'stopped' && row.stopped_at) endMs = toMs(row.stopped_at);
+    else if (row.finished_at) endMs = toMs(row.finished_at);
+    else if (row.stopped_at) endMs = toMs(row.stopped_at);
+    else endMs = closeMs;
+    if (startMs == null || endMs == null || endMs <= startMs) return null;
+    return { startMs, endMs };
+  }
+
   async function backfillOpenMembershipsIfNeeded() {
     await pool.query(
       `INSERT INTO employee_team_memberships (employee_id, team_id, joined_at, left_at, source, reason)
@@ -315,6 +360,40 @@ function createTeamMembershipAndLabor(pool, helpers = {}) {
     return { closed: rowCount || 0 };
   }
 
+  /**
+   * Employees currently on shift for a team (open membership, not yet Employee Out).
+   * Default roster membership is not enough — they must have left_at IS NULL.
+   */
+  async function listOpenShiftEmployeesForTeam(teamId) {
+    const tid = Number(teamId);
+    if (!Number.isInteger(tid) || tid <= 0) return [];
+    const { rows } = await pool.query(
+      `SELECT e.id, e.code, e.name, COALESCE(NULLIF(TRIM(tm.role), ''), 'Operator') AS role, m.joined_at
+       FROM employee_team_memberships m
+       JOIN employees e ON e.id = m.employee_id
+       LEFT JOIN team_members tm
+         ON tm.team_id = m.team_id AND tm.employee_id = m.employee_id AND tm.active = 1
+       WHERE m.team_id = $1 AND m.left_at IS NULL AND e.is_active = 1
+       ORDER BY LOWER(e.name) ASC, e.id ASC`,
+      [tid]
+    );
+    const seen = new Set();
+    const out = [];
+    for (const r of rows) {
+      const id = Number(r.id);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push({
+        id,
+        code: r.code || null,
+        name: r.name,
+        role: r.role || 'Operator',
+        joined_at: r.joined_at,
+      });
+    }
+    return out;
+  }
+
   async function getEmployeeActiveShiftTeam(employeeId) {
     const empId = Number(employeeId);
     if (!Number.isInteger(empId) || empId <= 0) return null;
@@ -356,20 +435,18 @@ function createTeamMembershipAndLabor(pool, helpers = {}) {
       [id]
     );
 
-    let total = 0;
+    // Collect calendar intervals first, then union so concurrent piece sessions
+    // on the same team/winder do not multiply the same real-world minute.
+    const intervals = [];
     for (const row of sessions) {
       const code = String(row.activity_code || '').trim().toUpperCase();
       if (typeof isProductionPhaseCode === 'function' && !isProductionPhaseCode(code)) continue;
 
-      const startMs = toMs(row.started_at);
-      let endMs;
-      if (row.status === 'finished' && row.finished_at) endMs = toMs(row.finished_at);
-      else if (row.status === 'stopped' && row.stopped_at) endMs = toMs(row.stopped_at);
-      else endMs = closeMs;
-      if (startMs == null || endMs == null || endMs <= startMs) continue;
+      const win = sessionWindowMs(row, closeMs);
+      if (!win) continue;
 
-      const boundStart = Math.max(startMs, ws);
-      const boundEnd = Math.min(endMs, we, closeMs);
+      const boundStart = Math.max(win.startMs, ws);
+      const boundEnd = Math.min(win.endMs, we, closeMs);
       if (boundEnd <= boundStart) continue;
 
       const teamId = Number(row.team_id);
@@ -378,35 +455,35 @@ function createTeamMembershipAndLabor(pool, helpers = {}) {
         const joinMs = toMs(mem.joined_at);
         const leaveMs = mem.left_at ? toMs(mem.left_at) : closeMs;
         if (joinMs == null || leaveMs == null) continue;
-        total += overlapMs(boundStart, boundEnd, joinMs, leaveMs);
+        const start = Math.max(boundStart, joinMs);
+        const end = Math.min(boundEnd, leaveMs);
+        if (end > start) intervals.push({ start, end });
       }
     }
-    return total;
+    return mergeIntervalsMs(intervals);
   }
 
   async function employeeSessionLaborMs(employeeId, sessionRow, closeMs = Date.now()) {
     const id = Number(employeeId);
     if (!Number.isInteger(id) || id <= 0 || !sessionRow) return 0;
-    const startMs = toMs(sessionRow.started_at);
-    let endMs;
-    if (sessionRow.status === 'finished' && sessionRow.finished_at) endMs = toMs(sessionRow.finished_at);
-    else if (sessionRow.status === 'stopped' && sessionRow.stopped_at) endMs = toMs(sessionRow.stopped_at);
-    else endMs = closeMs;
-    if (startMs == null || endMs == null || endMs <= startMs) return 0;
+    const win = sessionWindowMs(sessionRow, closeMs);
+    if (!win) return 0;
 
     const { rows: memberships } = await pool.query(
       `SELECT joined_at, left_at FROM employee_team_memberships
        WHERE employee_id = $1 AND team_id = $2`,
       [id, Number(sessionRow.team_id)]
     );
-    let labor = 0;
+    const intervals = [];
     for (const mem of memberships) {
       const joinMs = toMs(mem.joined_at);
       const leaveMs = mem.left_at ? toMs(mem.left_at) : closeMs;
       if (joinMs == null || leaveMs == null) continue;
-      labor += overlapMs(startMs, endMs, joinMs, leaveMs);
+      const start = Math.max(win.startMs, joinMs);
+      const end = Math.min(win.endMs, leaveMs);
+      if (end > start) intervals.push({ start, end });
     }
-    return labor;
+    return mergeIntervalsMs(intervals);
   }
 
   async function closeOpenScanClockOut(client, employee, ts, reason = 'Employee Out') {
@@ -457,9 +534,10 @@ function createTeamMembershipAndLabor(pool, helpers = {}) {
 
   /**
    * Membership-aware labor for a tank.
-   * Total labor hours = sum of employee time overlapping productive sessions for their team.
-   * Break/Lunch/End Shift/Downtime sessions are stopped — wall clock ends at stop, so pause time
-   * is not counted in sessionElapsedMs for the open paused session.
+   * Piece/running time stays piece-scoped (sum of session durations).
+   * Employee labor uses interval-union so concurrent pieces on the same
+   * team/winder do not double-count the same real-world minute.
+   * Break/Lunch/End Shift/Downtime sessions are stopped — wall clock ends at stop.
    */
   async function computeMembershipAwareTankLabor(tankId) {
     const tid = Number(tankId);
@@ -477,6 +555,7 @@ function createTeamMembershipAndLabor(pool, helpers = {}) {
     let totalRunningMs = 0;
     const byEmployee = new Map();
     const byPiece = new Map();
+    const closeMs = Date.now();
 
     for (const row of sessions) {
       const code = String(row.activity_code || '').trim().toUpperCase();
@@ -532,11 +611,16 @@ function createTeamMembershipAndLabor(pool, helpers = {}) {
         const msJoin = toMs(mem.joined_at);
         const msLeave = toMs(mem.left_at || nowIso());
         if (msJoin == null || msLeave == null) continue;
-        // Scale productive time by membership overlap ratio within session window.
+        const laborStart = Math.max(startMs, msJoin);
+        const laborEnd = Math.min(endMs, msLeave, closeMs);
+        if (laborEnd <= laborStart) continue;
+
+        // Piece-scoped attribution (informational; not used for employee/tank totals).
         const windowMs = Math.max(1, endMs - startMs);
-        const ov = overlapMs(startMs, endMs, msJoin, msLeave);
-        const laborMs = Math.round(productiveMs * (ov / windowMs));
-        if (laborMs <= 0) continue;
+        const ov = laborEnd - laborStart;
+        const pieceLaborMs = Math.round(productiveMs * (ov / windowMs));
+        byPiece.get(pieceKey).labor_ms += pieceLaborMs;
+
         const key = Number(mem.employee_id);
         if (!byEmployee.has(key)) {
           byEmployee.set(key, {
@@ -545,29 +629,33 @@ function createTeamMembershipAndLabor(pool, helpers = {}) {
             employee_name: mem.employee_name,
             team_id: Number(row.team_id),
             team_name: row.team_name,
-            total_ms: 0,
-            teams: new Map(),
+            intervals: [],
+            teamIntervals: new Map(),
           });
         }
         const entry = byEmployee.get(key);
-        entry.total_ms += laborMs;
+        entry.intervals.push({ start: laborStart, end: laborEnd });
         const tk = String(row.team_name || '');
-        entry.teams.set(tk, (entry.teams.get(tk) || 0) + laborMs);
-        byPiece.get(pieceKey).labor_ms += laborMs;
+        if (!entry.teamIntervals.has(tk)) entry.teamIntervals.set(tk, []);
+        entry.teamIntervals.get(tk).push({ start: laborStart, end: laborEnd });
       }
     }
 
     const member_breakdown = [...byEmployee.values()]
-      .map((e) => ({
-        employee_id: e.employee_id,
-        employee_code: e.employee_code,
-        employee_name: e.employee_name,
-        team_name: [...e.teams.entries()]
-          .map(([name, ms]) => `${name} (${roundHours2(ms / 3600000)}h)`)
-          .join(', '),
-        total_hours: roundHours2(e.total_ms / 3600000),
-        total_ms: e.total_ms,
-      }))
+      .map((e) => {
+        const totalMs = mergeIntervalsMs(e.intervals);
+        return {
+          employee_id: e.employee_id,
+          employee_code: e.employee_code,
+          employee_name: e.employee_name,
+          team_name: [...e.teamIntervals.entries()]
+            .map(([name, ivs]) => `${name} (${formatXhYmFromMs(mergeIntervalsMs(ivs))})`)
+            .join(', '),
+          total_hours: roundHours2(totalMs / 3600000),
+          total_hours_display: formatXhYmFromMs(totalMs),
+          total_ms: totalMs,
+        };
+      })
       .sort((a, b) => b.total_hours - a.total_hours);
 
     const totalLaborMs = member_breakdown.reduce((s, m) => s + (Number(m.total_ms) || 0), 0);
@@ -575,16 +663,10 @@ function createTeamMembershipAndLabor(pool, helpers = {}) {
     return {
       total_running_ms: totalRunningMs,
       total_running_hours: roundHours2(totalRunningMs / 3600000),
-      total_running_display:
-        typeof formatDurationSummary === 'function'
-          ? formatDurationSummary(totalRunningMs)
-          : roundHours2(totalRunningMs / 3600000) + 'h',
+      total_running_display: formatXhYmFromMs(totalRunningMs),
       total_labor_ms: totalLaborMs,
       total_labor_hours: roundHours2(totalLaborMs / 3600000),
-      total_labor_display:
-        typeof formatDurationSummary === 'function'
-          ? formatDurationSummary(totalLaborMs)
-          : roundHours2(totalLaborMs / 3600000) + 'h',
+      total_labor_display: formatXhYmFromMs(totalLaborMs),
       member_breakdown,
       hours_per_piece: [...byPiece.values()].map((p) => ({
         piece_number: p.piece_number,
@@ -768,6 +850,7 @@ function createTeamMembershipAndLabor(pool, helpers = {}) {
     backfillOpenMembershipsIfNeeded,
     transferEmployeeToTeam,
     employeeOutFromTeam,
+    listOpenShiftEmployeesForTeam,
     getEmployeeActiveShiftTeam,
     startTeamShiftMemberships,
     closeTeamShiftMemberships,
@@ -775,6 +858,7 @@ function createTeamMembershipAndLabor(pool, helpers = {}) {
     computeMembershipAwareTankLabor,
     computeEmployeeMembershipProductionMs,
     employeeSessionLaborMs,
+    mergeIntervalsMs,
     editMachineSessionTimes,
     listSessionEdits,
   };

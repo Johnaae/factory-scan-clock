@@ -5,6 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Winding Machines — Factory Manager</title>
     <link rel="stylesheet" href="/styles.css" />
+    <style>
+      .ma-toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+      .ma-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+      .ma-actions .btn { min-height: 36px; }
+      .ma-inactive-row { opacity: 0.72; background: #f8fafc; }
+      .ma-badge { display: inline-block; margin-left: 6px; padding: 2px 8px; border-radius: 999px; font-size: 0.75rem; font-weight: 700; }
+      .ma-badge--inactive { background: #e2e8f0; color: #475569; }
+      .ma-modal { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: none; align-items: center; justify-content: center; z-index: 80; padding: 16px; }
+      .ma-modal.show { display: flex; }
+      .ma-modal-card { background: #fff; border-radius: 14px; padding: 18px; width: min(480px, 100%); display: grid; gap: 12px; }
+      .ma-modal-card h3 { margin: 0; }
+      .ma-modal-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }
+    </style>
   </head>
   <body>
     <header class="topbar">
@@ -40,6 +53,11 @@
       <section class="card manager-card">
         <div class="card-header"><h2 class="card-title">Configured machines</h2></div>
         <div class="card-body card-body--flush">
+          <div class="ma-toolbar" style="padding: 12px 16px 0;">
+            <label class="manager-inline-check">
+              <input id="showInactiveMachines" type="checkbox" /> Show inactive machines
+            </label>
+          </div>
           <div class="table-wrap table-scroll manager-table-wrap">
             <table class="manager-table">
               <thead>
@@ -51,6 +69,16 @@
         </div>
       </section>
     </main>
-    <script src="/machine-areas.js"></script>
+    <div id="removeMachineModal" class="ma-modal" role="dialog" aria-modal="true" hidden>
+      <div class="ma-modal-card">
+        <h3 id="removeMachineTitle">Remove machine</h3>
+        <p id="removeMachineBody" class="muted" style="margin:0"></p>
+        <div class="ma-modal-actions">
+          <button type="button" class="btn btn-secondary" id="btnCancelRemoveMachine">Cancel</button>
+          <button type="button" class="btn btn-primary" id="btnConfirmRemoveMachine">Confirm</button>
+        </div>
+      </div>
+    </div>
+    <script src="/machine-areas.js?v=2"></script>
   </body>
 </html>

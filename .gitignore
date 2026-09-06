@@ -15,6 +15,8 @@ installer-assets/**/*.tmp
 
 logs/
 
+tmp-exports/
+
 scripts/test-*.js
 scripts/debug-*.js
 scripts/check-*.js

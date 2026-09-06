@@ -20,9 +20,14 @@
     return Number.isFinite(v) ? `$${v.toFixed(2)}` : '$0.00';
   }
 
-  function hours(n) {
+  /** Display-only: decimal hours → "Xh Ym" (rounded total minutes). */
+  function formatHoursMinutes(n) {
     const v = Number(n);
-    return Number.isFinite(v) ? v.toFixed(2) : '0.00';
+    if (!Number.isFinite(v) || v <= 0) return '0h 0m';
+    const totalMin = Math.round(v * 60);
+    const h = Math.floor(totalMin / 60);
+    const m = totalMin % 60;
+    return `${h}h ${m}m`;
   }
 
   function ensureModal() {
@@ -93,8 +98,8 @@
         ${row('Employee code', escapeHtml(m.code || '—'))}
         ${row('Status', `<span class="team-member-status ${statusCls}">${statusText}</span>`)}
         ${row('Position / role', escapeHtml(m.role || '—'))}
-        ${row('Today hours', hours(m.today_hours))}
-        ${row('Week hours', hours(m.week_hours))}
+        ${row('Today hours', formatHoursMinutes(m.today_hours))}
+        ${row('Week hours', formatHoursMinutes(m.week_hours))}
         ${row('Hourly rate', money(m.hourly_rate))}
         ${row('Estimated pay today', money(m.estimated_pay_today))}
         ${row('Estimated pay this week', money(m.estimated_pay_week))}

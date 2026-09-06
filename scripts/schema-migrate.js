@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS machines (
   kiosk_slug TEXT UNIQUE NOT NULL,
   sort_order INTEGER NOT NULL DEFAULT 0,
   active INTEGER NOT NULL DEFAULT 1,
+  pin_hash TEXT,
   assigned_team_id BIGINT,
   assigned_team_day TEXT,
   assigned_team_at TIMESTAMPTZ,
@@ -241,6 +242,7 @@ ALTER TABLE tanks ADD COLUMN IF NOT EXISTS notes TEXT;
 ALTER TABLE tanks ADD COLUMN IF NOT EXISTS piece_count INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE tanks ADD COLUMN IF NOT EXISTS current_piece_number INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE machines ADD COLUMN IF NOT EXISTS active_tank_id BIGINT;
+ALTER TABLE machines ADD COLUMN IF NOT EXISTS pin_hash TEXT;
 ALTER TABLE machine_sessions ADD COLUMN IF NOT EXISTS piece_number INTEGER;
 ALTER TABLE machine_sessions ADD COLUMN IF NOT EXISTS piece_id BIGINT;
 ALTER TABLE machine_sessions ADD COLUMN IF NOT EXISTS notes TEXT;

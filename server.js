@@ -14,6 +14,11 @@ const {
   buildTankReportPdfBuffer,
 } = require('./scripts/production-report-pdf');
 const {
+  tankReportBaseName,
+  buildTankReportCsv,
+  buildTankReportXlsxBuffer,
+} = require('./scripts/tank-report-exports');
+const {
   createPoolOptions,
   logDatabaseBootInfo,
   withDbRetry,
@@ -260,10 +265,110 @@ function isWindingMachineKioskArea(area) {
 }
 
 function windingMachineSlugForArea(areaName) {
-  const canonical = normalizeWindingMachineAreaName(String(areaName || '').trim());
+  const canonical = normalizeWindingMachineAreaName(String(areaName || '').trim()) || String(areaName || '').trim();
   const spec = WINDING_MACHINES.find((m) => m.areaName === canonical);
   if (spec && spec.kioskSlug) return spec.kioskSlug;
   return slugFromMachineName(canonical);
+}
+
+const WINDING_KIOSK_USERNAMES = KIOSK_AREA_PROFILES.filter((p) =>
+  isWindingMachineAreaName(p.area_name)
+).map((p) => p.username);
+
+async function lookupActiveManagedMachine(opts = {}) {
+  const machineId = opts.machine_id != null ? Number(opts.machine_id) : null;
+  const slug = opts.slug ? String(opts.slug).trim().toLowerCase() : '';
+  const area = opts.area ? String(opts.area).trim() : '';
+  const selectCols = `id, name, code, barcode, kiosk_slug, sort_order, active, pin_hash`;
+  if (Number.isInteger(machineId) && machineId > 0) {
+    const { rows } = await pool.query(
+      `SELECT ${selectCols}
+       FROM machines
+       WHERE id = $1 AND active = 1
+         AND NOT (
+           UPPER(TRIM(COALESCE(code, ''))) LIKE 'WS-%'
+           OR name ILIKE 'Winding Station%'
+         )
+       LIMIT 1`,
+      [machineId]
+    );
+    return rows[0] || null;
+  }
+  if (slug) {
+    const { rows } = await pool.query(
+      `SELECT ${selectCols}
+       FROM machines
+       WHERE LOWER(TRIM(kiosk_slug)) = $1 AND active = 1
+         AND NOT (
+           UPPER(TRIM(COALESCE(code, ''))) LIKE 'WS-%'
+           OR name ILIKE 'Winding Station%'
+         )
+       LIMIT 1`,
+      [slug]
+    );
+    return rows[0] || null;
+  }
+  if (area && isWindingMachineAreaName(area)) {
+    const canonical = normalizeWindingMachineAreaName(area) || area;
+    const areaSlug = slugFromMachineName(canonical);
+    const { rows } = await pool.query(
+      `SELECT ${selectCols}
+       FROM machines
+       WHERE active = 1
+         AND (
+           name = $1 OR LOWER(TRIM(name)) = LOWER($1) OR LOWER(TRIM(kiosk_slug)) = $2
+         )
+         AND NOT (
+           UPPER(TRIM(COALESCE(code, ''))) LIKE 'WS-%'
+           OR name ILIKE 'Winding Station%'
+         )
+       ORDER BY sort_order ASC, id ASC
+       LIMIT 1`,
+      [canonical, areaSlug]
+    );
+    return rows[0] || null;
+  }
+  return null;
+}
+
+function machineHasPinConfigured(machine) {
+  return !!(machine && machine.pin_hash && String(machine.pin_hash).trim());
+}
+
+function verifyMachineKioskPin(machine, pinRaw) {
+  if (!machineHasPinConfigured(machine)) {
+    return { ok: false, error: 'pin_not_configured', message: 'PIN not configured for this machine. Ask a manager to set a PIN in Kiosk PIN Codes.' };
+  }
+  if (!verifyPassword(String(pinRaw || ''), machine.pin_hash)) {
+    return { ok: false, error: 'invalid_credentials', message: 'Incorrect PIN.' };
+  }
+  return { ok: true };
+}
+
+async function getSharedWindingKioskUser() {
+  for (const uname of WINDING_KIOSK_USERNAMES) {
+    const user = await getUserByUsername(uname);
+    if (user && user.is_active && String(user.role).toUpperCase() === ROLE.KIOSK) return user;
+  }
+  return null;
+}
+
+/** Ensure machines.pin_hash exists and copy legacy user PINs onto matching machines once. */
+async function ensureMachineKioskPins() {
+  await pool.query(`ALTER TABLE machines ADD COLUMN IF NOT EXISTS pin_hash TEXT`);
+  const ts = nowIso();
+  for (const profile of KIOSK_AREA_PROFILES) {
+    if (!isWindingMachineAreaName(profile.area_name)) continue;
+    const user = await getUserByUsername(profile.username);
+    if (!user || !user.pin_hash || !String(user.pin_hash).trim()) continue;
+    await pool.query(
+      `UPDATE machines
+       SET pin_hash = $1, updated_at = $2::timestamptz
+       WHERE name = $3
+         AND (pin_hash IS NULL OR TRIM(COALESCE(pin_hash, '')) = '')`,
+      [user.pin_hash, ts, profile.area_name]
+    );
+  }
 }
 
 function kioskMachinePathForArea(areaName) {
@@ -2726,6 +2831,7 @@ async function runSeedIfNeeded() {
   if (already) {
     // Fill missing PIN hashes only — never rewrite profiles every request.
     await ensureKioskDefaultPins();
+    await ensureMachineKioskPins();
     return { skipped: true };
   }
   await seedIfEmpty();
@@ -2733,6 +2839,7 @@ async function runSeedIfNeeded() {
   await ensureKioskAreaProfiles();
   await ensureKioskDefaultPins();
   await seedWindingDefaults();
+  await ensureMachineKioskPins();
   return { skipped: false };
 }
 
@@ -4510,7 +4617,32 @@ app.post('/api/auth/login', async (req, res) => {
 });
 
 /**
- * Kiosk quick login: area + 4–6 digit PIN (stored hashed). Rate-limited on failures per IP.
+ * Active winding machines for kiosk PIN login dropdown (no auth required).
+ */
+app.get('/api/auth/kiosk-login-machines', async (_req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, name, code, barcode, kiosk_slug, sort_order, active
+       FROM machines
+       WHERE active = 1
+         AND NOT (
+           UPPER(TRIM(COALESCE(code, ''))) LIKE 'WS-%'
+           OR name ILIKE 'Winding Station%'
+         )
+       ORDER BY sort_order ASC, name ASC`
+    );
+    return res.json({
+      ok: true,
+      machines: rows.map(mapMachineForClient),
+    });
+  } catch (err) {
+    console.error('[kiosk-login-machines]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load machines.' });
+  }
+});
+
+/**
+ * Kiosk quick login: machine + 4–6 digit PIN (stored hashed). Rate-limited on failures per IP.
  */
 app.post('/api/auth/login-kiosk-pin', async (req, res) => {
   const ip = clientIp(req);
@@ -4519,15 +4651,77 @@ app.post('/api/auth/login-kiosk-pin', async (req, res) => {
       .status(429)
       .json({ ok: false, error: 'rate_limited', message: 'Too many PIN attempts. Try again in about a minute.' });
   }
-  const area = String(req.body && req.body.area != null ? req.body.area : '').trim();
-  const pinRaw = String(req.body && req.body.pin != null ? req.body.pin : '').trim();
+  const body = req.body || {};
+  const pinRaw = String(body.pin != null ? body.pin : '').trim();
+  const area = String(body.area != null ? body.area : '').trim();
+  const machineId = body.machine_id != null ? Number(body.machine_id) : null;
+  const machineSlug = String(body.machine_slug || body.slug || '')
+    .trim()
+    .toLowerCase();
+
+  if (!/^\d{4,6}$/.test(pinRaw)) {
+    recordPinFailure(ip);
+    return res.status(400).json({ ok: false, error: 'validation', message: 'Select a machine and enter a 4–6 digit PIN.' });
+  }
+
+  const machine = await lookupActiveManagedMachine({
+    machine_id: machineId,
+    slug: machineSlug,
+    area,
+  });
+
+  if (machine) {
+    const pinCheck = verifyMachineKioskPin(machine, pinRaw);
+    if (!pinCheck.ok) {
+      recordPinFailure(ip);
+      return res.status(401).json({
+        ok: false,
+        error: pinCheck.error || 'invalid_credentials',
+        message: pinCheck.message || 'Incorrect PIN.',
+      });
+    }
+    const user = await getSharedWindingKioskUser();
+    if (!user) {
+      recordPinFailure(ip);
+      return res.status(500).json({
+        ok: false,
+        error: 'server_error',
+        message: 'Kiosk login is not configured. Contact a manager.',
+      });
+    }
+    pinRateLimitReset(ip);
+    const slug = String(machine.kiosk_slug || slugFromMachineName(machine.name))
+      .trim()
+      .toLowerCase();
+    req.session.kiosk_user = {
+      id: user.id,
+      username: user.username,
+      role: user.role,
+      station_name: `${machine.name} Kiosk`,
+      area_name: machine.name,
+    };
+    req.session.machine_kiosk = {
+      machine_id: Number(machine.id),
+      slug,
+      machine_name: machine.name,
+    };
+    return res.json({
+      ok: true,
+      role: ROLE.KIOSK,
+      redirect: kioskUrlForSlug(slug),
+      machine_slug: slug,
+      machine: mapMachineForClient(machine),
+    });
+  }
+
+  // Legacy non-winding areas (Assembly / QA/QC / Shipping)
   const username =
     KIOSK_AREA_TO_USERNAME[area] ||
     KIOSK_AREA_TO_USERNAME[normalizeWindingMachineAreaName(area)] ||
     KIOSK_AREA_TO_USERNAME[normalizeKioskAreaName(area)];
-  if (!username || !/^\d{4,6}$/.test(pinRaw)) {
+  if (!username) {
     recordPinFailure(ip);
-    return res.status(400).json({ ok: false, error: 'validation', message: 'Select an area and enter a 4–6 digit PIN.' });
+    return res.status(400).json({ ok: false, error: 'validation', message: 'Select a machine and enter a 4–6 digit PIN.' });
   }
   const user = await getUserByUsername(username);
   if (!user || !user.is_active || String(user.role).toUpperCase() !== ROLE.KIOSK) {
@@ -4546,14 +4740,14 @@ app.post('/api/auth/login-kiosk-pin', async (req, res) => {
     station_name: user.station_name || null,
     area_name: user.area_name || null,
   };
-  const machineSlug = isWindingMachineKioskArea(req.session.kiosk_user.area_name)
+  const redirectSlug = isWindingMachineKioskArea(req.session.kiosk_user.area_name)
     ? windingMachineSlugForArea(req.session.kiosk_user.area_name)
     : null;
   return res.json({
     ok: true,
     role: ROLE.KIOSK,
     redirect: kioskLandingPathForUser(req.session.kiosk_user),
-    machine_slug: machineSlug,
+    machine_slug: redirectSlug,
   });
 });
 
@@ -4742,7 +4936,15 @@ async function handleWindingScanAction(machine, body) {
   if (pending.piece != null && (!Number.isInteger(pending.piece) || pending.piece < 1 || pending.piece > 4)) {
     pending.piece = null;
   }
-  const parsed = phase1.parseScan(barcode);
+  let parsed = phase1.parseScan(barcode);
+  // Custom team barcodes (e.g. 10-WATER) do not use the TEAM- prefix. After reserved
+  // scan types, look up the live teams.barcode so Manager edits are recognized immediately.
+  if (parsed.type === 'unknown') {
+    const teamByBarcode = await phase1.getTeamByBarcode(barcode);
+    if (teamByBarcode && Number(teamByBarcode.active)) {
+      parsed = { type: 'team', value: phase1.normalizeTeamBarcode(barcode) };
+    }
+  }
   const openRows = await phase1.getOpenSessionsForMachine(machine.id);
   const session = await resolveWindingFocusedSession(machine, pending, openRows);
   const assignment = await phase1.getMachineAssignment(machine.id);
@@ -5060,20 +5262,36 @@ async function handleWindingScanAction(machine, body) {
       return { ok: false, status: 409, body: { ok: false, error: 'need_team', message: NEED_TEAM_MESSAGE } };
     }
     const confirmer = confirmerFromBody(body);
-    if (!confirmer) {
+    const employeeId =
+      body.employee_id != null ? Number(body.employee_id) : confirmer ? confirmer.id : null;
+    if (!Number.isInteger(employeeId) || employeeId <= 0) {
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          ok: true,
+          action: 'employee_out_prompt',
+          assignment,
+          team: { id: Number(assignment.team_id), name: assignment.team_name },
+          message: 'Select an active employee to mark out.',
+        },
+      };
+    }
+    const onShift = await phase1.listOpenShiftEmployeesForTeam(assignment.team_id);
+    if (!onShift.some((e) => Number(e.id) === employeeId)) {
       return {
         ok: false,
         status: 409,
         body: {
           ok: false,
-          error: 'need_employee',
-          message: 'Scan employee barcode first, then Employee Out.',
+          error: 'not_on_shift',
+          message: 'That employee is not currently on shift for this team.',
         },
       };
     }
-    const out = await phase1.employeeOutFromTeam(confirmer.id, assignment.team_id, {
+    const out = await phase1.employeeOutFromTeam(employeeId, assignment.team_id, {
       source: 'kiosk_employee_out',
-      reason: 'Kiosk employee out scan',
+      reason: 'Kiosk employee out',
     });
     if (!out.ok) return out;
     return { ok: true, status: 200, body: { ok: true, ...out.body, assignment } };
@@ -5340,7 +5558,7 @@ async function handleWindingScanAction(machine, body) {
           },
           team: { id: currentTeamId, name: assignment.team_name },
           active_shift_team_id: currentTeamId,
-          confirmation_line: `Selected Employee: ${employee.name}. Tap Employee Out when ready.`,
+          confirmation_line: `Selected Employee: ${employee.name}.`,
           confirmer: {
             id: Number(employee.id),
             code: employee.code,
@@ -5469,6 +5687,65 @@ app.get('/api/kiosk/winding/config', async (req, res) => {
   } catch (err) {
     console.error('[winding config]', err);
     return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load winding kiosk.' });
+  }
+});
+
+app.get('/api/kiosk/winding/shift-employees', async (req, res) => {
+  try {
+    const machine = await windingMachineFromRequest(req);
+    if (!machine || !Number(machine.active)) {
+      return res.status(403).json({ ok: false, error: 'forbidden', message: 'Open a machine kiosk URL to use this screen.' });
+    }
+    const assignment = await phase1.getMachineAssignment(machine.id);
+    if (!assignment) {
+      return res.status(409).json({ ok: false, error: 'need_team', message: NEED_TEAM_MESSAGE });
+    }
+    const employees = await phase1.listOpenShiftEmployeesForTeam(assignment.team_id);
+    return res.json({
+      ok: true,
+      assignment,
+      team: { id: Number(assignment.team_id), name: assignment.team_name },
+      employees,
+    });
+  } catch (err) {
+    console.error('[winding shift-employees]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load shift employees.' });
+  }
+});
+
+app.post('/api/kiosk/winding/employee-out', async (req, res) => {
+  try {
+    const machine = await windingMachineFromRequest(req);
+    if (!machine || !Number(machine.active)) {
+      return res.status(403).json({ ok: false, error: 'forbidden', message: 'Open a machine kiosk URL to use this screen.' });
+    }
+    const assignment = await phase1.getMachineAssignment(machine.id);
+    if (!assignment) {
+      return res.status(409).json({ ok: false, error: 'need_team', message: NEED_TEAM_MESSAGE });
+    }
+    const employeeId = Number(req.body && req.body.employee_id);
+    if (!Number.isInteger(employeeId) || employeeId <= 0) {
+      return res.status(400).json({ ok: false, error: 'validation', message: 'employee_id required.' });
+    }
+    const onShift = await phase1.listOpenShiftEmployeesForTeam(assignment.team_id);
+    if (!onShift.some((e) => Number(e.id) === employeeId)) {
+      return res.status(409).json({
+        ok: false,
+        error: 'not_on_shift',
+        message: 'That employee is not currently on shift for this team.',
+      });
+    }
+    const out = await phase1.employeeOutFromTeam(employeeId, assignment.team_id, {
+      source: 'kiosk_employee_out',
+      reason: 'Kiosk employee out',
+    });
+    if (!out.ok) {
+      return res.status(out.status || 400).json(out.body);
+    }
+    return res.json({ ok: true, ...out.body, assignment });
+  } catch (err) {
+    console.error('[winding employee-out]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not mark employee out.' });
   }
 });
 
@@ -6200,8 +6477,11 @@ app.get('/api/manager/machine-areas', async (req, res) => {
   const auth = currentManagerFromSession(req);
   if (!auth) return res.status(401).json({ ok: false, error: 'not_authenticated' });
   try {
-    const rows = await phase1.fetchManagedWindingMachines();
-    return res.json({ ok: true, machines: rows.map(mapMachineForClient) });
+    const showInactive =
+      req.query.show_inactive === '1' || req.query.show_inactive === 'true';
+    const rows = await phase1.fetchManagedWindingMachines({ includeInactive: true });
+    const filtered = showInactive ? rows : rows.filter((r) => Number(r.active) !== 0);
+    return res.json({ ok: true, machines: filtered.map(mapMachineForClient) });
   } catch (err) {
     console.error('[manager machine-areas]', err);
     return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load machines.' });
@@ -6249,9 +6529,22 @@ app.put('/api/manager/machine-areas/:id', async (req, res) => {
   const sortOrder = body.sort_order != null ? Number(body.sort_order) : null;
   const active = body.active != null ? (body.active ? 1 : 0) : null;
   try {
-    const { rows: existing } = await pool.query(`SELECT id FROM machines WHERE id = $1`, [id]);
+    const { rows: existing } = await pool.query(
+      `SELECT id, name, active FROM machines WHERE id = $1`,
+      [id]
+    );
     if (!existing.length) {
       return res.status(404).json({ ok: false, error: 'not_found', message: 'Machine not found.' });
+    }
+    if (active === 0 && Number(existing[0].active) !== 0) {
+      const usage = await phase1.getMachineUsageSummary(id);
+      if (usage.has_open_production) {
+        return res.status(409).json({
+          ok: false,
+          error: 'active_production',
+          message: `Cannot deactivate ${existing[0].name} while production is active. End Shift or finish open sessions first.`,
+        });
+      }
     }
     await pool.query(
       `UPDATE machines SET
@@ -6270,6 +6563,63 @@ app.put('/api/manager/machine-areas/:id', async (req, res) => {
   } catch (err) {
     console.error('[manager machine-areas update]', err);
     return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not update machine.' });
+  }
+});
+
+/**
+ * Safe remove: hard-delete unused machines; deactivate machines with history.
+ */
+app.post('/api/manager/machine-areas/:id/remove', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) return res.status(401).json({ ok: false, error: 'not_authenticated' });
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({ ok: false, error: 'validation', message: 'Invalid machine id.' });
+  }
+  try {
+    const { rows: existing } = await pool.query(
+      `SELECT id, name, code, barcode, kiosk_slug, sort_order, active FROM machines WHERE id = $1`,
+      [id]
+    );
+    if (!existing.length) {
+      return res.status(404).json({ ok: false, error: 'not_found', message: 'Machine not found.' });
+    }
+    const machine = existing[0];
+    const usage = await phase1.getMachineUsageSummary(id);
+    if (usage.has_open_production) {
+      return res.status(409).json({
+        ok: false,
+        error: 'active_production',
+        message: `Cannot remove ${machine.name} while production is active. End Shift or finish open sessions first.`,
+      });
+    }
+    if (usage.has_history) {
+      await pool.query(
+        `UPDATE machines SET active = 0, updated_at = $1::timestamptz WHERE id = $2`,
+        [nowIso(), id]
+      );
+      const { rows } = await pool.query(
+        `SELECT id, name, code, barcode, kiosk_slug, sort_order, active FROM machines WHERE id = $1`,
+        [id]
+      );
+      return res.json({
+        ok: true,
+        action: 'deactivated',
+        machine: mapMachineForClient(rows[0]),
+        message: `${machine.name} has production history, so it was deactivated instead of deleted.`,
+      });
+    }
+    await pool.query(`UPDATE tanks SET wip_machine_id = NULL WHERE wip_machine_id = $1`, [id]);
+    await pool.query(`DELETE FROM machines WHERE id = $1`, [id]);
+    return res.json({
+      ok: true,
+      action: 'deleted',
+      machine: mapMachineForClient(machine),
+      message: `${machine.name} was permanently deleted.`,
+    });
+  } catch (err) {
+    console.error('[manager machine-areas remove]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not remove machine.' });
   }
 });
 
@@ -7044,7 +7394,13 @@ app.post('/api/dashboard/manual-scan', async (req, res) => {
   const raw = String(req.body && req.body.barcode != null ? req.body.barcode : '').trim();
   if (!raw) return res.status(400).json({ ok: false, error: 'validation', message: 'Enter a barcode.' });
   try {
-    const parsed = phase1.parseScan(raw);
+    let parsed = phase1.parseScan(raw);
+    if (parsed.type === 'unknown') {
+      const teamByBarcode = await phase1.getTeamByBarcode(raw);
+      if (teamByBarcode && Number(teamByBarcode.active)) {
+        parsed = { type: 'team', value: phase1.normalizeTeamBarcode(raw) };
+      }
+    }
     let label = 'Unknown barcode';
     let detail = parsed.value || raw;
     if (parsed.type === 'team') {
@@ -8655,13 +9011,52 @@ app.get('/api/tanks/:id/report.pdf', async (req, res) => {
     const assembled = await getTankReportPayload(id);
     if (!assembled.ok) return res.status(assembled.status || 500).json(assembled);
     const buffer = await buildTankReportPdfBuffer(assembled);
-    const safeTank = String((assembled.tank && assembled.tank.tank_number) || id).replace(/[^\w.-]+/g, '_');
+    const base = tankReportBaseName(assembled, id);
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="tank-report-${safeTank}.pdf"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${base}.pdf"`);
     return res.send(buffer);
   } catch (err) {
     console.error('[tank report pdf]', err);
     return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not export tank report PDF.' });
+  }
+});
+
+app.get('/api/tanks/:id/report.csv', async (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    const assembled = await getTankReportPayload(id);
+    if (!assembled.ok) return res.status(assembled.status || 500).json(assembled);
+    const csv = buildTankReportCsv(assembled);
+    const base = tankReportBaseName(assembled, id);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${base}.csv"`);
+    return res.send(csv);
+  } catch (err) {
+    console.error('[tank report csv]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not export tank report CSV.' });
+  }
+});
+
+app.get('/api/tanks/:id/report.xlsx', async (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    const assembled = await getTankReportPayload(id);
+    if (!assembled.ok) return res.status(assembled.status || 500).json(assembled);
+    const buffer = await buildTankReportXlsxBuffer(assembled);
+    const base = tankReportBaseName(assembled, id);
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.setHeader('Content-Disposition', `attachment; filename="${base}.xlsx"`);
+    return res.send(buffer);
+  } catch (err) {
+    console.error('[tank report xlsx]', err);
+    const msg =
+      err && err.code === 'EXCELJS_MISSING'
+        ? err.message
+        : 'Could not export tank report Excel file.';
+    return res.status(500).json({ ok: false, error: 'server_error', message: msg });
   }
 });
 
@@ -8998,8 +9393,42 @@ app.get('/api/manager/overtime-watch', async (_req, res) => {
 });
 
 /**
- * Update kiosk PINs for production areas (manager only).
- * Body: optional area_a_pin, area_b_pin, area_c_pin, area_d_pin (4–6 digits each).
+ * Active winding machines for Manager Kiosk PIN Codes UI.
+ * Never returns pin_hash — only whether a PIN is configured.
+ */
+app.get('/api/manager/kiosk-pins', async (req, res) => {
+  const auth = currentAuthFromSession(req);
+  if (!auth || auth.role !== ROLE.MANAGER) {
+    return authJson(res, 403, 'Forbidden.', 'forbidden');
+  }
+  try {
+    await ensureMachineKioskPins();
+    const { rows } = await pool.query(
+      `SELECT id, name, code, barcode, kiosk_slug, sort_order, active, pin_hash
+       FROM machines
+       WHERE active = 1
+         AND NOT (
+           UPPER(TRIM(COALESCE(code, ''))) LIKE 'WS-%'
+           OR name ILIKE 'Winding Station%'
+         )
+       ORDER BY sort_order ASC, name ASC`
+    );
+    return res.json({
+      ok: true,
+      machines: rows.map((row) => ({
+        ...mapMachineForClient(row),
+        has_pin: machineHasPinConfigured(row),
+      })),
+    });
+  } catch (err) {
+    console.error('[kiosk-pins get]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load machine PINs.' });
+  }
+});
+
+/**
+ * Update kiosk PINs for winding machines (manager only).
+ * Body: { pins: [{ machine_id, pin }] } — blank/omitted pin means keep current.
  */
 app.patch('/api/manager/kiosk-pins', async (req, res) => {
   const auth = currentAuthFromSession(req);
@@ -9007,49 +9436,87 @@ app.patch('/api/manager/kiosk-pins', async (req, res) => {
     return authJson(res, 403, 'Forbidden.', 'forbidden');
   }
   const body = req.body || {};
-  const fields = KIOSK_AREA_PROFILES.map((p) => [p.username, p.pinField]);
-  /** @type {Array<[string, string]>} */
-  const toApply = [];
-  for (const [uname, key] of fields) {
-    if (!Object.prototype.hasOwnProperty.call(body, key)) continue;
-    const raw = body[key];
+  /** @type {Array<{ machine_id: number, pin: string }>} */
+  const updates = [];
+
+  if (Array.isArray(body.pins)) {
+    for (const item of body.pins) {
+      if (!item) continue;
+      const machineId = Number(item.machine_id);
+      const digits = String(item.pin != null ? item.pin : '').trim();
+      if (!Number.isInteger(machineId) || machineId <= 0) continue;
+      if (!digits) continue;
+      if (!/^\d{4,6}$/.test(digits)) {
+        return res.status(400).json({
+          ok: false,
+          error: 'validation',
+          message: `PIN for machine ${machineId} must be exactly 4–6 digits.`,
+        });
+      }
+      updates.push({ machine_id: machineId, pin: digits });
+    }
+  }
+
+  // Legacy hard-coded field names (wm_1_pin…) — map onto machines by profile area name.
+  for (const profile of KIOSK_AREA_PROFILES) {
+    if (!profile.pinField || !Object.prototype.hasOwnProperty.call(body, profile.pinField)) continue;
+    const raw = body[profile.pinField];
     if (raw === undefined || raw === null || String(raw).trim() === '') continue;
     const digits = String(raw).trim();
     if (!/^\d{4,6}$/.test(digits)) {
       return res.status(400).json({
         ok: false,
         error: 'validation',
-        message: `${key} must be exactly 4–6 digits.`,
+        message: `${profile.pinField} must be exactly 4–6 digits.`,
       });
     }
-    const row = await getUserByUsername(uname);
-    if (!row || String(row.role).toUpperCase() !== ROLE.KIOSK) {
-      return res.status(400).json({ ok: false, error: 'validation', message: 'Invalid kiosk account.' });
-    }
-    toApply.push([uname, digits]);
+    const { rows } = await pool.query(
+      `SELECT id FROM machines
+       WHERE name = $1
+         AND NOT (
+           UPPER(TRIM(COALESCE(code, ''))) LIKE 'WS-%'
+           OR name ILIKE 'Winding Station%'
+         )
+       LIMIT 1`,
+      [profile.area_name]
+    );
+    if (rows[0]) updates.push({ machine_id: Number(rows[0].id), pin: digits });
   }
-  if (!toApply.length) {
+
+  if (!updates.length) {
     return res.status(400).json({
       ok: false,
       error: 'validation',
-      message: 'Provide at least one PIN (wm_1_pin, wm_2_pin, or wm_3_pin).',
+      message: 'Enter at least one new PIN to update.',
     });
   }
+
   const ts = nowIso();
   try {
-    for (const [uname, digits] of toApply) {
-      await pool.query(`UPDATE users SET pin_hash = $1, updated_at = $2::timestamptz WHERE username = $3 AND role = $4`, [
-        hashPassword(digits),
-        ts,
-        uname,
-        ROLE.KIOSK,
-      ]);
+    await ensureMachineKioskPins();
+    let updated = 0;
+    for (const item of updates) {
+      const { rows } = await pool.query(
+        `UPDATE machines
+         SET pin_hash = $1, updated_at = $2::timestamptz
+         WHERE id = $3
+           AND NOT (
+             UPPER(TRIM(COALESCE(code, ''))) LIKE 'WS-%'
+             OR name ILIKE 'Winding Station%'
+           )
+         RETURNING id`,
+        [hashPassword(item.pin), ts, item.machine_id]
+      );
+      if (rows.length) updated += 1;
+    }
+    if (!updated) {
+      return res.status(404).json({ ok: false, error: 'not_found', message: 'No matching machines found for PIN update.' });
     }
   } catch (e) {
     console.error('[kiosk-pins]', e);
     return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not update PINs.' });
   }
-  return res.json({ ok: true });
+  return res.json({ ok: true, updated: updates.length });
 });
 
 function isOwnerManager(auth) {
