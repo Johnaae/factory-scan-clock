@@ -5777,18 +5777,84 @@ app.post('/api/kiosk/winding/action', async (req, res) => {
         forceTankComplete: body.force_tank_complete === true,
       });
     } else if (action === 'switch_tank') {
+      // Selection only: update machines.active_tank_id and return the existing open
+      // tank+piece context. Does not start/stop/pause sessions or change labor.
       const tankId = Number(body.tank_id);
       if (!Number.isInteger(tankId) || tankId <= 0) {
         return res.status(400).json({ ok: false, error: 'validation', message: 'tank_id required.' });
       }
+      const pieceNum =
+        body.piece_number != null && body.piece_number !== ''
+          ? Number(body.piece_number)
+          : null;
+      const sessionIdHint =
+        body.session_id != null && body.session_id !== '' ? Number(body.session_id) : null;
+
+      const openRows = await phase1.getOpenSessionsForMachine(machine.id);
+      let targetRow = null;
+      if (sessionIdHint != null && Number.isInteger(sessionIdHint) && sessionIdHint > 0) {
+        targetRow =
+          openRows.find(
+            (r) =>
+              Number(r.id) === sessionIdHint &&
+              Number(r.tank_id) === tankId &&
+              Number(r.machine_id) === Number(machine.id)
+          ) || null;
+      }
+      if (!targetRow && pieceNum != null && Number.isInteger(pieceNum) && pieceNum >= 1) {
+        targetRow =
+          openRows.find(
+            (r) =>
+              Number(r.tank_id) === tankId && Number(r.piece_number || 1) === pieceNum
+          ) || null;
+      }
+      if (!targetRow) {
+        targetRow = openRows.find((r) => Number(r.tank_id) === tankId) || null;
+      }
+      if (!targetRow) {
+        return res.status(404).json({
+          ok: false,
+          error: 'not_found',
+          message: 'That tank/piece is not an active context on this winder.',
+        });
+      }
+
+      const selectedPiece = Number(targetRow.piece_number) || 1;
       await phase1.setMachineActiveTank(machine.id, tankId);
-      const switched = await phase1.getOpenSession(machine.id, tankId);
+      const mapped = await phase1.mapSession(targetRow);
+      const mappedOpen = await mapOpenSessionsPayload(machine.id, tankId);
+      let pieces = await phase1.getTankPieces(tankId);
+      let piece_count = 1;
+      const tankMeta = await pool.query(`SELECT tank_number, piece_count FROM tanks WHERE id = $1`, [
+        tankId,
+      ]);
+      if (tankMeta.rows[0]) {
+        piece_count = Math.min(4, Math.max(1, Number(tankMeta.rows[0].piece_count) || 1));
+        pieces = pieces.filter((p) => Number(p.piece_number) <= piece_count);
+      }
+      let open_qa_qc = null;
+      try {
+        open_qa_qc = await phase1.findOpenQaQcAlert(tankId, selectedPiece);
+      } catch (_err) {
+        open_qa_qc = null;
+      }
+      const phaseTimeSummary = await phase1.fetchTankPhaseTimeSummary(tankId);
       result = {
         ok: true,
         body: {
           ok: true,
           action: 'switch_tank',
-          session: switched ? await phase1.mapSession(switched) : null,
+          message: `Selected Tank ${mapped.tank_number} · Piece ${selectedPiece}.`,
+          session: mapped,
+          pending: {
+            tank: mapped.tank_number || null,
+            piece: selectedPiece,
+          },
+          pieces,
+          piece_count,
+          open_qa_qc,
+          phase_time_summary: phaseTimeSummary,
+          ...mappedOpen,
         },
       };
     } else if (action === 'part_complete') {

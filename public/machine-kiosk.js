@@ -987,6 +987,22 @@ function renderPieces() {
   renderPieceTouchButtons();
 }
 
+function selectedContextKey() {
+  const focused = focusedSession();
+  if (focused && !pendingIsDifferentTank()) {
+    return `${Number(focused.tank_id)}:${Number(focused.piece_number) || 1}`;
+  }
+  if (pendingTank && pendingPiece != null) {
+    const match = openSessions.find(
+      (s) =>
+        String(s.tank_number || '').toUpperCase() === String(pendingTank).toUpperCase() &&
+        Number(s.piece_number || 1) === Number(pendingPiece)
+    );
+    if (match) return `${Number(match.tank_id)}:${Number(match.piece_number) || 1}`;
+  }
+  return null;
+}
+
 function renderOpenTanks() {
   if (!els.openTanksPanel) return;
   if (!openSessions.length) {
@@ -995,27 +1011,92 @@ function renderOpenTanks() {
     return;
   }
   els.openTanksPanel.hidden = false;
-  const activeId = session && !pendingIsDifferentTank() ? Number(session.tank_id) : null;
+  const selectedKey = selectedContextKey();
   els.openTanksPanel.innerHTML = openSessions
     .map((s) => {
-      const active = Number(s.tank_id) === activeId ? ' is-active' : '';
+      const tankId = Number(s.tank_id);
+      const pieceNum = Number(s.piece_number) || 1;
+      const key = `${tankId}:${pieceNum}`;
+      const active = selectedKey && key === selectedKey ? ' is-active' : '';
       const stCls = ` is-${statusClassForSession(s)}`;
-      return `<button type="button" class="btn-secondary wk-open-tank-btn${active}${stCls}" data-tank-id="${Number(s.tank_id)}">
-        Tank ${String(s.tank_number || '')} - Piece ${Number(s.piece_number) || 1} - ${String(s.phase_name || s.activity_name || '')}
+      const sessionId = s.id != null ? Number(s.id) : '';
+      return `<button type="button" class="btn-secondary wk-open-tank-btn${active}${stCls}" data-tank-id="${tankId}" data-piece-number="${pieceNum}" data-session-id="${sessionId}" aria-pressed="${active ? 'true' : 'false'}">
+        Tank ${String(s.tank_number || '')} · Piece ${pieceNum} · ${String(s.phase_name || s.activity_name || '')}
       </button>`;
     })
     .join('');
   els.openTanksPanel.querySelectorAll('[data-tank-id]').forEach((btn) => {
-    // Keep keyboard focus on the scan input (USB scanner ready).
+    // Keep keyboard focus on the scan input (USB scanner ready); avoid mobile keyboard.
     btn.addEventListener('mousedown', (e) => e.preventDefault());
-    btn.addEventListener('click', () => void switchTank(Number(btn.getAttribute('data-tank-id'))));
+    btn.addEventListener('click', () => {
+      void selectActiveContext({
+        tankId: Number(btn.getAttribute('data-tank-id')),
+        pieceNumber: Number(btn.getAttribute('data-piece-number')),
+        sessionId: Number(btn.getAttribute('data-session-id')) || null,
+      });
+    });
   });
 }
 
-async function switchTank(tankId) {
-  const data = await postAction({ action: 'switch_tank', tank_id: tankId });
-  if (data) await loadConfig();
+/**
+ * Selection-only context switch among already-open sessions on this winder.
+ * Does not start/stop sessions, change phase, or alter labor — only focuses UI.
+ */
+async function selectActiveContext({ tankId, pieceNumber, sessionId }) {
+  const tid = Number(tankId);
+  const pieceNum = Number(pieceNumber);
+  if (!Number.isInteger(tid) || tid <= 0 || !Number.isInteger(pieceNum) || pieceNum < 1) {
+    warn('Invalid tank/piece context.');
+    focusScanInput();
+    return;
+  }
+
+  const localMatch =
+    openSessions.find((s) => {
+      if (Number(s.tank_id) !== tid) return false;
+      if (Number(s.piece_number || 1) !== pieceNum) return false;
+      if (sessionId != null && Number.isInteger(Number(sessionId)) && Number(sessionId) > 0) {
+        return Number(s.id) === Number(sessionId);
+      }
+      return true;
+    }) || null;
+
+  if (!localMatch) {
+    warn('That tank/piece is not an active context on this winder.');
+    focusScanInput();
+    return;
+  }
+
+  const data = await postAction({
+    action: 'switch_tank',
+    tank_id: tid,
+    piece_number: pieceNum,
+    session_id: localMatch.id != null ? Number(localMatch.id) : sessionId,
+  });
+  if (!data) {
+    focusScanInput();
+    return;
+  }
+  await consumeScanResult(data);
   focusScanInput();
+}
+
+async function switchTank(tankId) {
+  const onTank = openSessions.filter((s) => Number(s.tank_id) === Number(tankId));
+  const preferred =
+    onTank.find((s) => pendingPiece != null && Number(s.piece_number || 1) === Number(pendingPiece)) ||
+    onTank[0] ||
+    null;
+  if (!preferred) {
+    warn('That tank is not an active context on this winder.');
+    focusScanInput();
+    return;
+  }
+  await selectActiveContext({
+    tankId: Number(preferred.tank_id),
+    pieceNumber: Number(preferred.piece_number) || 1,
+    sessionId: preferred.id != null ? Number(preferred.id) : null,
+  });
 }
 
 function tankTotalMs() {
@@ -1423,14 +1504,41 @@ async function consumeScanResult(data) {
     return;
   }
   if (data.action === 'switch_tank') {
-    if (data.session) session = data.session;
+    // Selection only — keep other open sessions running; just focus this tank+piece.
+    if (Array.isArray(data.open_sessions)) openSessions = data.open_sessions;
+    if (Array.isArray(data.tank_open_sessions)) tankOpenSessions = data.tank_open_sessions;
     if (data.pieces) pieces = data.pieces;
     if (data.piece_count != null) pieceCount = Number(data.piece_count) || pieces.length;
-    pendingTank = null;
-    pendingPiece = data.session ? Number(data.session.piece_number) || null : null;
+    if (data.phase_time_summary) phaseTimeSummary = data.phase_time_summary;
+    if (Object.prototype.hasOwnProperty.call(data, 'open_qa_qc')) openQaQc = data.open_qa_qc || null;
+    pendingTank =
+      (data.pending && data.pending.tank) ||
+      (data.session && data.session.tank_number) ||
+      pendingTank;
+    pendingPiece =
+      data.pending && data.pending.piece != null
+        ? Number(data.pending.piece)
+        : data.session
+          ? Number(data.session.piece_number) || null
+          : pendingPiece;
     resumablePhase = null;
-    warn(data.session ? `Switched to tank ${data.session.tank_number}.` : 'Tank switched.');
+    session = focusedSession() || data.session || null;
+    warn(
+      data.message ||
+        (pendingTank && pendingPiece != null
+          ? `Selected Tank ${pendingTank} · Piece ${pendingPiece}.`
+          : 'Context selected.')
+    );
+    renderUi();
+    // Refresh from server so timers/phase summary stay authoritative without mutating production.
     await loadConfig();
+    if (data.pending && data.pending.tank) pendingTank = data.pending.tank;
+    if (data.pending && data.pending.piece != null) pendingPiece = Number(data.pending.piece);
+    if (Object.prototype.hasOwnProperty.call(data, 'open_qa_qc')) openQaQc = data.open_qa_qc || null;
+    if (data.phase_time_summary) phaseTimeSummary = data.phase_time_summary;
+    session = focusedSession() || data.session || session;
+    renderUi();
+    focusScanInput();
     return;
   }
   if (data.action === 'piece_selected') {
