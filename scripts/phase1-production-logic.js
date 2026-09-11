@@ -177,6 +177,10 @@ function mapMachineForClient(row) {
   const slug = String(row.kiosk_slug || slugFromMachineName(row.name))
     .trim()
     .toLowerCase();
+  const workflowRaw = String(row.workflow || 'winding')
+    .trim()
+    .toLowerCase();
+  const workflow = workflowRaw === 'assembly_testing' ? 'assembly_testing' : 'winding';
   return {
     id: Number(row.id),
     name: displayMachineName(row.name),
@@ -184,6 +188,8 @@ function mapMachineForClient(row) {
     kiosk_url: kioskUrlForSlug(slug),
     sort_order: Number(row.sort_order) || 0,
     active: Number(row.active) !== 0,
+    workflow,
+    workflow_label: workflow === 'assembly_testing' ? 'Assembly + Testing' : 'Winding (FAB)',
   };
 }
 
@@ -766,7 +772,8 @@ function createPhase1ProductionLogic(deps) {
 
   async function getMachineById(id) {
     const { rows } = await pool.query(
-      `SELECT id, name, code, barcode, kiosk_slug, active, active_tank_id FROM machines WHERE id = $1 LIMIT 1`,
+      `SELECT id, name, code, barcode, kiosk_slug, active, active_tank_id, workflow
+       FROM machines WHERE id = $1 LIMIT 1`,
       [Number(id)]
     );
     return rows[0] || null;
@@ -776,7 +783,7 @@ function createPhase1ProductionLogic(deps) {
     const c = normalizeMachineBarcode(code);
     if (!c) return null;
     const { rows } = await pool.query(
-      `SELECT id, name, code, barcode, kiosk_slug, active, active_tank_id FROM machines
+      `SELECT id, name, code, barcode, kiosk_slug, active, active_tank_id, workflow FROM machines
        WHERE UPPER(TRIM(code)) = $1 OR UPPER(TRIM(COALESCE(barcode, ''))) = $1 LIMIT 1`,
       [c]
     );
@@ -789,7 +796,7 @@ function createPhase1ProductionLogic(deps) {
       .toLowerCase();
     if (!s) return null;
     const { rows } = await pool.query(
-      `SELECT id, name, code, barcode, kiosk_slug, sort_order, active, active_tank_id FROM machines
+      `SELECT id, name, code, barcode, kiosk_slug, sort_order, active, active_tank_id, workflow FROM machines
        WHERE LOWER(TRIM(kiosk_slug)) = $1 LIMIT 1`,
       [s]
     );
@@ -803,7 +810,7 @@ function createPhase1ProductionLogic(deps) {
     const slug = slugFromMachineName(canonical);
     const spec = WINDING_MACHINES.find((m) => m.areaName === canonical);
     const { rows } = await pool.query(
-      `SELECT id, name, code, barcode, kiosk_slug, sort_order, active, active_tank_id FROM machines
+      `SELECT id, name, code, barcode, kiosk_slug, sort_order, active, active_tank_id, workflow FROM machines
        WHERE (
          name = $1
          OR LOWER(TRIM(name)) = LOWER($1)
@@ -1302,9 +1309,10 @@ function createPhase1ProductionLogic(deps) {
 
   async function fetchActiveWindingMachines() {
     const { rows } = await pool.query(
-      `SELECT id, name, code, barcode, kiosk_slug, sort_order, active, active_tank_id
+      `SELECT id, name, code, barcode, kiosk_slug, sort_order, active, active_tank_id, workflow
        FROM machines
        WHERE active = 1
+         AND LOWER(TRIM(COALESCE(workflow, 'winding'))) = 'winding'
          AND NOT (
            UPPER(TRIM(COALESCE(code, ''))) LIKE 'WS-%'
            OR name ILIKE 'Winding Station%'
@@ -1317,14 +1325,34 @@ function createPhase1ProductionLogic(deps) {
   async function fetchManagedWindingMachines(opts = {}) {
     const includeInactive = opts.includeInactive !== false;
     const { rows } = await pool.query(
-      `SELECT id, name, code, barcode, kiosk_slug, sort_order, active, active_tank_id
+      `SELECT id, name, code, barcode, kiosk_slug, sort_order, active, active_tank_id, workflow
+       FROM machines
+       WHERE LOWER(TRIM(COALESCE(workflow, 'winding'))) = 'winding'
+         AND NOT (
+         UPPER(TRIM(COALESCE(code, ''))) LIKE 'WS-%'
+         OR name ILIKE 'Winding Station%'
+       )
+       ${includeInactive ? '' : 'AND active = 1'}
+       ORDER BY sort_order ASC, name ASC`
+    );
+    return rows;
+  }
+
+  /** All managed kiosk machines (winding + assembly_testing). Source of truth: machines.workflow. */
+  async function fetchManagedMachines(opts = {}) {
+    const includeInactive = opts.includeInactive !== false;
+    const { rows } = await pool.query(
+      `SELECT id, name, code, barcode, kiosk_slug, sort_order, active, active_tank_id, workflow
        FROM machines
        WHERE NOT (
          UPPER(TRIM(COALESCE(code, ''))) LIKE 'WS-%'
          OR name ILIKE 'Winding Station%'
        )
        ${includeInactive ? '' : 'AND active = 1'}
-       ORDER BY sort_order ASC, name ASC`
+       ORDER BY
+         CASE WHEN LOWER(TRIM(COALESCE(workflow, 'winding'))) = 'assembly_testing' THEN 1 ELSE 0 END,
+         sort_order ASC,
+         name ASC`
     );
     return rows;
   }
@@ -1424,6 +1452,13 @@ function createPhase1ProductionLogic(deps) {
         name: displayMachineName(m.name),
         slug: String(m.kiosk_slug || slugFromMachineName(m.name)).toLowerCase(),
         kiosk_url: kioskUrlForSlug(m.kiosk_slug || slugFromMachineName(m.name)),
+        workflow: String(m.workflow || 'winding').toLowerCase() === 'assembly_testing'
+          ? 'assembly_testing'
+          : 'winding',
+        workflow_label:
+          String(m.workflow || 'winding').toLowerCase() === 'assembly_testing'
+            ? 'Assembly + Testing'
+            : 'Winding (FAB)',
         current_team: currentTeam,
         assigned_team: assignedTeam,
         // Selected tank = kiosk focus only (optional highlight), not the sole display.
@@ -1812,20 +1847,30 @@ function createPhase1ProductionLogic(deps) {
         tank_id: Number(session.tank_id),
         tank_number: session.tank_number,
         confirmation_line: allPiecesComplete
-          ? `Piece ${pieceNum} complete — all pieces done. Scan Tank Complete to finish the tank.`
+          ? `Piece ${pieceNum} complete — all pieces done. Scan Tank Complete to release to Assembly.`
           : `Piece ${pieceNum} complete${nextPiece ? ` — continue with Piece ${nextPiece.piece_number}` : ''}`,
         message: allPiecesComplete
-          ? 'All pieces are complete. Status is Ready to Complete — scan Tank Complete to mark the tank Completed.'
+          ? 'All pieces are complete. Status is Ready to Complete — scan Tank Complete to release the tank to Assembly.'
           : null,
       },
     };
   }
 
-  async function finishTankArchive(machine, session, opts, ts) {
+  /**
+   * FAB Tank Complete: release tank to Assembly (ready_for_assembly).
+   * Does not archive or set final completed_at — that is Manager Complete Tank only.
+   * Does NOT assign any Assembly kiosk, does NOT set assembly_started_at,
+   * does NOT start Assembly Duration or labor. Tank stays unassigned until
+   * an Assembly kiosk presses CONFIRM TANK.
+   */
+  async function finishFabComplete(machine, session, opts, ts) {
     await pool.query(
       `UPDATE tanks
-       SET status = 'archived',
-           completed_at = $1::timestamptz,
+       SET status = 'ready_for_assembly',
+           fab_completed_at = COALESCE(fab_completed_at, $1::timestamptz),
+           completed_at = NULL,
+           assembly_started_at = NULL,
+           assembly_machine_id = NULL,
            paused_reason = NULL,
            wip_team_id = NULL,
            wip_phase_code = NULL,
@@ -1836,32 +1881,52 @@ function createPhase1ProductionLogic(deps) {
       [ts, session.tank_id]
     );
     await setMachineActiveTank(machine.id, null);
+    // Ensure no Assembly kiosk still points at this tank as active context.
+    try {
+      await pool.query(
+        `UPDATE machines
+         SET active_tank_id = NULL, updated_at = $1::timestamptz
+         WHERE active_tank_id = $2`,
+        [ts, session.tank_id]
+      );
+    } catch (_err) {
+      /* ignore */
+    }
     let mapped = null;
     try {
       if (session && session.id) mapped = await mapSession(session);
     } catch (_err) {
       mapped = null;
     }
+    const confirmer = opts.confirmedByEmployeeName
+      ? `${opts.confirmedByEmployeeName} confirmed Tank Complete — released to Assembly`
+      : 'Tank released to Assembly';
     return {
       ok: true,
       body: {
         ok: true,
         action: 'tank_complete',
         tank_complete: true,
+        fab_complete: true,
+        ready_for_assembly: true,
         session: mapped,
         tank_number: session.tank_number || null,
-        confirmation_line: opts.confirmedByEmployeeName
-          ? `${opts.confirmedByEmployeeName} confirmed Tank Complete`
-          : 'Tank Complete recorded',
+        confirmation_line: confirmer,
+        message: 'Tank released to Assembly — select it on an Assembly kiosk and press CONFIRM TANK.',
         team_name: session.team_name,
         confirmed_by_employee_name: opts.confirmedByEmployeeName || null,
       },
     };
   }
 
+  /** @deprecated alias — FAB complete now hands off to Assembly instead of archiving. */
+  async function finishTankArchive(machine, session, opts, ts) {
+    return finishFabComplete(machine, session, opts, ts);
+  }
+
   /**
-   * Tank Complete / Part Complete: archive the tank.
-   * Without forceTankComplete, delegates to Piece Complete (never archives).
+   * Tank Complete / Part Complete: release tank from FAB to Assembly.
+   * Without forceTankComplete, delegates to Piece Complete (never releases).
    */
   async function finishSession(machine, opts = {}) {
     const session = opts.session || (await getOpenSession(machine.id));
@@ -3786,6 +3851,7 @@ function createPhase1ProductionLogic(deps) {
     fetchPieceReports,
     fetchPhaseEditorPayload,
     finishPiece,
+    finishFabComplete,
     finishTankArchive,
     getMachineAssignment,
     assignTeamToMachine,
@@ -3797,6 +3863,7 @@ function createPhase1ProductionLogic(deps) {
     mapSession,
     fetchActiveWindingMachines,
     fetchManagedWindingMachines,
+    fetchManagedMachines,
     getMachineUsageSummary,
     fetchCanonicalWindingMachines,
     buildDashboardCards,
@@ -3842,7 +3909,10 @@ function createPhase1ProductionLogic(deps) {
     computeMembershipAwareTankLabor: (...args) => getMembershipApi().computeMembershipAwareTankLabor(...args),
     computeEmployeeMembershipProductionMs: (...args) =>
       getMembershipApi().computeEmployeeMembershipProductionMs(...args),
+    collectEmployeeMembershipProductionIntervals: (...args) =>
+      getMembershipApi().collectEmployeeMembershipProductionIntervals(...args),
     employeeSessionLaborMs: (...args) => getMembershipApi().employeeSessionLaborMs(...args),
+    mergeIntervalsMs: (...args) => getMembershipApi().mergeIntervalsMs(...args),
     editMachineSessionTimes: (...args) => getMembershipApi().editMachineSessionTimes(...args),
     listSessionEdits: (...args) => getMembershipApi().listSessionEdits(...args),
     isDowntimeStopReason,

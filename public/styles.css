@@ -1529,6 +1529,49 @@ tbody tr:last-child td {
   background: linear-gradient(180deg, #fffbeb, #fef3c7);
 }
 
+.tank-rt-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.35rem;
+  height: 1.35rem;
+  margin-left: 0.35rem;
+  border-radius: 999px;
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  vertical-align: middle;
+  background: #dbeafe;
+  color: #1d4ed8;
+  border: 1px solid #93c5fd;
+}
+
+.tank-number-with-rt {
+  vertical-align: middle;
+}
+
+.manager-checkbox-field {
+  display: flex;
+  align-items: flex-end;
+}
+
+.manager-checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-weight: 700;
+  cursor: pointer;
+  user-select: none;
+  margin-bottom: 0.35rem;
+}
+
+.manager-checkbox-label input[type='checkbox'] {
+  width: 1.05rem;
+  height: 1.05rem;
+  margin: 0;
+}
+
 .muted {
   color: var(--muted);
   font-weight: 600;
@@ -4437,6 +4480,30 @@ table.fj-table tbody tr:hover {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 12px;
+}
+
+.machine-card-workflow {
+  margin-bottom: 6px;
+}
+.machine-workflow-badge {
+  display: inline-block;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  line-height: 1.2;
+}
+.machine-workflow-badge--fab {
+  background: #e0f2fe;
+  color: #075985;
+  border: 1px solid #7dd3fc;
+}
+.machine-workflow-badge--assembly {
+  background: #ecfdf5;
+  color: #065f46;
+  border: 1px solid #6ee7b7;
 }
 
 .machine-card-title {

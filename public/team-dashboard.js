@@ -145,6 +145,25 @@
 
   function renderActiveSessionsHtml(sessions) {
     if (!sessions || !sessions.length) return '';
+
+    // Phase 2 Assembly/Testing is whole-tank — never show Piece N.
+    const phase2Only = sessions.every((s) => s && (s.source === 'phase2' || s.tank_level));
+    if (phase2Only) {
+      const lines = sessions
+        .map((s) => {
+          const tank = String(s.tank_number || '—');
+          const stage = String(s.phase_name || s.stage || '—');
+          return `<li class="team-active-session-tank team-active-session-tank--phase2">
+            <strong>Tank ${escapeHtml(tank)}</strong> — ${escapeHtml(stage)}
+          </li>`;
+        })
+        .join('');
+      return `<div class="team-active-sessions" data-field="active-sessions">
+      <h4 class="phase-time-summary-title">Active Production</h4>
+      <ul class="phase-time-summary-list team-active-session-groups">${lines}</ul>
+    </div>`;
+    }
+
     const byTank = new Map();
     for (const s of sessions) {
       const key = String(s.tank_number || s.tank_id || '');
@@ -184,6 +203,11 @@
   function renderTeamCard(team, opts) {
     const st = team.status || 'idle';
     const actionBtn = teamActionBtn(team, opts);
+    const isPhase2 = Boolean(team.stage_labor || team.hide_stage_time);
+    const stageTimeBlock = isPhase2
+      ? ''
+      : `<div data-field="stage-time-row"><dt>Current Phase Time</dt><dd class="team-dashboard-elapsed" data-field="elapsed">${escapeHtml(team.running_time_display || team.elapsed_display || '—')}</dd></div>`;
+    const totalTimeLabel = isPhase2 ? 'Total Running Time' : 'Tank Total Running Time';
 
     return `<article class="team-dashboard-card ${!team.active ? 'team-dashboard-card--inactive' : ''}" data-team-id="${team.id}">
       <header class="team-dashboard-card-head">
@@ -196,15 +220,15 @@
       <dl class="team-dashboard-grid">
         <div><dt>Current Machine</dt><dd data-field="machine">${escapeHtml(team.current_machine || '—')}</dd></div>
         <div><dt>Current Tank</dt><dd data-field="tank">${renderTankCell(team.current_tank)}</dd></div>
-        <div><dt>Current Phase</dt><dd data-field="phase">${escapeHtml(team.current_phase || '—')}</dd></div>
-        <div class="team-dashboard-time-block">
-          <div><dt>Current Phase Time</dt><dd class="team-dashboard-elapsed" data-field="elapsed">${escapeHtml(team.running_time_display || team.elapsed_display || '—')}</dd></div>
-          <div><dt>Tank Total Running Time</dt><dd data-field="tank-total">${escapeHtml(team.tank_total_running_time_display || '—')}</dd></div>
+        <div><dt>${isPhase2 ? 'Current Stage' : 'Current Phase'}</dt><dd data-field="phase">${escapeHtml(team.current_phase || '—')}</dd></div>
+        <div class="team-dashboard-time-block" data-field="time-block">
+          ${stageTimeBlock}
+          <div><dt data-field="tank-total-label">${totalTimeLabel}</dt><dd data-field="tank-total">${escapeHtml(team.tank_total_running_time_display || '—')}</dd></div>
         </div>
         <div><dt>Est. Labor Cost</dt><dd data-field="labor-cost">${team.estimated_labor_cost != null ? escapeHtml(fmtMoney(team.estimated_labor_cost)) : '—'}</dd></div>
         <div><dt>Members</dt><dd data-field="member-count">${Number(team.member_count) || 0}</dd></div>
       </dl>
-      ${team.phase_time_summary && team.phase_time_summary.length ? renderPhaseSummaryHtml(team.phase_time_summary) : ''}
+      ${!isPhase2 && team.phase_time_summary && team.phase_time_summary.length ? renderPhaseSummaryHtml(team.phase_time_summary) : ''}
       ${team.active_sessions && team.active_sessions.length ? renderActiveSessionsHtml(team.active_sessions) : ''}
       <div class="team-dashboard-session-actions" data-field="session-actions">${renderSessionDetailsBtn(team.session_id)}</div>
       <details class="team-members-collapse">
@@ -235,9 +259,38 @@
     setField('tank-total', escapeHtml(team.tank_total_running_time_display || '—'));
     setField('labor-cost', team.estimated_labor_cost != null ? escapeHtml(fmtMoney(team.estimated_labor_cost)) : '—');
     setField('member-count', String(Number(team.member_count) || 0));
+
+    const isPhase2 = Boolean(team.stage_labor || team.hide_stage_time);
+    const phaseDt = cardEl.querySelector('[data-field="phase"]') &&
+      cardEl.querySelector('[data-field="phase"]').previousElementSibling;
+    if (phaseDt && phaseDt.tagName === 'DT') {
+      phaseDt.textContent = isPhase2 ? 'Current Stage' : 'Current Phase';
+    }
+    const totalLabelEl = cardEl.querySelector('[data-field="tank-total-label"]');
+    if (totalLabelEl) {
+      totalLabelEl.textContent = isPhase2 ? 'Total Running Time' : 'Tank Total Running Time';
+    }
+    const timeBlock = cardEl.querySelector('[data-field="time-block"]');
+    if (timeBlock) {
+      let stageRow = timeBlock.querySelector('[data-field="stage-time-row"]');
+      if (isPhase2) {
+        if (stageRow) stageRow.remove();
+      } else if (!stageRow) {
+        const totalRow = timeBlock.querySelector('[data-field="tank-total"]');
+        const totalWrap = totalRow && totalRow.parentElement;
+        const html = `<div data-field="stage-time-row"><dt>Current Phase Time</dt><dd class="team-dashboard-elapsed" data-field="elapsed">${escapeHtml(team.running_time_display || team.elapsed_display || '—')}</dd></div>`;
+        if (totalWrap) totalWrap.insertAdjacentHTML('beforebegin', html);
+        else timeBlock.insertAdjacentHTML('afterbegin', html);
+      } else {
+        const elapsedDt = stageRow.querySelector('dt');
+        if (elapsedDt) elapsedDt.textContent = 'Current Phase Time';
+      }
+    }
     const phaseSummaryEl = cardEl.querySelector('[data-field="phase-summary"]');
     const nextPhaseSummary =
-      team.phase_time_summary && team.phase_time_summary.length ? renderPhaseSummaryHtml(team.phase_time_summary) : '';
+      !isPhase2 && team.phase_time_summary && team.phase_time_summary.length
+        ? renderPhaseSummaryHtml(team.phase_time_summary)
+        : '';
     if (phaseSummaryEl && nextPhaseSummary !== phaseSummaryEl.outerHTML) {
       phaseSummaryEl.outerHTML = nextPhaseSummary || '';
     } else if (!phaseSummaryEl && nextPhaseSummary) {

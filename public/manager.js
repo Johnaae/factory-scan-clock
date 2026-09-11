@@ -6,6 +6,7 @@ const tankPriority = document.getElementById('tankPriority');
 const tankDueDate = document.getElementById('tankDueDate');
 const tankNotes = document.getElementById('tankNotes');
 const tankPieceCount = document.getElementById('tankPieceCount');
+const tankRequiresTest = document.getElementById('tankRequiresTest');
 const tankSearch = document.getElementById('tankSearch');
 const btnClearTankSearch = document.getElementById('btnClearTankSearch');
 const tankStatusFilter = document.getElementById('tankStatusFilter');
@@ -33,6 +34,7 @@ const editTankModel = document.getElementById('editTankModel');
 const editTankPriority = document.getElementById('editTankPriority');
 const editTankDueDate = document.getElementById('editTankDueDate');
 const editTankPieceCount = document.getElementById('editTankPieceCount');
+const editTankRequiresTest = document.getElementById('editTankRequiresTest');
 const editTankDescription = document.getElementById('editTankDescription');
 const editTankNotes = document.getElementById('editTankNotes');
 const editTankHint = document.getElementById('editTankHint');
@@ -133,7 +135,18 @@ function renderTankTableMessage(filter, message) {
 
 function tankIsActive(t) {
   const st = String((t && t.status) || 'active').toLowerCase();
-  return st === 'active' || st === 'paused' || st === 'waiting' || st === '';
+  return (
+    st === 'active' ||
+    st === 'paused' ||
+    st === 'waiting' ||
+    st === '' ||
+    st === 'ready_for_assembly' ||
+    st === 'assembly_in_progress' ||
+    st === 'ready_for_testing' ||
+    st === 'testing_in_progress' ||
+    st === 'ready_for_dome_install' ||
+    st === 'ready_for_final_completion'
+  );
 }
 
 function fmtTankDateTime(iso) {
@@ -161,6 +174,11 @@ function computeTankDurationMsClient(t) {
   if (!startIso) return 0;
   const start = new Date(startIso).getTime();
   if (Number.isNaN(start)) return 0;
+  // Production Total Running Time freezes at Assembly FINISH.
+  if (t.assembly_completed_at) {
+    const asmEnd = new Date(t.assembly_completed_at).getTime();
+    if (!Number.isNaN(asmEnd)) return Math.max(0, asmEnd - start);
+  }
   let end = Date.now();
   if (!tankIsActive(t) && t.completed_at) {
     end = new Date(t.completed_at).getTime();
@@ -319,6 +337,11 @@ function statusBadgeFor(value, labelOverride) {
 function tankStatusLabel(t) {
   const st = String((t && t.status) || 'active').toLowerCase();
   if (st === 'archived') return 'Completed';
+  if (st === 'ready_for_assembly') return 'Ready for Assembly';
+  if (st === 'assembly_in_progress') return 'Assembly In Progress';
+  if (st === 'ready_for_testing') return 'Ready for Testing';
+  if (st === 'testing_in_progress') return 'Testing In Progress';
+  if (st === 'ready_for_dome_install' || st === 'ready_for_final_completion') return 'Ready for Dome Install';
   if (t && t.production_status === 'Ready to Complete') return 'Ready to Complete';
   if (st === 'waiting') return 'Waiting';
   if (st === 'paused') return 'In Progress — Paused';
@@ -328,6 +351,13 @@ function tankStatusLabel(t) {
 function tankStatusBadge(t) {
   const st = String((t && t.status) || 'active').toLowerCase();
   if (st === 'archived') return '<span class="badge badge-muted">Completed</span>';
+  if (st === 'ready_for_assembly') return '<span class="badge badge-warn">Ready for Assembly</span>';
+  if (st === 'assembly_in_progress') return '<span class="badge badge-in">Assembly</span>';
+  if (st === 'ready_for_testing') return '<span class="badge badge-warn">Ready for Testing</span>';
+  if (st === 'testing_in_progress') return '<span class="badge badge-in">Testing</span>';
+  if (st === 'ready_for_dome_install' || st === 'ready_for_final_completion') {
+    return '<span class="badge badge-warn">Ready for Dome Install</span>';
+  }
   if (t && t.production_status === 'Ready to Complete') {
     return '<span class="badge badge-warn">Ready to Complete</span>';
   }
@@ -374,10 +404,25 @@ function updateTankTableHead(filter) {
 function previousStatusLabel(status) {
   const st = String(status || '').toLowerCase();
   if (st === 'archived') return 'Completed';
+  if (st === 'ready_for_assembly') return 'Ready for Assembly';
+  if (st === 'assembly_in_progress') return 'Assembly In Progress';
+  if (st === 'ready_for_testing') return 'Ready for Testing';
+  if (st === 'testing_in_progress') return 'Testing In Progress';
+  if (st === 'ready_for_dome_install' || st === 'ready_for_final_completion') return 'Ready for Dome Install';
   if (st === 'waiting') return 'Waiting';
   if (st === 'paused') return 'Paused';
   if (st === 'active') return 'Active';
   return status || '—';
+}
+
+function tankRequiresTestFlag(t) {
+  return Boolean(t && (t.requires_test === true || t.requires_test === 1 || t.requires_test === 'true'));
+}
+
+function renderTankNumberCell(t) {
+  const num = escapeHtml(t.tank_number || '');
+  if (!tankRequiresTestFlag(t)) return `<strong>${num}</strong>`;
+  return `<strong class="tank-number-with-rt">${num}</strong><span class="tank-rt-badge" title="Requires Testing" aria-label="Requires Testing">RT</span>`;
 }
 
 function tankEmptyMessage(filter) {
@@ -449,9 +494,13 @@ function buildTankMoreMenuHtml(btn) {
     return `<button type="button" role="menuitem" class="tank-actions-menu-item is-danger" data-act="permanent-delete" data-id="${id}" data-tank="${tank}">Delete Permanently</button>`;
   }
   const showComplete = btn.getAttribute('data-can-complete') === '1';
-  const statusAction = showComplete
-    ? `<button type="button" role="menuitem" class="tank-actions-menu-item is-success" data-act="archive" data-id="${id}">Complete Tank</button>`
-    : `<button type="button" role="menuitem" class="tank-actions-menu-item" data-act="restore" data-id="${id}">Restore</button>`;
+  const statusRaw = String(btn.getAttribute('data-status') || '').toLowerCase();
+  let statusAction = '';
+  if (showComplete) {
+    statusAction = `<button type="button" role="menuitem" class="tank-actions-menu-item is-success" data-act="archive" data-id="${id}">Complete Tank</button>`;
+  } else if (statusRaw === 'archived') {
+    statusAction = `<button type="button" role="menuitem" class="tank-actions-menu-item" data-act="restore" data-id="${id}">Restore</button>`;
+  }
   return `
     <button type="button" role="menuitem" class="tank-actions-menu-item" data-act="edit-phase" data-id="${id}">Edit Phase Time</button>
     <button type="button" role="menuitem" class="tank-actions-menu-item" data-act="print" data-tank="${tank}">Print</button>
@@ -471,7 +520,8 @@ function openTankActionsMenu(anchorBtn) {
 }
 
 function renderNormalTankActionsCell(t) {
-  const canComplete = tankIsActive(t) && String(t.status).toLowerCase() !== 'archived' ? '1' : '0';
+  const st = String((t && t.status) || '').toLowerCase();
+  const canComplete = st === 'ready_for_dome_install' || st === 'ready_for_final_completion' ? '1' : '0';
   return `<td class="tank-actions-cell">
     <div class="tank-actions">
       <button type="button" class="btn btn-sm btn-primary" data-act="report" data-id="${t.id}">View Report</button>
@@ -572,7 +622,7 @@ async function loadTanks() {
           ? `<span class="tank-lifecycle-muted">${escapeHtml(fmtTankDateTime(t.deleted_at))}</span>`
           : '—';
         return `<tr>
-      <td><strong>${escapeHtml(t.tank_number)}</strong></td>
+      <td><strong>${escapeHtml(t.tank_number)}</strong>${tankRequiresTestFlag(t) ? ' <span class="tank-rt-badge" title="Requires Testing">RT</span>' : ''}</td>
       <td>${escapeHtml(t.customer || '—')}</td>
       <td>${escapeHtml(t.model || '—')}</td>
       <td>${escapeHtml(pcs)}</td>
@@ -593,7 +643,7 @@ async function loadTanks() {
       const pcs = `${Number(t.current_piece_number) || 1}/${Number(t.piece_count) || 1}`;
       return `<tr>
       <td><input type="checkbox" class="tank-select-cb" value="${t.id}" /></td>
-      <td><strong>${escapeHtml(t.tank_number)}</strong></td>
+      <td>${renderTankNumberCell(t)}</td>
       <td>${escapeHtml(t.customer || '—')}</td>
       <td>${escapeHtml(t.model || '—')}</td>
       <td>${escapeHtml(pcs)}</td>
@@ -623,6 +673,7 @@ async function createTank() {
     due_date: tankDueDate && tankDueDate.value ? tankDueDate.value : null,
     notes: tankNotes ? tankNotes.value.trim() : '',
     piece_count: tankPieceCount ? Number(tankPieceCount.value) || 1 : 1,
+    requires_test: tankRequiresTest ? Boolean(tankRequiresTest.checked) : false,
   };
   const { res, data } = await apiJson('/api/tanks', {
     method: 'POST',
@@ -644,6 +695,7 @@ async function createTank() {
   if (tankNotes) tankNotes.value = '';
   if (tankDueDate) tankDueDate.value = '';
   if (tankPieceCount) tankPieceCount.value = '1';
+  if (tankRequiresTest) tankRequiresTest.checked = false;
   tankHint.textContent = `Tank ${number} created (Waiting — timer starts on first scan).`;
   await loadTanks();
 }
@@ -687,6 +739,7 @@ async function editTank(id) {
       ? `Production has started. You can increase pieces, but cannot reduce below ${minPieces}.`
       : 'You can change the piece count until production begins.';
   }
+  if (editTankRequiresTest) editTankRequiresTest.checked = tankRequiresTestFlag(tank);
   if (editTankDescription) editTankDescription.value = tank.description || '';
   if (editTankNotes) editTankNotes.value = tank.notes || '';
   if (editTankHint) editTankHint.textContent = '';
@@ -709,6 +762,7 @@ async function saveTankEdit() {
     piece_count: editTankPieceCount ? Number(editTankPieceCount.value) || 1 : 1,
     description: editTankDescription ? editTankDescription.value : '',
     notes: editTankNotes ? editTankNotes.value : '',
+    requires_test: editTankRequiresTest ? Boolean(editTankRequiresTest.checked) : false,
   };
   const { res, data } = await apiJson(`/api/tanks/${id}`, {
     method: 'PUT',
@@ -744,7 +798,9 @@ function printAllTanks() {
 async function setTankStatus(id, nextStatus) {
   if (tankActionInFlight) return;
   const makeActive = nextStatus === 'active';
-  const prompt = makeActive ? 'Restore this tank to active?' : 'Complete this tank? It will move to the Completed list.';
+  const prompt = makeActive
+    ? 'Restore this tank to active?'
+    : 'Complete this tank (final factory completion / ready to ship)? Tank Duration will stop.';
   if (!window.confirm(prompt)) return;
   tankActionInFlight = true;
   const url = makeActive ? `/api/tanks/${id}/restore` : `/api/tanks/${id}/archive`;
@@ -762,8 +818,8 @@ async function setTankStatus(id, nextStatus) {
   tankHint.textContent = makeActive
     ? 'Tank restored to active.'
     : filter === 'active'
-      ? 'Tank completed. Switch to Completed or All to see it.'
-      : 'Tank completed.';
+      ? 'Tank completed (ready to ship). Switch to Completed or All to see it.'
+      : 'Tank completed — ready to ship.';
   await loadTanks();
 }
 
@@ -981,6 +1037,10 @@ function renderTankReport(data) {
           <div class="tank-lifecycle-value"><span class="badge ${isActive ? 'badge-in' : 'badge-muted'}">${escapeHtml(statusText)}</span></div>
         </div>
         <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Require Test</div>
+          <div class="tank-lifecycle-value">${tankRequiresTestFlag(tank) ? 'Yes' : 'No'}</div>
+        </div>
+        <div class="tank-lifecycle-item">
           <div class="tank-lifecycle-label">Progress</div>
           <div class="tank-lifecycle-value">${
             pct == null
@@ -1097,9 +1157,95 @@ function renderTankReport(data) {
                    .join('')}</tbody>
                </table>
              </div>
-             <p class="muted">Total Labor Hours is the sum of employee contributions — not the same as Total Running Time.</p>`
+             <p class="muted">FAB labor (membership history) — not the same as Total Running Time or Assembly/Testing labor.</p>`
           : ''
       }
+      ${(() => {
+        const at = data.assembly_testing;
+        if (!at) return '';
+        const stageEmpRows = ((at.stage_labor && at.stage_labor.by_employee) || [])
+          .flatMap((e) => {
+            const stages = e.by_stage || {};
+            const keys = Object.keys(stages);
+            if (!keys.length) {
+              return [
+                `<tr><td>${escapeHtml(e.employee_name || '—')}</td><td>—</td><td>${escapeHtml(
+                  e.total_display || '0h 0m'
+                )}</td></tr>`,
+              ];
+            }
+            return keys.map(
+              (stage) => `<tr>
+                <td>${escapeHtml(e.employee_name || '—')}</td>
+                <td>${escapeHtml(stage)}</td>
+                <td>${escapeHtml((stages[stage] && stages[stage].total_display) || '0h 0m')}</td>
+              </tr>`
+            );
+          })
+          .join('');
+        const sessionRows = (at.stage_sessions || [])
+          .map(
+            (s) => `<tr>
+              <td>${escapeHtml(s.stage || '—')}</td>
+              <td>${escapeHtml(s.team_name || '—')}</td>
+              <td>${escapeHtml(s.machine_name || '—')}</td>
+              <td>${s.started_at ? fmtIso(s.started_at) : '—'}</td>
+              <td>${s.ended_at ? fmtIso(s.ended_at) : s.status === 'active' ? 'In progress' : '—'}</td>
+              <td>${escapeHtml(s.duration_display || '—')}</td>
+              <td>${escapeHtml(s.status || '—')}</td>
+            </tr>`
+          )
+          .join('');
+        const attemptRows = (at.test_attempts || [])
+          .map(
+            (a) => `<tr>
+              <td>${escapeHtml(a.result || '—')}</td>
+              <td>${a.attempted_at ? fmtIso(a.attempted_at) : '—'}</td>
+              <td>${escapeHtml(a.tester_employee_name || a.team_name || '—')}</td>
+              <td>${escapeHtml(a.failure_note || '—')}</td>
+            </tr>`
+          )
+          .join('');
+        return `<h5 class="tank-report-subsection-title" style="margin-top:18px">Assembly / Testing</h5>
+          <div class="tank-lifecycle-grid">
+            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">FAB Completed</div><div class="tank-lifecycle-value">${
+              at.fab_completed_at ? escapeHtml(fmtIso(at.fab_completed_at)) : '—'
+            }</div></div>
+            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">Assembly Complete</div><div class="tank-lifecycle-value">${
+              at.assembly_completed_at ? escapeHtml(fmtIso(at.assembly_completed_at)) : '—'
+            }</div></div>
+            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">Testing Complete</div><div class="tank-lifecycle-value">${
+              at.testing_completed_at ? escapeHtml(fmtIso(at.testing_completed_at)) : '—'
+            }</div></div>
+            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">Stage Labor Total</div><div class="tank-lifecycle-value">${escapeHtml(
+              at.total_stage_labor_display || '0h 0m'
+            )}</div></div>
+          </div>
+          ${
+            stageEmpRows
+              ? `<h5 class="tank-report-subsection-title" style="margin-top:12px">Stage labor by employee</h5>
+                 <div class="table-wrap"><table class="tank-report-table">
+                 <thead><tr><th>Employee</th><th>Stage</th><th>Time</th></tr></thead>
+                 <tbody>${stageEmpRows}</tbody></table></div>`
+              : ''
+          }
+          ${
+            sessionRows
+              ? `<h5 class="tank-report-subsection-title" style="margin-top:12px">Stage labor sessions</h5>
+                 <div class="table-wrap"><table class="tank-report-table">
+                 <thead><tr><th>Stage</th><th>Team</th><th>Kiosk</th><th>Start</th><th>End</th><th>Duration</th><th>Status</th></tr></thead>
+                 <tbody>${sessionRows}</tbody></table></div>`
+              : ''
+          }
+          ${
+            attemptRows
+              ? `<h5 class="tank-report-subsection-title" style="margin-top:12px">Test attempts</h5>
+                 <div class="table-wrap"><table class="tank-report-table">
+                 <thead><tr><th>Result</th><th>When</th><th>Tester/Team</th><th>Note</th></tr></thead>
+                 <tbody>${attemptRows}</tbody></table></div>`
+              : '<p class="muted" style="margin-top:8px">No test attempts recorded.</p>'
+          }`;
+      })()}
     </section>`;
 
   const phaseSummaryRows = phaseTimeSummary.length

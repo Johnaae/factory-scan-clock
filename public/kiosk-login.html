@@ -429,15 +429,15 @@
           return;
         }
         const opts = ['<option value="">Select machine...</option>'].concat(
-          loginMachines.map(
-            (m) =>
-              `<option value="${String(m.id)}" data-slug="${String(m.slug || '').replace(/"/g, '&quot;')}">${String(
-                m.name || ''
-              )
-                .replace(/&/g, '&amp;')
-                .replace(/</g, '&lt;')
-                .replace(/>/g, '&gt;')}</option>`
-          )
+          loginMachines.map((m) => {
+            const wf = String(m.workflow || 'winding').toLowerCase();
+            const labelSuffix = wf === 'assembly_testing' ? ' (Assembly / Testing)' : ' (Winding)';
+            const name = String(m.name || '')
+              .replace(/&/g, '&amp;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;');
+            return `<option value="${String(m.id)}" data-slug="${String(m.slug || '').replace(/"/g, '&quot;')}">${name}${labelSuffix}</option>`;
+          })
         );
         kioskAreaSelect.innerHTML = opts.join('');
         try {

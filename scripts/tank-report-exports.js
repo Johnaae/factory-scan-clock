@@ -162,6 +162,10 @@ function overviewFields(data) {
     customer: tank.customer || '',
     model: tank.model || '',
     description: tank.description || '',
+    requires_test:
+      tank.requires_test === true || tank.requires_test === 1 || tank.requires_test === 'true'
+        ? 'Yes'
+        : 'No',
     downtime_total: data.downtime_total_display || meta.downtime_display || '',
     created_at: tank.created_at || '',
     started_at: tank.first_scanned_at || tank.started_at || meta.started_at || '',
@@ -246,23 +250,76 @@ function downtimeAlertRows(data) {
   return rows;
 }
 
+function collectStageSessions(data) {
+  const tank = (data && data.tank) || {};
+  const tankNo = tank.tank_number || '';
+  const at = (data && data.assembly_testing) || {};
+  return (at.stage_sessions || []).map((s) => ({
+    tank_number: tankNo,
+    piece_number: '',
+    department: s.stage || '',
+    phase: s.stage || '',
+    team: s.team_name || '',
+    machine: s.machine_name || '',
+    started_at: s.started_at || '',
+    ended_at: s.ended_at || '',
+    end_display: s.status === 'active' ? 'In progress' : fmtWhen(s.ended_at),
+    duration: s.duration_display || formatDurationHm({ ms: s.duration_ms }),
+    duration_hours: numericHours({ ms: s.duration_ms }),
+    status: s.status || '',
+    test_result: '',
+    note: s.notes || '',
+    edited_by: s.stopped_by || s.started_by || '',
+    edit_reason: '',
+  }));
+}
+
+function collectTestAttempts(data) {
+  const tank = (data && data.tank) || {};
+  const tankNo = tank.tank_number || '';
+  const at = (data && data.assembly_testing) || {};
+  return (at.test_attempts || []).map((a) => ({
+    tank_number: tankNo,
+    piece_number: '',
+    department: 'TESTING',
+    phase: 'TEST_RESULT',
+    team: a.team_name || '',
+    machine: '',
+    started_at: a.attempted_at || '',
+    ended_at: a.attempted_at || '',
+    end_display: fmtWhen(a.attempted_at),
+    duration: '—',
+    duration_hours: '',
+    status: a.result || '',
+    test_result: a.result || '',
+    note: a.failure_note || '',
+    edited_by: a.tester_employee_name || '',
+    edit_reason: '',
+  }));
+}
+
 /**
  * Flat CSV primarily from piece/phase session history, with overview context columns.
  */
 function buildTankReportCsv(data) {
   const overview = overviewFields(data);
   const sessions = collectPhaseSessions(data);
+  const stageSessions = collectStageSessions(data);
+  const testAttempts = collectTestAttempts(data);
   const header = [
     'Tank #',
+    'Department/Stage',
     'Piece #',
-    'Phase',
+    'Activity',
     'Team',
-    'Machine',
+    'Machine/Kiosk',
     'Start Time',
     'End Time',
     'Duration',
     'Duration Hours',
     'Status',
+    'Test Result',
+    'Reason/Note',
     'Edited By',
     'Edit Reason',
     'Tank Status',
@@ -272,23 +329,27 @@ function buildTankReportCsv(data) {
     'Tank Total Running Hours',
     'Customer',
     'Model',
+    'Require Test',
   ];
   const lines = [csvRow(header)];
-  if (!sessions.length) {
+  const pushRow = (row) => {
     lines.push(
       csvRow([
-        overview.tank_number,
-        '',
-        '',
-        overview.team,
-        overview.machine,
-        fmtWhen(overview.started_at),
-        fmtWhen(overview.completed_at),
-        overview.duration || overview.total_running,
-        overview.total_running_hours != null ? overview.total_running_hours : '',
-        overview.status,
-        '',
-        '',
+        row.tank_number != null ? row.tank_number : overview.tank_number,
+        row.department || 'FAB',
+        row.piece_number != null ? row.piece_number : '',
+        row.phase || row.activity || '',
+        row.team || '',
+        row.machine || '',
+        row.started_at ? fmtWhen(row.started_at) : '',
+        row.end_display || fmtWhen(row.ended_at) || '',
+        row.duration || '',
+        row.duration_hours != null ? row.duration_hours : '',
+        row.status || '',
+        row.test_result || '',
+        row.note || row.edit_reason || '',
+        row.edited_by || '',
+        row.edit_reason || '',
         overview.status,
         overview.total_labor,
         overview.total_labor_hours != null ? overview.total_labor_hours : '',
@@ -296,34 +357,36 @@ function buildTankReportCsv(data) {
         overview.total_running_hours != null ? overview.total_running_hours : '',
         overview.customer,
         overview.model,
+        overview.requires_test,
       ])
     );
+  };
+
+  if (!sessions.length && !stageSessions.length && !testAttempts.length) {
+    pushRow({
+      tank_number: overview.tank_number,
+      department: '',
+      phase: '',
+      team: overview.team,
+      machine: overview.machine,
+      started_at: overview.started_at,
+      ended_at: overview.completed_at,
+      end_display: fmtWhen(overview.completed_at),
+      duration: overview.duration || overview.total_running,
+      duration_hours: overview.total_running_hours,
+      status: overview.status,
+    });
   } else {
     for (const s of sessions) {
-      lines.push(
-        csvRow([
-          s.tank_number,
-          s.piece_number != null ? s.piece_number : '',
-          s.phase,
-          s.team,
-          s.machine,
-          fmtWhen(s.started_at),
-          s.end_display,
-          s.duration,
-          s.duration_hours != null ? s.duration_hours : '',
-          s.status,
-          s.edited_by,
-          s.edit_reason,
-          overview.status,
-          overview.total_labor,
-          overview.total_labor_hours != null ? overview.total_labor_hours : '',
-          overview.total_running,
-          overview.total_running_hours != null ? overview.total_running_hours : '',
-          overview.customer,
-          overview.model,
-        ])
-      );
+      pushRow({
+        ...s,
+        department: 'FAB',
+        phase: s.phase,
+        note: s.edit_reason,
+      });
     }
+    for (const s of stageSessions) pushRow(s);
+    for (const a of testAttempts) pushRow(a);
   }
   // UTF-8 BOM helps Excel open CSV correctly
   return `\uFEFF${lines.join('\r\n')}\r\n`;
@@ -373,12 +436,26 @@ async function buildTankReportXlsxBuffer(data) {
     ['Piece', overview.piece_label],
     ['Customer', overview.customer],
     ['Model', overview.model],
+    ['Require Test', overview.requires_test],
     ['Description', overview.description],
     ['Downtime Total', overview.downtime_total],
     ['Created', fmtWhen(overview.created_at)],
     ['Started', fmtWhen(overview.started_at)],
     ['Completed', fmtWhen(overview.completed_at)],
   ];
+  const assemblyTestingOverview = data.assembly_testing || null;
+  if (assemblyTestingOverview) {
+    overviewPairs.push(
+      ['— Production —', ''],
+      ['Assembly Duration', assemblyTestingOverview.assembly_duration_display || ''],
+      ['Production Labor (Assembly/Correction)', assemblyTestingOverview.total_stage_labor_display || ''],
+      ['— Quality (QA/QC) —', ''],
+      ['Test Started', fmtWhen(assemblyTestingOverview.testing_started_at)],
+      ['Test Completed', fmtWhen(assemblyTestingOverview.testing_completed_at)],
+      ['Test Result', assemblyTestingOverview.latest_test_result || ''],
+      ['QA/QC Testing Elapsed', assemblyTestingOverview.testing_elapsed_display || '']
+    );
+  }
   for (const [field, value] of overviewPairs) {
     sheet1.addRow({ field, value: dash(value) });
   }
@@ -501,6 +578,80 @@ async function buildTankReportXlsxBuffer(data) {
     }
   }
   styleHeader(sheet4);
+
+  const at = (data && data.assembly_testing) || {};
+  const sheet5 = workbook.addWorksheet('Assembly', {
+    views: [{ state: 'frozen', ySplit: 1 }],
+  });
+  sheet5.columns = [
+    { header: 'Field', key: 'field', width: 28 },
+    { header: 'Value', key: 'value', width: 48 },
+  ];
+  sheet5.addRow({ field: 'FAB Completed', value: dash(fmtWhen(at.fab_completed_at)) });
+  sheet5.addRow({ field: 'Assembly Started', value: dash(fmtWhen(at.assembly_started_at)) });
+  sheet5.addRow({ field: 'Assembly Completed', value: dash(fmtWhen(at.assembly_completed_at)) });
+  sheet5.addRow({
+    field: 'Stage Labor Total',
+    value: dash(at.total_stage_labor_display || '0h 0m'),
+  });
+  styleHeader(sheet5);
+  sheet5.addRow({});
+  sheet5.addRow({ field: 'Stage', value: 'Session history below' });
+  const asmSessions = (at.stage_sessions || []).filter((s) =>
+    ['ASSEMBLY', 'CORRECTION'].includes(String(s.stage || '').toUpperCase())
+  );
+  if (!asmSessions.length) {
+    sheet5.addRow({ field: '(none)', value: 'No assembly/correction sessions' });
+  } else {
+    for (const s of asmSessions) {
+      sheet5.addRow({
+        field: `${s.stage} · ${s.status}`,
+        value: `${fmtWhen(s.started_at)} → ${s.status === 'active' ? 'In progress' : fmtWhen(s.ended_at)} · ${
+          s.duration_display || ''
+        } · ${s.team_name || ''}`,
+      });
+    }
+  }
+
+  const sheet6 = workbook.addWorksheet('Testing', {
+    views: [{ state: 'frozen', ySplit: 1 }],
+  });
+  sheet6.columns = [
+    { header: 'Result', key: 'result', width: 10 },
+    { header: 'Attempted At', key: 'when', width: 22 },
+    { header: 'Tester / Team', key: 'who', width: 24 },
+    { header: 'Note', key: 'note', width: 40 },
+  ];
+  const attempts = at.test_attempts || [];
+  if (!attempts.length) {
+    sheet6.addRow({ result: '—', when: '', who: '', note: 'No test attempts' });
+  } else {
+    for (const a of attempts) {
+      sheet6.addRow({
+        result: a.result || '',
+        when: fmtWhen(a.attempted_at),
+        who: a.tester_employee_name || a.team_name || '',
+        note: a.failure_note || '',
+      });
+    }
+  }
+  styleHeader(sheet6);
+
+  const testSessions = (at.stage_sessions || []).filter(
+    (s) => String(s.stage || '').toUpperCase() === 'TESTING'
+  );
+  if (testSessions.length) {
+    sheet6.addRow({});
+    sheet6.addRow({ result: 'Session', when: 'Start', who: 'End / Duration', note: 'Team' });
+    for (const s of testSessions) {
+      sheet6.addRow({
+        result: s.status || '',
+        when: fmtWhen(s.started_at),
+        who: `${s.status === 'active' ? 'In progress' : fmtWhen(s.ended_at)} · ${s.duration_display || ''}`,
+        note: s.team_name || '',
+      });
+    }
+  }
 
   const buffer = await workbook.xlsx.writeBuffer();
   return Buffer.from(buffer);

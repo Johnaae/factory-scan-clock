@@ -337,6 +337,13 @@ function buildTankReportPdfBuffer(data) {
     { label: 'Started', value: fmtWhen(tank.first_scanned_at || tank.started_at || meta.started_at) },
     { label: 'Customer', value: tank.customer || '—' },
     { label: 'Model', value: tank.model || '—' },
+    {
+      label: 'Require Test',
+      value:
+        tank.requires_test === true || tank.requires_test === 1 || tank.requires_test === 'true'
+          ? 'Yes'
+          : 'No',
+    },
     { label: 'Completed', value: fmtWhen(tank.completed_at) },
     { label: 'Duration', value: tank.duration_display || '—' },
     { label: 'Downtime Total', value: data.downtime_total_display || '00:00' },
@@ -585,6 +592,85 @@ function buildTankReportPdfBuffer(data) {
     })),
     { emptyText: 'No downtime recorded.' }
   );
+
+  // —— Page 4: Assembly / Testing ——
+  const at = data.assembly_testing || null;
+  if (at && (at.fab_completed_at || (at.stage_sessions || []).length || (at.test_attempts || []).length)) {
+    doc.addPage();
+    y = drawTitleBlock(doc, M, w, {
+      title: `Tank Report — ${tankNo}`,
+      subtitle: 'Assembly & Testing',
+      metaLine: `Generated: ${generatedAt}`,
+    });
+    y = drawSectionHeading(doc, M, w, y, 'Page 4 — Assembly / Testing Summary');
+    y = drawSectionHeading(doc, M, w, y, 'Production');
+    y = drawInfoGrid(doc, M, w, y, [
+      { label: 'FAB Completed', value: fmtWhen(at.fab_completed_at) },
+      { label: 'Assembly Started', value: fmtWhen(at.assembly_started_at) },
+      { label: 'Assembly Completed', value: fmtWhen(at.assembly_completed_at) },
+      { label: 'Assembly Duration', value: at.assembly_duration_display || '—' },
+      {
+        label: 'Production Labor Hours',
+        value: at.total_stage_labor_display || '0h 0m',
+      },
+    ]);
+    y = drawSectionHeading(doc, M, w, y, 'Quality (QA/QC) — not production time');
+    y = drawInfoGrid(doc, M, w, y, [
+      {
+        label: 'Requires Test',
+        value: at.requires_test === true || at.requires_test === 1 ? 'Yes' : 'No',
+      },
+      { label: 'Test Started', value: fmtWhen(at.testing_started_at) },
+      { label: 'Test Completed', value: fmtWhen(at.testing_completed_at) },
+      { label: 'Test Result', value: at.latest_test_result || '—' },
+      {
+        label: 'QA/QC Testing Elapsed',
+        value: at.testing_elapsed_display || '0h 0m',
+      },
+    ]);
+    y = drawSectionHeading(doc, M, w, y, 'Production Labor Sessions (Assembly / Correction)');
+    y = drawTable(
+      doc,
+      M,
+      y,
+      [
+        { key: 'stage', label: 'Stage', width: 80 },
+        { key: 'team', label: 'Team', width: 100 },
+        { key: 'start', label: 'Start', width: 110 },
+        { key: 'end', label: 'End', width: 110 },
+        { key: 'duration', label: 'Duration', width: 70, align: 'right' },
+        { key: 'status', label: 'Status', width: 58 },
+      ],
+      (at.stage_sessions || []).map((s) => ({
+        stage: s.stage || '—',
+        team: s.team_name || '—',
+        start: fmtWhen(s.started_at),
+        end: s.status === 'active' ? 'In progress' : fmtWhen(s.ended_at),
+        duration: s.duration_display || '—',
+        status: s.status || '—',
+      })),
+      { emptyText: 'No stage labor sessions.' }
+    );
+    y = drawSectionHeading(doc, M, w, y, 'Test Attempts');
+    y = drawTable(
+      doc,
+      M,
+      y,
+      [
+        { key: 'result', label: 'Result', width: 60 },
+        { key: 'when', label: 'When', width: 120 },
+        { key: 'who', label: 'Tester / Team', width: 140 },
+        { key: 'note', label: 'Note', width: 208 },
+      ],
+      (at.test_attempts || []).map((a) => ({
+        result: a.result || '—',
+        when: fmtWhen(a.attempted_at),
+        who: a.tester_employee_name || a.team_name || '—',
+        note: a.failure_note || '—',
+      })),
+      { emptyText: 'No test attempts.' }
+    );
+  }
 
   return finalizePdf(doc);
 }

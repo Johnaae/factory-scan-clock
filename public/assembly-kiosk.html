@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Factory Scan Clock — Assembly / Testing Kiosk</title>
+    <meta name="theme-color" content="#0f2a44" />
+    <link rel="stylesheet" href="/scan.css" />
+    <link rel="stylesheet" href="/status-styles.css" />
+    <style>
+      .wk-sub { font-size: 1.1rem; font-weight: 700; color: #1e3a5f; margin: 0.15rem 0 0; }
+      .wk-assignment { display: flex; align-items: center; gap: 12px; background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 10px; padding: 12px 16px; margin: 12px 0; }
+      .wk-assignment-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: #047857; font-weight: 700; }
+      .wk-assignment-team { font-size: 1.15rem; font-weight: 800; color: #065f46; }
+      .wk-touch { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin-top: 14px; }
+      .wk-touch .btn-touch { min-height: 56px; font-size: 15px; font-weight: 800; border-radius: 12px; }
+      .btn-touch--employee-out { background: #fff7ed; border-color: #fdba74; color: #9a3412; }
+      .btn-touch--pass { background: #ecfdf5; border-color: #6ee7b7; color: #065f46; }
+      .btn-touch--fail { background: #fef2f2; border-color: #fca5a5; color: #991b1b; }
+      .btn-touch--complete { background: #eff6ff; border-color: #93c5fd; color: #1e40af; }
+      .btn-touch--start-work {
+        background: #166534; border-color: #166534; color: #fff;
+        font-size: 1.05rem !important; min-height: 64px !important;
+        box-shadow: 0 2px 0 #14532d;
+      }
+      .btn-touch--start-work:hover, .btn-touch--start-work:focus { background: #15803d; border-color: #15803d; color: #fff; }
+      .ak-start-hint {
+        margin: 0; padding: 10px 12px; border-radius: 10px;
+        background: #ecfdf5; border: 1px solid #6ee7b7; color: #065f46; font-weight: 700;
+      }
+      .ak-select-panel {
+        margin-top: 14px; padding: 14px 16px; border: 1px solid #cbd5e1; border-radius: 12px;
+        background: #f8fafc; display: grid; gap: 10px;
+      }
+      .ak-select-panel[hidden] { display: none !important; }
+      .ak-section {
+        margin-top: 18px; padding: 16px 16px 18px; border: 2px solid #cbd5e1; border-radius: 14px;
+        background: #fff;
+      }
+      .ak-section--assembly { border-color: #99f6e4; background: linear-gradient(180deg, #f0fdfa 0%, #fff 48px); }
+      .ak-section--testing { border-color: #7dd3fc; background: linear-gradient(180deg, #f0f9ff 0%, #fff 48px); }
+      .ak-section[hidden] { display: none !important; }
+      .ak-section-title {
+        margin: 0 0 4px; font-size: 1.05rem; font-weight: 900; letter-spacing: 0.08em;
+        text-transform: uppercase; color: #0f172a;
+      }
+      .ak-section--testing .ak-section-title { color: #075985; }
+      .ak-section--assembly .ak-section-title { color: #0f766e; }
+      .ak-select-label { margin: 0; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; color: #475569; font-weight: 800; }
+      .ak-select-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: stretch; }
+      .ak-select-row select {
+        flex: 1 1 220px; min-height: 52px; font-size: 1.05rem; font-weight: 700;
+        border: 2px solid #94a3b8; border-radius: 10px; padding: 8px 12px; background: #fff; color: #0f172a;
+      }
+      .ak-select-row .btn-touch { flex: 0 0 auto; min-width: 160px; }
+      .ak-confirmed-heading { margin: 18px 0 0; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; color: #64748b; font-weight: 800; }
+      .ak-metric--assembly .ak-metric-value { color: #0f766e; }
+      .ak-metric--labor .ak-metric-value { color: #1d4ed8; }
+      .ak-tank-grid { display: grid; gap: 14px; margin-top: 10px; }
+      .ak-tank-card {
+        background: #fff;
+        border: 2px solid #e2e8f0;
+        border-radius: 14px;
+        padding: 16px;
+        display: grid;
+        gap: 12px;
+      }
+      .ak-tank-card.is-active { border-color: #2563eb; background: #f8fbff; box-shadow: 0 0 0 1px #93c5fd inset; }
+      .ak-tank-card--testing { border-color: #7dd3fc; background: #f8fbff; }
+      .ak-tank-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 10px; }
+      .ak-tank-title { margin: 0; font-size: 1.35rem; font-weight: 800; color: #0f172a; }
+      .ak-tank-stage { margin: 4px 0 0; font-size: 0.95rem; font-weight: 700; color: #334155; }
+      .ak-badge {
+        display: inline-block; padding: 6px 12px; border-radius: 999px; font-size: 0.8rem; font-weight: 800;
+        letter-spacing: 0.04em; text-transform: uppercase;
+      }
+      .ak-badge--active { background: #dcfce7; color: #166534; }
+      .ak-badge--waiting { background: #f1f5f9; color: #475569; }
+      .ak-badge--testing { background: #e0f2fe; color: #075985; }
+      .ak-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+      .ak-metric { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px 12px; }
+      .ak-metric-label { margin: 0 0 4px; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: #64748b; font-weight: 700; }
+      .ak-metric-value { margin: 0; font-size: 1.05rem; font-weight: 800; color: #1e3a5f; }
+      .ak-tank-actions { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+      .ak-tank-actions .btn-touch { min-height: 56px; font-size: 14px; font-weight: 800; border-radius: 12px; }
+      .ak-empty { margin: 18px 0 0; padding: 18px; border: 1px dashed #cbd5e1; border-radius: 12px; background: #f8fafc; font-weight: 700; color: #64748b; }
+      .ak-empty[hidden] { display: none !important; }
+      .modal-note { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: none; align-items: center; justify-content: center; z-index: 80; padding: 16px; }
+      .modal-note.show { display: flex; }
+      .modal-note-card { background: #fff; border-radius: 14px; padding: 18px; width: min(480px, 100%); display: grid; gap: 10px; }
+      .employee-out-modal.show { backdrop-filter: blur(8px); background: rgba(15,23,42,.55); }
+      .employee-out-card { width: min(560px, 100%); max-height: min(85vh, 720px); overflow: hidden; }
+      .employee-out-list { display: grid; gap: 10px; max-height: min(52vh, 420px); overflow-y: auto; -webkit-overflow-scrolling: touch; }
+      .employee-out-row {
+        display: block; width: 100%; text-align: left; min-height: 76px;
+        padding: 14px 16px; border: 2px solid #cbd5e1; border-radius: 14px;
+        background: #fff; cursor: pointer; font: inherit;
+      }
+      .employee-out-row:hover, .employee-out-row:focus { border-color: #ea580c; background: #fff7ed; outline: none; }
+      .employee-out-name { display: block; font-size: 1.25rem; font-weight: 800; color: #1e3a5f; }
+      .employee-out-meta { display: block; margin-top: 4px; font-size: 0.95rem; font-weight: 700; color: #64748b; }
+      .employee-out-confirm-text { margin: 0; font-size: 1.15rem; font-weight: 800; color: #9a3412; line-height: 1.35; }
+      .employee-out-empty { margin: 0; font-size: 1.05rem; font-weight: 700; color: #64748b; }
+      .employee-out-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }
+      .employee-out-actions .btn-primary, .employee-out-actions .btn-secondary { min-height: 52px; font-size: 16px; font-weight: 800; }
+      .lang-bar { margin-left: auto; }
+      @media (max-width: 640px) { .ak-metrics { grid-template-columns: 1fr; } }
+    </style>
+  </head>
+  <body class="scan-kiosk">
+    <main class="kiosk-page">
+      <header class="kiosk-header">
+        <div class="kiosk-header-row">
+          <div>
+            <h1>Factory Scan Clock</h1>
+            <p id="machineLabel" class="wk-sub">Assembly / Testing</p>
+          </div>
+          <div id="kioskLangMount" class="lang-bar"></div>
+          <button id="logoutBtn" type="button" class="btn-secondary">Exit Kiosk</button>
+        </div>
+      </header>
+      <section class="kiosk-card scan-panel">
+        <div class="scan-panel-head">
+          <h2 id="workflowTitle">Scan Team or Employee</h2>
+          <p id="workflowSub">Scan TEAM or EMPLOYEE only. Select tanks and use CONFIRM / START / STOP / FINISH buttons.</p>
+        </div>
+        <input id="scannerTrap" type="text" class="scanner-trap-input" tabindex="0" inputmode="none" autocomplete="off" readonly aria-label="Scanner" />
+        <form id="scanForm" class="scan-input-row" autocomplete="off">
+          <label for="manualBarcodeInput">Scan Team / Employee only</label>
+          <div class="scan-input-wrap scan-input-wrap--scanner">
+            <input id="manualBarcodeInput" type="text" placeholder="TEAM or EMPLOYEE barcode only" autocomplete="off" />
+            <button id="scanButton" type="button" class="scan-submit-btn">Scan</button>
+          </div>
+        </form>
+        <p id="scanWarning" class="scan-warning" role="alert" hidden></p>
+        <div id="assignmentBanner" class="wk-assignment" role="status" hidden>
+          <span class="wk-assignment-label">Assigned Team / Employee</span>
+          <strong id="assignmentTeam" class="wk-assignment-team">—</strong>
+        </div>
+
+        <section id="assemblySection" class="ak-section ak-section--assembly" hidden>
+          <h2 class="ak-section-title">Assembly</h2>
+          <div id="tankSelectPanel" class="ak-select-panel">
+            <p class="ak-select-label">Select Tank</p>
+            <div class="ak-select-row">
+              <select id="tankSelect" aria-label="Select tank for assembly">
+                <option value="">Choose a tank…</option>
+              </select>
+              <button type="button" class="btn-primary btn-touch" id="btnConfirmTank">CONFIRM TANK</button>
+            </div>
+          </div>
+          <h3 id="assemblyConfirmedHeading" class="ak-confirmed-heading" hidden>Confirmed for Assembly</h3>
+          <div id="assemblyTankList" class="ak-tank-grid" aria-live="polite"></div>
+          <div id="assemblyEmptyState" class="ak-empty">No tanks confirmed for Assembly. Select a tank above and press CONFIRM TANK.</div>
+        </section>
+
+        <section id="testingSection" class="ak-section ak-section--testing" hidden>
+          <h2 class="ak-section-title">Testing / QA-QC</h2>
+          <div id="testingSelectPanel" class="ak-select-panel">
+            <p class="ak-select-label">Select Tank for Testing</p>
+            <div class="ak-select-row">
+              <select id="testingTankSelect" aria-label="Select tank for testing">
+                <option value="">Choose a tank…</option>
+              </select>
+              <button type="button" class="btn-primary btn-touch" id="btnConfirmTest">CONFIRM TEST</button>
+            </div>
+          </div>
+          <h3 id="testingConfirmedHeading" class="ak-confirmed-heading" hidden>Testing on this kiosk</h3>
+          <div id="testingTankList" class="ak-tank-grid" aria-live="polite"></div>
+          <div id="testingEmptyState" class="ak-empty">No tanks confirmed for Testing. Select a tank above and press CONFIRM TEST.</div>
+        </section>
+
+        <div class="wk-touch" id="stationControls" aria-label="Station actions">
+          <button type="button" class="btn-secondary btn-touch" id="btnBreak">Break</button>
+          <button type="button" class="btn-secondary btn-touch" id="btnLunch">Lunch</button>
+          <button type="button" class="btn-secondary btn-touch btn-touch--employee-out" id="btnEmployeeOut">Employee Out</button>
+          <button type="button" class="btn-secondary btn-touch" id="btnEndShift">End Shift</button>
+        </div>
+      </section>
+    </main>
+
+    <div id="confirmModal" class="modal-note" role="dialog" aria-modal="true" hidden>
+      <div class="modal-note-card">
+        <h3 id="confirmTitle">Confirm</h3>
+        <p id="confirmText" style="margin:0;font-weight:700;color:#1e3a5f;"></p>
+        <div class="employee-out-actions">
+          <button type="button" class="btn-primary" id="btnConfirmOk">Confirm</button>
+          <button type="button" class="btn-secondary" id="btnConfirmCancel">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="failModal" class="modal-note" role="dialog" aria-modal="true" hidden>
+      <div class="modal-note-card">
+        <h3>Test FAIL — note required</h3>
+        <textarea id="failNote" rows="4" placeholder="Describe the failure…"></textarea>
+        <div class="employee-out-actions">
+          <button type="button" class="btn-primary" id="btnFailSave">Record FAIL</button>
+          <button type="button" class="btn-secondary" id="btnFailCancel">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="employeeOutModal" class="modal-note employee-out-modal" role="dialog" aria-modal="true" hidden>
+      <div class="modal-note-card employee-out-card">
+        <h3>Employee Out</h3>
+        <p id="employeeOutHint" class="muted" style="margin:0">Select an employee on this team’s open shift.</p>
+        <div id="employeeOutList" class="employee-out-list"></div>
+        <p id="employeeOutEmpty" class="employee-out-empty" hidden>No employees on shift.</p>
+        <div id="employeeOutConfirm" hidden>
+          <p id="employeeOutConfirmText" class="employee-out-confirm-text"></p>
+        </div>
+        <div class="employee-out-actions">
+          <button type="button" class="btn-primary" id="btnConfirmEmployeeOut" hidden>Confirm Out</button>
+          <button type="button" class="btn-secondary" id="btnCancelEmployeeOut">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/status-styles.js"></script>
+    <script src="/i18n.js"></script>
+    <script src="/assembly-kiosk.js?v=split-ui-1"></script>
+  </body>
+</html>

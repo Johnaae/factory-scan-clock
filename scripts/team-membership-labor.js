@@ -416,12 +416,16 @@ function createTeamMembershipAndLabor(pool, helpers = {}) {
     };
   }
 
-  async function computeEmployeeMembershipProductionMs(employeeId, bounds, closeMs = Date.now()) {
+  /**
+   * Phase 1 winding labor intervals for one employee, clipped to bounds.
+   * Intervals are membership ∩ session windows (production phases only).
+   */
+  async function collectEmployeeMembershipProductionIntervals(employeeId, bounds, closeMs = Date.now()) {
     const id = Number(employeeId);
-    if (!Number.isInteger(id) || id <= 0 || !bounds) return 0;
+    if (!Number.isInteger(id) || id <= 0 || !bounds) return [];
     const ws = new Date(bounds.startIso).getTime();
     const we = new Date(bounds.endIso).getTime();
-    if (Number.isNaN(ws) || Number.isNaN(we)) return 0;
+    if (Number.isNaN(ws) || Number.isNaN(we)) return [];
 
     const { rows: memberships } = await pool.query(
       `SELECT team_id, joined_at, left_at FROM employee_team_memberships WHERE employee_id = $1`,
@@ -457,9 +461,14 @@ function createTeamMembershipAndLabor(pool, helpers = {}) {
         if (joinMs == null || leaveMs == null) continue;
         const start = Math.max(boundStart, joinMs);
         const end = Math.min(boundEnd, leaveMs);
-        if (end > start) intervals.push({ start, end });
+        if (end > start) intervals.push({ start, end, source: 'phase1' });
       }
     }
+    return intervals;
+  }
+
+  async function computeEmployeeMembershipProductionMs(employeeId, bounds, closeMs = Date.now()) {
+    const intervals = await collectEmployeeMembershipProductionIntervals(employeeId, bounds, closeMs);
     return mergeIntervalsMs(intervals);
   }
 
@@ -856,6 +865,7 @@ function createTeamMembershipAndLabor(pool, helpers = {}) {
     closeTeamShiftMemberships,
     findOpenPieceSession,
     computeMembershipAwareTankLabor,
+    collectEmployeeMembershipProductionIntervals,
     computeEmployeeMembershipProductionMs,
     employeeSessionLaborMs,
     mergeIntervalsMs,

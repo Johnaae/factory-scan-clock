@@ -304,12 +304,14 @@
         }
         kioskAreaSelect.innerHTML = ['<option value="">Select machine...</option>']
           .concat(
-            loginMachines.map(
-              (m) => `<option value="${String(m.id)}">${String(m.name || '')
+            loginMachines.map((m) => {
+              const wf = String(m.workflow || 'winding').toLowerCase();
+              const labelSuffix = wf === 'assembly_testing' ? ' (Assembly / Testing)' : ' (Winding)';
+              return `<option value="${String(m.id)}">${String(m.name || '')
                 .replace(/&/g, '&amp;')
                 .replace(/</g, '&lt;')
-                .replace(/>/g, '&gt;')}</option>`
-            )
+                .replace(/>/g, '&gt;')}${labelSuffix}</option>`;
+            })
           )
           .join('');
       }

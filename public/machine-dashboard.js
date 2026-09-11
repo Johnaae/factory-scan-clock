@@ -294,6 +294,14 @@
     </div>`;
   }
 
+  function workflowBadgeFromMachine(m) {
+    const wf = String((m && m.workflow) || 'winding').toLowerCase();
+    if (wf === 'assembly_testing') {
+      return '<span class="machine-workflow-badge machine-workflow-badge--assembly">ASSEMBLY + TESTING</span>';
+    }
+    return '<span class="machine-workflow-badge machine-workflow-badge--fab">FAB / WINDING</span>';
+  }
+
   function renderCard(m, opts) {
     const alerts = m.open_alerts || [];
     const alertCount = alerts.length;
@@ -323,10 +331,12 @@
 
     const assignedTeam = m.assigned_team || m.current_team || '—';
     const machineStatusText = statusLabel(m.status, m.status_label);
+    const wf = String(m.workflow || 'winding').toLowerCase();
 
-    return `<article class="machine-card ${cardAlertCls}" data-machine-id="${Number(m.id)}">
+    return `<article class="machine-card ${cardAlertCls}" data-machine-id="${Number(m.id)}" data-workflow="${escapeHtml(wf)}">
       <header class="machine-card-head">
         <div>
+          <div class="machine-card-workflow">${workflowBadgeFromMachine(m)}</div>
           <h3 class="machine-card-title">${escapeHtml(m.name)}</h3>
           <p class="machine-card-assigned">Assigned Team: <strong data-field="team">${escapeHtml(assignedTeam)}</strong></p>
         </div>
@@ -519,6 +529,56 @@
     return data.machines || [];
   }
 
+  async function fetchAssemblyMachines() {
+    const { res, data } = await fetchJson('/api/manager/assembly-machines');
+    if (!res.ok || !data.ok) throw new Error((data && data.message) || 'Could not load assembly machines');
+    return data.machines || [];
+  }
+
+  function renderAssemblyTankRow(t) {
+    const session = t.active_session || null;
+    const stage = session
+      ? String(session.stage || '').toUpperCase()
+      : String(t.status || '')
+          .replace(/_/g, ' ')
+          .toUpperCase();
+    const labor = (t.labor && t.labor.total_display) || '0h 0m';
+    const duration = t.duration_display || t.duration_summary || '0h 0m';
+    const active = Boolean(session);
+    return `<div class="machine-tank-card ${active ? 'is-running' : ''}">
+      <div class="machine-tank-card-main">
+        <strong>Tank ${escapeHtml(t.tank_number || '—')}</strong>
+        <span>${escapeHtml(stage || '—')}</span>
+        <span>Duration ${escapeHtml(duration)}</span>
+        <span>Labor ${escapeHtml(labor)}</span>
+        <span>${active ? 'ACTIVE' : 'WAITING'}</span>
+      </div>
+    </div>`;
+  }
+
+  function renderAssemblyCard(m) {
+    const tanks = Array.isArray(m.tanks) ? m.tanks : [];
+    const assignedTeam = m.assigned_team || m.current_team || '—';
+    const machineStatusText = statusLabel(m.status, m.status_label);
+    const tanksHtml = tanks.length
+      ? `<div class="machine-active-tanks" data-field="active-tanks">
+          <div class="machine-active-tanks-label">Stage tanks (${tanks.length})</div>
+          <div class="machine-active-tanks-list">${tanks.map(renderAssemblyTankRow).join('')}</div>
+        </div>`
+      : `<div class="machine-active-tanks" data-field="active-tanks"><div class="machine-active-tanks-label">No active stage tanks</div></div>`;
+    return `<article class="machine-card" data-machine-id="${Number(m.id)}" data-workflow="assembly_testing">
+      <header class="machine-card-head">
+        <div>
+          <div class="machine-card-workflow">${workflowBadgeFromMachine({ workflow: 'assembly_testing' })}</div>
+          <h3 class="machine-card-title">${escapeHtml(m.name)}</h3>
+          <p class="machine-card-assigned">Assigned Team: <strong data-field="team">${escapeHtml(assignedTeam)}</strong></p>
+        </div>
+        <span class="machine-card-status machine-card-status--${escapeHtml(m.status || 'idle')}" data-field="machine-status">${escapeHtml(machineStatusText)}</span>
+      </header>
+      ${tanksHtml}
+    </article>`;
+  }
+
   async function fetchOpenAlerts() {
     const { res, data } = await fetchJson('/api/manager/alerts?status=open');
     if (!res.ok || !data.ok) throw new Error((data && data.message) || 'Could not load alerts');
@@ -638,5 +698,77 @@
     };
   }
 
-  root.MachineDashboard = { mount, fetchMachines, fetchOpenAlerts, renderCard, renderGlobalAlerts, renderEmailStatus };
+  function mountAssembly(containerId, opts) {
+    const el = document.getElementById(containerId);
+    if (!el) return null;
+    const options = opts || {};
+
+    function syncCards(machines) {
+      let wrap = el.querySelector('.machine-card-grid-wrap');
+      const signature = machines.map((m) => Number(m.id)).join(',');
+      if (!wrap || el.dataset.machineSignature !== signature) {
+        el.innerHTML = `<div class="machine-card-grid-wrap">${machines.map((m) => renderAssemblyCard(m)).join('')}</div>`;
+        el.dataset.machineSignature = signature;
+      } else {
+        machines.forEach((m) => {
+          const cardEl = wrap.querySelector(`.machine-card[data-machine-id="${Number(m.id)}"]`);
+          if (!cardEl) return;
+          const assignedTeam = m.assigned_team || m.current_team || '—';
+          const teamEl = cardEl.querySelector('[data-field="team"]');
+          if (teamEl) teamEl.textContent = assignedTeam;
+          const statusEl = cardEl.querySelector('[data-field="machine-status"]');
+          if (statusEl) {
+            statusEl.textContent = statusLabel(m.status, m.status_label);
+            statusEl.className = `machine-card-status machine-card-status--${m.status || 'idle'}`;
+          }
+          const tanksEl = cardEl.querySelector('[data-field="active-tanks"]');
+          if (tanksEl) {
+            const tanks = Array.isArray(m.tanks) ? m.tanks : [];
+            tanksEl.outerHTML = tanks.length
+              ? `<div class="machine-active-tanks" data-field="active-tanks">
+                  <div class="machine-active-tanks-label">Stage tanks (${tanks.length})</div>
+                  <div class="machine-active-tanks-list">${tanks.map(renderAssemblyTankRow).join('')}</div>
+                </div>`
+              : `<div class="machine-active-tanks" data-field="active-tanks"><div class="machine-active-tanks-label">No active stage tanks</div></div>`;
+          }
+        });
+      }
+    }
+
+    async function refresh() {
+      try {
+        const machines = await fetchAssemblyMachines();
+        if (!machines.length) {
+          el.innerHTML = '<p class="muted">No assembly / testing machines configured.</p>';
+          el.dataset.machineSignature = '';
+          return;
+        }
+        syncCards(machines);
+      } catch (err) {
+        el.dataset.machineSignature = '';
+        el.innerHTML = renderLoadError(err.message || 'Could not load assembly machines', 'assembly');
+        const retry = el.querySelector('[data-retry]');
+        if (retry) retry.addEventListener('click', () => void refresh());
+      }
+    }
+
+    void refresh();
+    const timer = setInterval(() => void refresh(), options.pollMs || POLL_MS);
+    return {
+      refresh,
+      stop: () => clearInterval(timer),
+    };
+  }
+
+  root.MachineDashboard = {
+    mount,
+    mountAssembly,
+    fetchMachines,
+    fetchAssemblyMachines,
+    fetchOpenAlerts,
+    renderCard,
+    renderAssemblyCard,
+    renderGlobalAlerts,
+    renderEmailStatus,
+  };
 })(window);

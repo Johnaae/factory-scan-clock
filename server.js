@@ -2066,19 +2066,48 @@ function normalizeTankNumber(raw) {
   return s.slice(0, 24);
 }
 
-/** Registry status: always lowercase `waiting` | `active` | `paused` | `archived`. */
+const PHASE2_TANK_STATUSES = [
+  'ready_for_assembly',
+  'assembly_in_progress',
+  'ready_for_testing',
+  'testing_in_progress',
+  'ready_for_dome_install',
+  'ready_for_final_completion',
+];
+
+/** Registry status: waiting | active | paused | archived | Phase 2 stage statuses. */
 function normalizeTankStatus(raw) {
   const s = String(raw == null || raw === '' ? 'waiting' : raw)
     .trim()
     .toLowerCase();
-  if (s === 'archived' || s === 'completed') return 'archived';
-  if (s === 'paused') return 'paused';
   if (s === 'waiting' || s === 'pending') return 'waiting';
+  if (s === 'paused') return 'paused';
+  if (s === 'archived' || s === 'completed') return 'archived';
+  if (
+    s === 'ready_for_dome_install' ||
+    s === 'ready_for_final_completion' ||
+    s === 'ready_to_ship' ||
+    s === 'final_ready'
+  ) {
+    return 'ready_for_dome_install';
+  }
+  if (PHASE2_TANK_STATUSES.includes(s)) return s;
+  if (s === 'active') return 'active';
   return 'active';
 }
 
 const TANK_SELECT_COLUMNS =
-  'id, tank_number, description, status, created_at, completed_at, updated_at, first_scanned_at, customer, model, priority, due_date, notes, piece_count, current_piece_number, deleted_at, deleted_by, deleted_reason, previous_status, restored_at, restored_by';
+  'id, tank_number, description, status, created_at, completed_at, updated_at, first_scanned_at, customer, model, priority, due_date, notes, piece_count, current_piece_number, deleted_at, deleted_by, deleted_reason, previous_status, restored_at, restored_by, fab_completed_at, assembly_started_at, assembly_completed_at, testing_started_at, testing_completed_at, requires_test';
+
+function parseRequiresTestFlag(value, fallback = false) {
+  if (value === undefined || value === null) return Boolean(fallback);
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  const s = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on', 't'].includes(s)) return true;
+  if (['0', 'false', 'no', 'off', 'f', ''].includes(s)) return false;
+  return Boolean(fallback);
+}
 
 function tankTimestampToIso(value) {
   if (value == null || value === '') return null;
@@ -2094,6 +2123,14 @@ function computeTankDurationMs(row) {
   const startIso = tankTimestampToIso(row && row.first_scanned_at);
   if (!startIso) return 0;
   const start = new Date(startIso);
+  // Production Total Running Time freezes permanently at Assembly FINISH.
+  const assemblyDoneIso = tankTimestampToIso(row && row.assembly_completed_at);
+  if (assemblyDoneIso) {
+    const end = new Date(assemblyDoneIso);
+    if (!Number.isNaN(end.getTime())) {
+      return Math.max(0, end.getTime() - start.getTime());
+    }
+  }
   let end = new Date();
   if (status === 'archived') {
     const completedIso = tankTimestampToIso(row.completed_at);
@@ -2150,6 +2187,12 @@ function mapTankRowForApi(row) {
     restored_at: tankTimestampToIso(row.restored_at),
     restored_by: row.restored_by || null,
     is_deleted: row.deleted_at != null,
+    fab_completed_at: tankTimestampToIso(row.fab_completed_at),
+    assembly_started_at: tankTimestampToIso(row.assembly_started_at),
+    assembly_completed_at: tankTimestampToIso(row.assembly_completed_at),
+    testing_started_at: tankTimestampToIso(row.testing_started_at),
+    testing_completed_at: tankTimestampToIso(row.testing_completed_at),
+    requires_test: parseRequiresTestFlag(row.requires_test, false),
   };
 }
 
@@ -4622,7 +4665,7 @@ app.post('/api/auth/login', async (req, res) => {
 app.get('/api/auth/kiosk-login-machines', async (_req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT id, name, code, barcode, kiosk_slug, sort_order, active
+      `SELECT id, name, code, barcode, kiosk_slug, sort_order, active, workflow
        FROM machines
        WHERE active = 1
          AND NOT (
@@ -4793,6 +4836,94 @@ const phase1 = createPhase1ProductionLogic({
   weekBoundsLocal,
 });
 
+/** Phase 2 assembly + testing production logic */
+const { createPhase2AssemblyTesting } = require('./scripts/phase2-assembly-testing');
+const phase2 = createPhase2AssemblyTesting(pool, {
+  nowIso,
+  normalizeTankNumber,
+  localDateString,
+  getTeamByBarcode: (barcode) => phase1.getTeamByBarcode(barcode),
+  getMachineAssignment: (id) => phase1.getMachineAssignment(id),
+  assignTeamToMachine: (mid, team) => phase1.assignTeamToMachine(mid, team),
+  listOpenShiftEmployeesForTeam: (tid) =>
+    typeof phase1.listOpenShiftEmployeesForTeam === 'function'
+      ? phase1.listOpenShiftEmployeesForTeam(tid)
+      : null,
+  startTeamShiftMemberships: (...args) => {
+    try {
+      if (typeof phase1.startTeamShiftMemberships === 'function') {
+        return phase1.startTeamShiftMemberships(...args);
+      }
+    } catch (_err) {
+      /* optional helper */
+    }
+    return null;
+  },
+});
+
+/** Unified Phase1 + Phase2 (+ scan) employee labor for Team/Employee details */
+const { createUnifiedEmployeeLabor } = require('./scripts/unified-employee-labor');
+
+async function collectScanLaborIntervalsForUnified(employeeId, bounds, closeMs = Date.now()) {
+  const id = Number(employeeId);
+  if (!Number.isInteger(id) || id <= 0 || !bounds) return [];
+  const windowStartMs = new Date(bounds.startIso).getTime();
+  const windowEndMs = new Date(bounds.endIso).getTime();
+  if (Number.isNaN(windowStartMs) || Number.isNaN(windowEndMs)) return [];
+  const todayKey = localDateString();
+  const boundsDayStart = localDateString(new Date(bounds.startIso));
+  const boundsDayEnd = localDateString(new Date(Math.min(windowEndMs, closeMs)));
+  const isTodayWindow = boundsDayEnd === todayKey && boundsDayStart === todayKey;
+
+  const carryRes = await pool.query(
+    `SELECT status, scanned_at FROM scan_logs
+     WHERE employee_id = $1 AND scanned_at < $2::timestamptz
+     ORDER BY scanned_at DESC, id DESC LIMIT 1`,
+    [id, bounds.startIso]
+  );
+  const carryRow = carryRes.rows[0] || null;
+  const logsRes = await pool.query(
+    `SELECT status, scanned_at FROM scan_logs
+     WHERE employee_id = $1 AND scanned_at >= $2::timestamptz AND scanned_at <= $3::timestamptz
+     ORDER BY scanned_at ASC, id ASC`,
+    [id, bounds.startIso, bounds.endIso]
+  );
+  const paired = pairSessionsMsForWindow(logsRes.rows, {
+    closeMs,
+    windowStartMs,
+    windowEndMs,
+    isToday: isTodayWindow || boundsDayEnd === todayKey,
+    carryPendingIn:
+      carryRow && String(carryRow.status || '').toUpperCase() === 'IN' ? carryRow : null,
+  });
+  return (paired.sessions || [])
+    .map((s) => {
+      const start = new Date(s.in).getTime();
+      const end = new Date(s.out).getTime();
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
+      return { start, end, source: 'scan' };
+    })
+    .filter(Boolean);
+}
+
+const unifiedLabor = createUnifiedEmployeeLabor(pool, {
+  nowIso,
+  localDateString,
+  roundHours2,
+  displayMachineName,
+  mergeIntervalsMs:
+    typeof phase1.mergeIntervalsMs === 'function' ? (...args) => phase1.mergeIntervalsMs(...args) : undefined,
+  collectPhase1Intervals: (employeeId, bounds, closeMs) =>
+    typeof phase1.collectEmployeeMembershipProductionIntervals === 'function'
+      ? phase1.collectEmployeeMembershipProductionIntervals(employeeId, bounds, closeMs)
+      : Promise.resolve([]),
+  collectScanIntervals: collectScanLaborIntervalsForUnified,
+  formatXhYmFromMs: (ms) => {
+    const totalMin = Math.round(Math.max(0, Number(ms) || 0) / 60000);
+    return `${Math.floor(totalMin / 60)}h ${totalMin % 60}m`;
+  },
+});
+
 const alertEmail = createAlertEmailService({ pool });
 
 void ensureDatabaseReady().then(async () => {
@@ -4819,6 +4950,46 @@ async function windingMachineFromRequest(req) {
   }
   const auth = currentKioskFromSession(req);
   return windingMachineFromKioskAuth(auth);
+}
+
+function machineWorkflow(machine) {
+  return String((machine && machine.workflow) || 'winding')
+    .trim()
+    .toLowerCase();
+}
+
+function isAssemblyTestingMachine(machine) {
+  return machineWorkflow(machine) === 'assembly_testing';
+}
+
+async function assemblyMachineFromRequest(req) {
+  const machine = await windingMachineFromRequest(req);
+  if (!machine) return null;
+  if (!isAssemblyTestingMachine(machine)) return null;
+  return machine;
+}
+
+function rejectWrongKioskWorkflow(res, machine, expected) {
+  const wf = machineWorkflow(machine);
+  if (expected === 'winding' && wf === 'assembly_testing') {
+    res.status(409).json({
+      ok: false,
+      error: 'wrong_workflow',
+      message: 'This machine is Assembly/Testing. Open the assembly kiosk.',
+      workflow: 'assembly_testing',
+    });
+    return true;
+  }
+  if (expected === 'assembly_testing' && wf !== 'assembly_testing') {
+    res.status(409).json({
+      ok: false,
+      error: 'wrong_workflow',
+      message: 'This machine is Winding. Open the winding kiosk.',
+      workflow: wf || 'winding',
+    });
+    return true;
+  }
+  return false;
 }
 
 function mapWindingMachineResponse(machine) {
@@ -5600,6 +5771,7 @@ app.get('/api/kiosk/winding/config', async (req, res) => {
     if (!machine || !Number(machine.active)) {
       return res.status(403).json({ ok: false, error: 'forbidden', message: 'Open a machine kiosk URL to use this screen.' });
     }
+    if (rejectWrongKioskWorkflow(res, machine, 'winding')) return;
     const openRows = await phase1.getOpenSessionsForMachine(machine.id);
     const activeTankId = machine.active_tank_id != null ? Number(machine.active_tank_id) : null;
     let session =
@@ -5696,6 +5868,7 @@ app.get('/api/kiosk/winding/shift-employees', async (req, res) => {
     if (!machine || !Number(machine.active)) {
       return res.status(403).json({ ok: false, error: 'forbidden', message: 'Open a machine kiosk URL to use this screen.' });
     }
+    if (rejectWrongKioskWorkflow(res, machine, 'winding')) return;
     const assignment = await phase1.getMachineAssignment(machine.id);
     if (!assignment) {
       return res.status(409).json({ ok: false, error: 'need_team', message: NEED_TEAM_MESSAGE });
@@ -5719,6 +5892,7 @@ app.post('/api/kiosk/winding/employee-out', async (req, res) => {
     if (!machine || !Number(machine.active)) {
       return res.status(403).json({ ok: false, error: 'forbidden', message: 'Open a machine kiosk URL to use this screen.' });
     }
+    if (rejectWrongKioskWorkflow(res, machine, 'winding')) return;
     const assignment = await phase1.getMachineAssignment(machine.id);
     if (!assignment) {
       return res.status(409).json({ ok: false, error: 'need_team', message: NEED_TEAM_MESSAGE });
@@ -5755,6 +5929,7 @@ app.post('/api/kiosk/winding/action', async (req, res) => {
     if (!machine || !Number(machine.active)) {
       return res.status(403).json({ ok: false, error: 'forbidden', message: 'Open a machine kiosk URL to use this screen.' });
     }
+    if (rejectWrongKioskWorkflow(res, machine, 'winding')) return;
     const body = req.body || {};
     const action = String(body.action || '').trim().toLowerCase();
     let result;
@@ -5901,6 +6076,416 @@ app.post('/api/kiosk/winding/action', async (req, res) => {
   }
 });
 
+async function handleAssemblyScanAction(machine, body) {
+  const barcode = String(body.barcode || '').trim();
+  if (!barcode) {
+    return { ok: false, status: 400, body: { ok: false, error: 'validation', message: 'Barcode required.' } };
+  }
+
+  // Assembly scan input is TEAM / EMPLOYEE only — never tank action keywords.
+  const keyword = barcode
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_');
+  const forbidden = new Set([
+    'confirm_tank',
+    'confirm',
+    'start',
+    'stop',
+    'finish',
+    'start_work',
+    'stop_work',
+    'assembly_complete',
+    'start_testing',
+    'start_correction',
+    'test_pass',
+    'test_fail',
+    'pass',
+    'fail',
+    'break',
+    'lunch',
+    'end_shift',
+    'pause',
+  ]);
+  if (forbidden.has(keyword)) {
+    return {
+      ok: false,
+      status: 400,
+      body: {
+        ok: false,
+        error: 'use_buttons',
+        message: 'Use the on-screen buttons for tank actions. Scan only a TEAM or EMPLOYEE barcode.',
+      },
+    };
+  }
+
+  let team = await phase1.getTeamByBarcode(barcode);
+  if (!team) {
+    const normalized = typeof phase1.normalizeTeamBarcode === 'function' ? phase1.normalizeTeamBarcode(barcode) : null;
+    if (normalized && normalized !== barcode) {
+      team = await phase1.getTeamByBarcode(normalized);
+    }
+  }
+  if (team && Number(team.active)) {
+    const result = await phase2.assignTeamToMachine(machine.id, team);
+    return result;
+  }
+
+  const employee = await lookupActiveEmployeeByScan(barcode);
+  if (employee) {
+    const assignment = await phase1.getMachineAssignment(machine.id);
+    if (!assignment) {
+      return {
+        ok: false,
+        status: 409,
+        body: { ok: false, error: 'need_team', message: NEED_TEAM_MESSAGE },
+      };
+    }
+    if (body.employee_out === true) {
+      const stageOut = await phase2.employeeOutFromStage(machine, { employee_id: employee.id });
+      if (stageOut.ok) return stageOut;
+      const out = await phase1.employeeOutFromTeam(employee.id, assignment.team_id, {
+        source: 'assembly_kiosk_employee_out',
+        reason: 'Assembly kiosk employee out',
+      });
+      if (!out.ok) return out;
+      return { ok: true, status: 200, body: { ok: true, ...out.body, assignment } };
+    }
+    return {
+      ok: true,
+      status: 200,
+      body: {
+        ok: true,
+        action: 'employee_selected',
+        employee: { id: Number(employee.id), code: employee.code, name: employee.name },
+        confirmer: { id: Number(employee.id), code: employee.code, name: employee.name },
+        assignment,
+        confirmation_line: `Selected Employee: ${employee.name}.`,
+      },
+    };
+  }
+
+  return {
+    ok: false,
+    status: 400,
+    body: {
+      ok: false,
+      error: 'unknown_barcode',
+      message: 'Unrecognized barcode. Scan a Team or employee badge only.',
+    },
+  };
+}
+
+app.get('/api/kiosk/assembly/config', async (req, res) => {
+  try {
+    const machine = await assemblyMachineFromRequest(req);
+    if (!machine || !Number(machine.active)) {
+      const any = await windingMachineFromRequest(req);
+      if (any && !isAssemblyTestingMachine(any)) {
+        return res.status(409).json({
+          ok: false,
+          error: 'wrong_workflow',
+          message: 'This machine is Winding. Open the winding kiosk.',
+          workflow: machineWorkflow(any),
+        });
+      }
+      return res.status(403).json({
+        ok: false,
+        error: 'forbidden',
+        message: 'Open an assembly machine kiosk URL to use this screen.',
+      });
+    }
+    const result = await phase2.getMachineConfig(machine.id);
+    if (!result.ok) return res.status(result.status).json(result.body);
+    // Keep eligible_tanks / confirmed_tanks from getMachineConfig (dropdown = FAB-ready only).
+    return res.json({
+      ...result.body,
+      workflow: 'assembly_testing',
+      pause_actions: ['BREAK', 'LUNCH'],
+      end_shift: 'END_SHIFT',
+    });
+  } catch (err) {
+    console.error('[assembly config]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load assembly kiosk.' });
+  }
+});
+
+/**
+ * Dedicated CONFIRM TANK — Assembly Duration only (no labor).
+ * Called only by the CONFIRM TANK button. Not part of scan or /action dispatcher.
+ */
+app.post('/api/kiosk/assembly/confirm-tank', async (req, res) => {
+  try {
+    const machine = await assemblyMachineFromRequest(req);
+    if (!machine || !Number(machine.active)) {
+      const any = await windingMachineFromRequest(req);
+      if (any && !isAssemblyTestingMachine(any)) {
+        return res.status(409).json({
+          ok: false,
+          error: 'wrong_workflow',
+          message: 'This machine is Winding. Open the winding kiosk.',
+          workflow: machineWorkflow(any),
+        });
+      }
+      return res.status(403).json({
+        ok: false,
+        error: 'forbidden',
+        message: 'Open an assembly machine kiosk URL to use this screen.',
+      });
+    }
+    if (typeof phase2.confirmTank !== 'function') {
+      return res.status(500).json({
+        ok: false,
+        error: 'not_implemented',
+        message: 'Confirm Tank is unavailable. Restart the server to load Phase 2 confirmTank.',
+      });
+    }
+    const body = req.body || {};
+    const tankId = body.tank_id != null ? body.tank_id : body.tankId;
+    console.log('[assembly confirm-tank]', { machine_id: machine.id, tank_id: tankId });
+    const result = await phase2.confirmTank(machine, { tank_id: tankId, tankId });
+    if (!result.ok) return res.status(result.status || 400).json(result.body);
+    return res.json(result.body);
+  } catch (err) {
+    console.error('[assembly confirm-tank]', err);
+    return res.status(500).json({
+      ok: false,
+      error: 'server_error',
+      message: err && err.message ? `Confirm tank failed: ${err.message}` : 'Could not confirm tank.',
+    });
+  }
+});
+
+/**
+ * Dedicated CONFIRM TEST — QA selects tank into Testing section (no labor, no start yet).
+ */
+app.post('/api/kiosk/assembly/confirm-test', async (req, res) => {
+  try {
+    const machine = await assemblyMachineFromRequest(req);
+    if (!machine || !Number(machine.active)) {
+      const any = await windingMachineFromRequest(req);
+      if (any && !isAssemblyTestingMachine(any)) {
+        return res.status(409).json({
+          ok: false,
+          error: 'wrong_workflow',
+          message: 'This machine is Winding. Open the winding kiosk.',
+          workflow: machineWorkflow(any),
+        });
+      }
+      return res.status(403).json({
+        ok: false,
+        error: 'forbidden',
+        message: 'Open an assembly machine kiosk URL to use this screen.',
+      });
+    }
+    if (typeof phase2.confirmTest !== 'function') {
+      return res.status(500).json({
+        ok: false,
+        error: 'not_implemented',
+        message: 'Confirm Test is unavailable. Restart the server to load Phase 2 confirmTest.',
+      });
+    }
+    const body = req.body || {};
+    const tankId = body.tank_id != null ? body.tank_id : body.tankId;
+    console.log('[assembly confirm-test]', { machine_id: machine.id, tank_id: tankId });
+    const result = await phase2.confirmTest(machine, { tank_id: tankId, tankId });
+    if (!result.ok) return res.status(result.status || 400).json(result.body);
+    return res.json(result.body);
+  } catch (err) {
+    console.error('[assembly confirm-test]', err);
+    return res.status(500).json({
+      ok: false,
+      error: 'server_error',
+      message: err && err.message ? `Confirm test failed: ${err.message}` : 'Could not confirm test.',
+    });
+  }
+});
+
+app.get('/api/kiosk/assembly/shift-employees', async (req, res) => {
+  try {
+    const machine = await assemblyMachineFromRequest(req);
+    if (!machine || !Number(machine.active)) {
+      return res.status(403).json({
+        ok: false,
+        error: 'forbidden',
+        message: 'Open an assembly machine kiosk URL to use this screen.',
+      });
+    }
+    const assignment = await phase1.getMachineAssignment(machine.id);
+    if (!assignment) {
+      return res.status(409).json({ ok: false, error: 'need_team', message: NEED_TEAM_MESSAGE });
+    }
+    const employees = await phase1.listOpenShiftEmployeesForTeam(assignment.team_id);
+    return res.json({
+      ok: true,
+      assignment,
+      team: { id: Number(assignment.team_id), name: assignment.team_name },
+      employees,
+    });
+  } catch (err) {
+    console.error('[assembly shift-employees]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load shift employees.' });
+  }
+});
+
+app.post('/api/kiosk/assembly/employee-out', async (req, res) => {
+  try {
+    const machine = await assemblyMachineFromRequest(req);
+    if (!machine || !Number(machine.active)) {
+      return res.status(403).json({
+        ok: false,
+        error: 'forbidden',
+        message: 'Open an assembly machine kiosk URL to use this screen.',
+      });
+    }
+    const assignment = await phase1.getMachineAssignment(machine.id);
+    if (!assignment) {
+      return res.status(409).json({ ok: false, error: 'need_team', message: NEED_TEAM_MESSAGE });
+    }
+    const employeeId = Number(req.body && req.body.employee_id);
+    if (!Number.isInteger(employeeId) || employeeId <= 0) {
+      return res.status(400).json({ ok: false, error: 'validation', message: 'employee_id required.' });
+    }
+    const stageOut = await phase2.employeeOutFromStage(machine, { employee_id: employeeId });
+    if (stageOut.ok) {
+      return res.json({ ...stageOut.body, assignment });
+    }
+    const onShift = await phase1.listOpenShiftEmployeesForTeam(assignment.team_id);
+    if (!onShift.some((e) => Number(e.id) === employeeId)) {
+      return res.status(409).json({
+        ok: false,
+        error: 'not_on_shift',
+        message: 'That employee is not currently on shift for this team.',
+      });
+    }
+    const out = await phase1.employeeOutFromTeam(employeeId, assignment.team_id, {
+      source: 'assembly_kiosk_employee_out',
+      reason: 'Assembly kiosk employee out',
+    });
+    if (!out.ok) return res.status(out.status || 400).json(out.body);
+    return res.json({ ok: true, ...out.body, assignment });
+  } catch (err) {
+    console.error('[assembly employee-out]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not mark employee out.' });
+  }
+});
+
+app.post('/api/kiosk/assembly/action', async (req, res) => {
+  try {
+    const machine = await assemblyMachineFromRequest(req);
+    if (!machine || !Number(machine.active)) {
+      const any = await windingMachineFromRequest(req);
+      if (any && !isAssemblyTestingMachine(any)) {
+        return res.status(409).json({
+          ok: false,
+          error: 'wrong_workflow',
+          message: 'This machine is Winding. Open the winding kiosk.',
+          workflow: machineWorkflow(any),
+        });
+      }
+      return res.status(403).json({
+        ok: false,
+        error: 'forbidden',
+        message: 'Open an assembly machine kiosk URL to use this screen.',
+      });
+    }
+    const body = req.body || {};
+    const action = String(body.action || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[\s-]+/g, '_');
+    let result;
+
+    if (action === 'scan') {
+      result = await handleAssemblyScanAction(machine, body);
+    } else if (action === 'confirm_tank' || action === 'confirm') {
+      // CONFIRM TANK must use POST /api/kiosk/assembly/confirm-tank — not this dispatcher.
+      return res.status(400).json({
+        ok: false,
+        error: 'use_confirm_endpoint',
+        message: 'Use the CONFIRM TANK button (dedicated confirm API). Do not send confirm_tank through /action.',
+      });
+    } else if (action === 'start_work' || action === 'start') {
+      result = await phase2.startWork(machine, {
+        tank_id: body.tank_id,
+        stage: body.stage || 'ASSEMBLY',
+        employee: confirmerFromBody(body),
+      });
+    } else if (action === 'stop_work' || action === 'stop') {
+      result = await phase2.stopWork(machine, { tank_id: body.tank_id });
+    } else if (action === 'assembly_complete' || action === 'finish') {
+      result = await phase2.assemblyComplete(machine, {
+        tank_id: body.tank_id,
+        employee: confirmerFromBody(body),
+      });
+    } else if (action === 'start_testing') {
+      result = await phase2.startTesting(machine, {
+        tank_id: body.tank_id,
+        employee: confirmerFromBody(body),
+      });
+    } else if (action === 'test_pass') {
+      result = await phase2.recordTestResult(machine, {
+        tank_id: body.tank_id,
+        result: 'PASS',
+        note: body.note || null,
+        employee: confirmerFromBody(body),
+      });
+    } else if (action === 'test_fail') {
+      const note = String(body.note || body.failure_note || '').trim();
+      if (!note) {
+        return res.status(400).json({
+          ok: false,
+          error: 'validation',
+          message: 'A failure note is required.',
+        });
+      }
+      result = await phase2.recordTestResult(machine, {
+        tank_id: body.tank_id,
+        result: 'FAIL',
+        note,
+        employee: confirmerFromBody(body),
+      });
+    } else if (action === 'start_correction') {
+      result = await phase2.startCorrection(machine, {
+        tank_id: body.tank_id,
+        employee: confirmerFromBody(body),
+      });
+    } else if (action === 'pause' || action === 'break' || action === 'lunch') {
+      const reason =
+        action === 'break' ? 'BREAK' : action === 'lunch' ? 'LUNCH' : String(body.reason || 'PAUSE').trim() || 'PAUSE';
+      result = await phase2.pauseStationLabor(machine, reason);
+    } else if (action === 'employee_out') {
+      result = await phase2.employeeOutFromStage(machine, {
+        employee_id: body.employee_id,
+      });
+    } else if (action === 'end_shift') {
+      const paused = await phase2.pauseStationLabor(machine, 'END_SHIFT');
+      if (!paused.ok) return res.status(paused.status).json(paused.body);
+      if (typeof phase1.clearMachineAssignment === 'function') {
+        await phase1.clearMachineAssignment(machine.id);
+      }
+      result = {
+        ok: true,
+        status: 200,
+        body: {
+          ok: true,
+          action: 'end_shift',
+          ...paused.body,
+          assignment: null,
+          message: 'Station labor stopped and team assignment cleared.',
+        },
+      };
+    } else {
+      return res.status(400).json({ ok: false, error: 'unknown_action', message: `Unknown action: ${action}` });
+    }
+
+    if (!result.ok) return res.status(result.status).json(result.body);
+    return res.json(result.body);
+  } catch (err) {
+    console.error('[assembly action]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not process assembly action.' });
+  }
+});
+
 app.get('/api/manager/machines', async (req, res) => {
   const auth = currentManagerFromSession(req);
   if (!auth) {
@@ -5912,6 +6497,20 @@ app.get('/api/manager/machines', async (req, res) => {
   } catch (err) {
     console.error('[manager machines]', err);
     return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load machines.' });
+  }
+});
+
+app.get('/api/manager/assembly-machines', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) {
+    return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Manager login required.' });
+  }
+  try {
+    const machines = await phase2.buildAssemblyDashboardCards();
+    return res.json({ ok: true, machines });
+  } catch (err) {
+    console.error('[manager assembly-machines]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load assembly machines.' });
   }
 });
 
@@ -6145,7 +6744,9 @@ app.get('/api/manager/teams/dashboard', async (req, res) => {
   }
   try {
     const teams = await phase1.buildTeamDashboardCards();
-    return res.json({ ok: true, teams });
+    const stageByTeam = await unifiedLabor.listActiveStageLaborByTeam();
+    const merged = unifiedLabor.mergeTeamDashboardWithStageLabor(teams, stageByTeam);
+    return res.json({ ok: true, teams: merged });
   } catch (err) {
     console.error('[manager teams dashboard]', err);
     return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load team dashboard.' });
@@ -6486,31 +7087,20 @@ app.get('/api/manager/teams/:teamId/members/:memberId/details', async (req, res)
 
     if (employeeId) {
       const todayKey = localDateString();
-      const teamTodayHours = await phase1.computeEmployeeTeamProductionHoursForDay(employeeId, todayKey);
-      const teamWeekHours = await phase1.computeEmployeeTeamProductionWeekHours(employeeId);
-
-      const scanToday = await computeDailyHours(employeeId, todayKey);
-      const scanTodayHours =
-        scanToday && Number.isFinite(Number(scanToday.totalHours)) ? Number(scanToday.totalHours) : 0;
-
-      let scanWeekHours = 0;
+      const todayBounds = startEndOfLocalDay(todayKey);
       const week = weekBoundsLocal();
-      if (week) {
-        const cursor = new Date(week.startIso);
-        const todayEnd = startEndOfLocalDay(todayKey);
-        const weekEndMs = todayEnd ? new Date(todayEnd.endIso).getTime() : Date.now();
-        while (cursor.getTime() <= weekEndMs) {
-          const dayKey = localDateString(cursor);
-          const daily = await computeDailyHours(employeeId, dayKey);
-          const hrs = daily && Number.isFinite(Number(daily.totalHours)) ? Number(daily.totalHours) : 0;
-          scanWeekHours += hrs;
-          if (dayKey === todayKey) break;
-          cursor.setDate(cursor.getDate() + 1);
-        }
-      }
 
-      todayHours = roundHours2(teamTodayHours + scanTodayHours);
-      weekHours = roundHours2(teamWeekHours + scanWeekHours);
+      todayHours = todayBounds
+        ? await unifiedLabor.getEmployeeUnifiedLaborHoursForDay(
+            employeeId,
+            todayKey,
+            () => todayBounds
+          )
+        : 0;
+      weekHours =
+        week && todayBounds
+          ? await unifiedLabor.getEmployeeUnifiedLaborWeekHours(employeeId, week, todayBounds)
+          : 0;
       hasTimeData = todayHours > 0 || weekHours > 0;
     }
 
@@ -6528,7 +7118,7 @@ app.get('/api/manager/teams/:teamId/members/:memberId/details', async (req, res)
         has_time_data: hasTimeData,
         hourly_rate: roundMoney2(rate),
         today_hours: roundHours2(todayHours),
-        week_hours: weekHours,
+        week_hours: roundHours2(weekHours),
         estimated_pay_today: roundMoney2(todayHours * rate),
         estimated_pay_week: roundMoney2(weekHours * rate),
       },
@@ -6545,7 +7135,7 @@ app.get('/api/manager/machine-areas', async (req, res) => {
   try {
     const showInactive =
       req.query.show_inactive === '1' || req.query.show_inactive === 'true';
-    const rows = await phase1.fetchManagedWindingMachines({ includeInactive: true });
+    const rows = await phase1.fetchManagedMachines({ includeInactive: true });
     const filtered = showInactive ? rows : rows.filter((r) => Number(r.active) !== 0);
     return res.json({ ok: true, machines: filtered.map(mapMachineForClient) });
   } catch (err) {
@@ -6560,6 +7150,10 @@ app.post('/api/manager/machine-areas', async (req, res) => {
   const body = req.body || {};
   const name = String(body.name || '').trim();
   if (!name) return res.status(400).json({ ok: false, error: 'validation', message: 'Machine name is required.' });
+  const workflowRaw = String(body.workflow || 'winding')
+    .trim()
+    .toLowerCase();
+  const workflow = workflowRaw === 'assembly_testing' ? 'assembly_testing' : 'winding';
   let slug = slugFromMachineName(name);
   const ts = nowIso();
   try {
@@ -6569,9 +7163,9 @@ app.post('/api/manager/machine-areas', async (req, res) => {
     const sortOrder = sortRes.rows[0] ? Number(sortRes.rows[0].next_sort) : 1;
     const internalCode = slug;
     const { rows } = await pool.query(
-      `INSERT INTO machines (name, code, barcode, kiosk_slug, sort_order, active, created_at, updated_at)
-       VALUES ($1,$2,$3,$4,$5,1,$6,$6) RETURNING *`,
-      [name, internalCode, null, slug, sortOrder, ts]
+      `INSERT INTO machines (name, code, barcode, kiosk_slug, sort_order, active, workflow, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,1,$6,$7,$7) RETURNING *`,
+      [name, internalCode, null, slug, sortOrder, workflow, ts]
     );
     return res.json({ ok: true, machine: mapMachineForClient(rows[0]) });
   } catch (err) {
@@ -6622,7 +7216,7 @@ app.put('/api/manager/machine-areas/:id', async (req, res) => {
       [name, sortOrder, active, nowIso(), id]
     );
     const { rows } = await pool.query(
-      `SELECT id, name, code, barcode, kiosk_slug, sort_order, active FROM machines WHERE id = $1`,
+      `SELECT id, name, code, barcode, kiosk_slug, sort_order, active, workflow FROM machines WHERE id = $1`,
       [id]
     );
     return res.json({ ok: true, machine: mapMachineForClient(rows[0]) });
@@ -6743,6 +7337,9 @@ app.use((req, res, next) => {
     return requireManager(req, res, next);
   }
   if (p.startsWith('/api/kiosk/winding/')) {
+    return next();
+  }
+  if (p.startsWith('/api/kiosk/assembly/')) {
     return next();
   }
   if (p.startsWith('/api/kiosk/')) {
@@ -8078,14 +8675,14 @@ app.get('/api/tanks', async (req, res) => {
   } else {
     sql += ` AND ${tankNotDeletedClause()}`;
     if (statusFilter === 'active') {
-      sql += ` AND LOWER(TRIM(COALESCE(status, ''))) IN ('active', 'paused', 'waiting', '')`;
+      sql += ` AND LOWER(TRIM(COALESCE(status, ''))) IN ('active', 'paused', 'waiting', '', 'ready_for_assembly', 'assembly_in_progress', 'ready_for_testing', 'testing_in_progress', 'ready_for_dome_install', 'ready_for_final_completion')`;
     } else if (statusFilter === 'waiting') {
       sql += ` AND LOWER(TRIM(COALESCE(status, ''))) = 'waiting'`;
     } else if (statusFilter === 'archived') {
       sql += ` AND LOWER(TRIM(status)) = 'archived'`;
     } else if (statusFilter === 'all') {
       if (activeOnly) {
-        sql += ` AND (LOWER(TRIM(COALESCE(status, ''))) IN ('active', 'waiting', 'paused') OR TRIM(COALESCE(status, '')) = '')`;
+        sql += ` AND (LOWER(TRIM(COALESCE(status, ''))) IN ('active', 'waiting', 'paused', 'ready_for_assembly', 'assembly_in_progress', 'ready_for_testing', 'testing_in_progress', 'ready_for_dome_install', 'ready_for_final_completion') OR TRIM(COALESCE(status, '')) = '')`;
       }
     } else {
       return res.status(400).json({
@@ -8103,7 +8700,7 @@ app.get('/api/tanks', async (req, res) => {
   if (statusFilter === 'trash') {
     sql += ` ORDER BY deleted_at DESC NULLS LAST, tank_number ASC`;
   } else {
-    sql += ` ORDER BY CASE WHEN LOWER(TRIM(COALESCE(status, ''))) IN ('active', '') THEN 0 ELSE 1 END, updated_at DESC, tank_number ASC`;
+    sql += ` ORDER BY CASE WHEN LOWER(TRIM(COALESCE(status, ''))) IN ('active', '', 'ready_for_assembly', 'assembly_in_progress', 'ready_for_testing', 'testing_in_progress', 'ready_for_dome_install', 'ready_for_final_completion', 'paused', 'waiting') THEN 0 ELSE 1 END, updated_at DESC, tank_number ASC`;
   }
   const { rows } = await pool.query(sql, params);
   const trashCount = await getTrashTankCount();
@@ -8120,6 +8717,7 @@ app.post('/api/tanks', async (req, res) => {
   const due_date = body.due_date ? String(body.due_date).slice(0, 10) : null;
   const notes = body.notes != null ? String(body.notes).trim().slice(0, 2000) : '';
   const piece_count = Math.min(4, Math.max(1, Number(body.piece_count) || 1));
+  const requires_test = parseRequiresTestFlag(body.requires_test, false);
   if (!tank_number) {
     return res.status(400).json({ ok: false, error: 'validation', message: 'tank_number is required.' });
   }
@@ -8127,10 +8725,10 @@ app.post('/api/tanks', async (req, res) => {
   try {
     const ins = await pool.query(
       `INSERT INTO tanks
-         (tank_number, description, status, created_at, updated_at, customer, model, priority, due_date, notes, piece_count, current_piece_number)
-       VALUES ($1, $2, 'waiting', $3::timestamptz, $4::timestamptz, $5, $6, $7, $8, $9, $10, 1)
+         (tank_number, description, status, created_at, updated_at, customer, model, priority, due_date, notes, piece_count, current_piece_number, requires_test)
+       VALUES ($1, $2, 'waiting', $3::timestamptz, $4::timestamptz, $5, $6, $7, $8, $9, $10, 1, $11)
        RETURNING id`,
-      [tank_number, description, ts, ts, customer, model, priority, due_date, notes, piece_count]
+      [tank_number, description, ts, ts, customer, model, priority, due_date, notes, piece_count, requires_test]
     );
     const tid = ins.rows[0].id;
     for (let n = 1; n <= piece_count; n += 1) {
@@ -8180,6 +8778,10 @@ app.put('/api/tanks/:id', async (req, res) => {
         : null
       : current.rows[0].due_date || null;
   const notes = body.notes != null ? String(body.notes).trim().slice(0, 2000) : current.rows[0].notes || '';
+  const requires_test =
+    body.requires_test !== undefined
+      ? parseRequiresTestFlag(body.requires_test, false)
+      : parseRequiresTestFlag(current.rows[0].requires_test, false);
   let piece_count = Math.min(
     4,
     Math.max(1, Number(body.piece_count != null ? body.piece_count : current.rows[0].piece_count) || 1)
@@ -8210,13 +8812,53 @@ app.put('/api/tanks/:id', async (req, res) => {
     const becomingArchived = status === 'archived' && normalizeTankStatus(current.rows[0].status) !== 'archived';
     const becomingActive =
       (status === 'active' || status === 'waiting') && normalizeTankStatus(current.rows[0].status) === 'archived';
-    const completedAt = becomingArchived ? ts : becomingActive ? null : current.rows[0].completed_at;
+    if (becomingArchived) {
+      const fin = await phase2.finalizeTankCompletion(id, { at: ts });
+      if (!fin.ok) {
+        return res.status(fin.status || 409).json(fin.body || { ok: false, error: 'not_ready_for_final' });
+      }
+      // Still apply other field updates on archived tank (without resetting status/completed_at).
+      await pool.query(
+        `UPDATE tanks SET
+           tank_number = $1, description = $2, updated_at = $3::timestamptz,
+           customer = $4, model = $5, priority = $6, due_date = $7, notes = $8, piece_count = $9,
+           requires_test = $10
+         WHERE id = $11`,
+        [tank_number, description, ts, customer, model, priority, due_date, notes, piece_count, requires_test, id]
+      );
+      for (let n = 1; n <= piece_count; n += 1) {
+        await pool.query(
+          `INSERT INTO tank_pieces (tank_id, piece_number, status, created_at, updated_at)
+           VALUES ($1, $2, 'pending', NOW(), NOW()) ON CONFLICT DO NOTHING`,
+          [id, n]
+        );
+      }
+      await phase1.ensureTankPieces(id, piece_count, { pruneExtras: piece_count < prevPieceCount });
+      const tankRes2 = await pool.query(`SELECT ${TANK_SELECT_COLUMNS} FROM tanks WHERE id = $1`, [id]);
+      return res.json({ ok: true, tank: mapTankRowForApi(tankRes2.rows[0]) });
+    }
+    const completedAt = becomingActive ? null : current.rows[0].completed_at;
     await pool.query(
       `UPDATE tanks SET
          tank_number = $1, description = $2, status = $3, completed_at = $4, updated_at = $5::timestamptz,
-         customer = $6, model = $7, priority = $8, due_date = $9, notes = $10, piece_count = $11
-       WHERE id = $12`,
-      [tank_number, description, status, completedAt, ts, customer, model, priority, due_date, notes, piece_count, id]
+         customer = $6, model = $7, priority = $8, due_date = $9, notes = $10, piece_count = $11,
+         requires_test = $12
+       WHERE id = $13`,
+      [
+        tank_number,
+        description,
+        status,
+        completedAt,
+        ts,
+        customer,
+        model,
+        priority,
+        due_date,
+        notes,
+        piece_count,
+        requires_test,
+        id,
+      ]
     );
     for (let n = 1; n <= piece_count; n += 1) {
       await pool.query(
@@ -8247,20 +8889,23 @@ app.put('/api/tanks/:id', async (req, res) => {
 app.patch('/api/tanks/:id/archive', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ ok: false, error: 'invalid_id' });
-  const rowRes = await pool.query(`SELECT id, deleted_at FROM tanks WHERE id = $1`, [id]);
+  const rowRes = await pool.query(`SELECT id, deleted_at, status FROM tanks WHERE id = $1`, [id]);
   if (!rowRes.rows.length) return res.status(404).json({ ok: false, error: 'not_found' });
   if (isTankDeleted(rowRes.rows[0])) {
     return res.status(409).json({ ok: false, error: 'tank_in_trash', message: 'This tank is in Trash.' });
   }
-  const status = normalizeTankStatus(req.body && req.body.status ? req.body.status : 'archived');
-  const ts = nowIso();
-  await pool.query(`UPDATE tanks SET status = $1, completed_at = $2::timestamptz, updated_at = $2::timestamptz WHERE id = $3`, [
-    status,
-    ts,
-    id,
-  ]);
+  // Manager "Complete Tank" = final factory completion (distinct from Winding FAB Tank Complete).
+  const result = await phase2.finalizeTankCompletion(id, { at: nowIso() });
+  if (!result.ok) {
+    return res.status(result.status || 400).json(result.body || { ok: false, error: 'complete_failed' });
+  }
   const tankRes = await pool.query(`SELECT ${TANK_SELECT_COLUMNS} FROM tanks WHERE id = $1`, [id]);
-  res.json({ ok: true, tank: mapTankRowForApi(tankRes.rows[0]) });
+  res.json({
+    ok: true,
+    action: 'manager_complete_tank',
+    tank: mapTankRowForApi(tankRes.rows[0]),
+    message: (result.body && result.body.message) || 'Tank completed — ready to ship.',
+  });
 });
 
 app.patch('/api/tanks/:id/restore', async (req, res) => {
@@ -8786,6 +9431,7 @@ app.post('/api/kiosk/winding/notes', async (req, res) => {
   try {
     const machine = await windingMachineFromRequest(req);
     if (!machine) return res.status(401).json({ ok: false, error: 'not_authenticated' });
+    if (rejectWrongKioskWorkflow(res, machine, 'winding')) return;
     const body = req.body || {};
     const noteBody = String(body.body || '').trim().slice(0, 2000);
     if (!noteBody) return res.status(400).json({ ok: false, error: 'validation', message: 'Note is required.' });
@@ -9003,10 +9649,114 @@ async function getTankReportPayload(id) {
     reportMeta.piece_count = pieceCount;
     reportMeta.completed_pieces = completedPieces;
     if (normalizeTankStatus(tank.status) !== 'archived' && completedPieces >= pieceCount && pieceCount > 0) {
-      reportMeta.production_status = 'Ready to Complete';
+      const st = normalizeTankStatus(tank.status);
+      const postFab = new Set([
+        'ready_for_assembly',
+        'assembly_in_progress',
+        'ready_for_testing',
+        'testing_in_progress',
+        'ready_for_dome_install',
+        'ready_for_final_completion',
+      ]);
+      if (!postFab.has(st) && !tank.fab_completed_at) {
+        reportMeta.production_status = 'Ready to Complete';
+      } else if (postFab.has(st)) {
+        const labels = {
+          ready_for_assembly: 'Ready for Assembly',
+          assembly_in_progress: 'Assembly In Progress',
+          ready_for_testing: 'Ready for Testing',
+          testing_in_progress: 'Testing In Progress',
+          ready_for_dome_install: 'Ready for Dome Install',
+          ready_for_final_completion: 'Ready for Dome Install',
+        };
+        reportMeta.production_status = labels[st] || reportMeta.production_status;
+      }
     }
   } catch (err) {
     console.error('[tank report] report_meta:', err.message);
+  }
+
+  let assembly_testing = null;
+  try {
+    const stageLabor = await phase2.computeStageLaborForTank(id);
+    const testAttempts = await phase2.listTestAttemptsForTank(id);
+    const { rows: stageSessions } = await pool.query(
+      `SELECT sls.id, sls.stage, sls.status, sls.started_at, sls.ended_at,
+              sls.started_by_employee_name, sls.stopped_by_employee_name, sls.notes,
+              t.name AS team_name, m.name AS machine_name
+       FROM stage_labor_sessions sls
+       LEFT JOIN teams t ON t.id = sls.team_id
+       LEFT JOIN machines m ON m.id = sls.machine_id
+       WHERE sls.tank_id = $1
+       ORDER BY sls.started_at ASC, sls.id ASC`,
+      [id]
+    );
+    const sessionsMapped = stageSessions.map((s) => {
+      const startMs = s.started_at ? new Date(s.started_at).getTime() : null;
+      const endMs = s.ended_at
+        ? new Date(s.ended_at).getTime()
+        : s.status === 'active'
+          ? Date.now()
+          : startMs;
+      const ms =
+        startMs != null && endMs != null && !Number.isNaN(startMs) && !Number.isNaN(endMs)
+          ? Math.max(0, endMs - startMs)
+          : 0;
+      return {
+        id: Number(s.id),
+        stage: s.stage,
+        status: s.status,
+        started_at: s.started_at,
+        ended_at: s.ended_at,
+        team_name: s.team_name || null,
+        machine_name: s.machine_name || null,
+        started_by: s.started_by_employee_name || null,
+        stopped_by: s.stopped_by_employee_name || null,
+        notes: s.notes || null,
+        duration_ms: ms,
+        duration_display: phase2.formatDurationXhYm(ms),
+      };
+    });
+    assembly_testing = {
+      fab_completed_at: tank.fab_completed_at || null,
+      assembly_started_at: tank.assembly_started_at || null,
+      assembly_completed_at: tank.assembly_completed_at || null,
+      testing_started_at: tank.testing_started_at || null,
+      testing_completed_at: tank.testing_completed_at || null,
+      requires_test: parseRequiresTestFlag(tank.requires_test, false),
+      assembly_duration_ms: phase2.computeAssemblyDurationMs
+        ? phase2.computeAssemblyDurationMs(tank)
+        : 0,
+      assembly_duration_display: phase2.formatDurationXhYm(
+        phase2.computeAssemblyDurationMs ? phase2.computeAssemblyDurationMs(tank) : 0
+      ),
+      testing_elapsed_ms: (() => {
+        const start = tank.testing_started_at ? new Date(tank.testing_started_at).getTime() : null;
+        if (start == null || Number.isNaN(start)) return 0;
+        const done = tank.testing_completed_at ? new Date(tank.testing_completed_at).getTime() : null;
+        if (done != null && !Number.isNaN(done)) return Math.max(0, done - start);
+        const st = String(tank.status || '').toLowerCase().replace(/[\s-]+/g, '_');
+        if (st === 'testing_in_progress') return Math.max(0, Date.now() - start);
+        return 0;
+      })(),
+      testing_elapsed_display: null,
+      stage_labor: stageLabor,
+      stage_sessions: sessionsMapped.filter(
+        (s) => String(s.stage || '').toUpperCase() !== 'TESTING'
+      ),
+      test_attempts: testAttempts,
+      total_stage_labor_ms: stageLabor.total_ms || 0,
+      total_stage_labor_display: stageLabor.total_display || '0h 0m',
+      latest_test_result: testAttempts.length
+        ? testAttempts[testAttempts.length - 1].result
+        : null,
+    };
+    assembly_testing.testing_elapsed_display = phase2.formatDurationXhYm(
+      assembly_testing.testing_elapsed_ms
+    );
+  } catch (err) {
+    console.error('[tank report] assembly_testing:', err.message);
+    assembly_testing = null;
   }
 
   return {
@@ -9028,6 +9778,12 @@ async function getTankReportPayload(id) {
       first_scanned_at: tank.first_scanned_at,
       started_at: tank.started_at,
       completed_at: tank.completed_at,
+      fab_completed_at: tank.fab_completed_at,
+      assembly_started_at: tank.assembly_started_at,
+      assembly_completed_at: tank.assembly_completed_at,
+      testing_started_at: tank.testing_started_at,
+      testing_completed_at: tank.testing_completed_at,
+      requires_test: parseRequiresTestFlag(tank.requires_test, false),
       duration_ms: tank.duration_ms,
       duration_display: tank.duration_display,
     },
@@ -9049,12 +9805,15 @@ async function getTankReportPayload(id) {
     downtime_total_ms: downtimeTotalMs,
     downtime_total_display: phase1.formatElapsedDisplay(downtimeTotalMs),
     qa_qc_history: qaQcHistory,
+    assembly_testing,
     labor_hours: {
       total_labor_hours: totalLaborHours,
       total_machine_hours: totalMachineHours,
       hours_per_phase: (teamProduction && teamProduction.hours_per_phase) || [],
       hours_per_team: (teamProduction && teamProduction.hours_per_team) || [],
       hours_per_piece: (teamProduction && teamProduction.hours_per_piece) || [],
+      stage_labor_ms: assembly_testing ? assembly_testing.total_stage_labor_ms : 0,
+      stage_labor_display: assembly_testing ? assembly_testing.total_stage_labor_display : '0h 0m',
     },
   };
 }
@@ -9832,6 +10591,18 @@ app.get('/winding-kiosk.js', (_req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'machine-kiosk.js'));
 });
 
+app.get('/assembly-kiosk.html', (_req, res) => {
+  scanKioskCacheHeaders(res);
+  res.type('html');
+  res.sendFile(path.join(PUBLIC_DIR, 'assembly-kiosk.html'));
+});
+
+app.get('/assembly-kiosk.js', (_req, res) => {
+  scanKioskCacheHeaders(res);
+  res.type('application/javascript');
+  res.sendFile(path.join(PUBLIC_DIR, 'assembly-kiosk.js'));
+});
+
 app.get('/kiosk/machine/:slug', async (req, res) => {
   try {
     const slug = String(req.params.slug || '')
@@ -9845,12 +10616,14 @@ app.get('/kiosk/machine/:slug', async (req, res) => {
       machine_id: Number(machine.id),
       slug: String(machine.kiosk_slug || slug).toLowerCase(),
       machine_name: machine.name,
+      workflow: machineWorkflow(machine),
     };
+    const htmlFile = isAssemblyTestingMachine(machine) ? 'assembly-kiosk.html' : 'machine-kiosk.html';
     req.session.save((err) => {
       if (err) console.error('[machine kiosk session]', err);
       scanKioskCacheHeaders(res);
       res.type('html');
-      res.sendFile(path.join(PUBLIC_DIR, 'machine-kiosk.html'));
+      res.sendFile(path.join(PUBLIC_DIR, htmlFile));
     });
   } catch (err) {
     console.error('[kiosk/machine]', err);

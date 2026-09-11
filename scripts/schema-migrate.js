@@ -9,6 +9,13 @@
 
 const SCHEMA_LOCK_KEY = 87420136;
 
+let phase2SchemaSql = null;
+try {
+  phase2SchemaSql = require('./phase2-schema-sql');
+} catch (_err) {
+  phase2SchemaSql = null;
+}
+
 /** Stage 1 — parent / base tables (no FKs that depend on later tables). */
 const BASE_TABLES_SQL = `
 CREATE TABLE IF NOT EXISTS employees (
@@ -303,6 +310,18 @@ ALTER TABLE machine_session_edits ADD COLUMN IF NOT EXISTS piece_id BIGINT;
 ALTER TABLE machine_session_edits ADD COLUMN IF NOT EXISTS piece_number INTEGER;
 ALTER TABLE machine_session_edits ADD COLUMN IF NOT EXISTS phase_code TEXT;
 ALTER TABLE machine_session_edits ADD COLUMN IF NOT EXISTS phase_name TEXT;
+${
+  phase2SchemaSql
+    ? phase2SchemaSql.PHASE2_COLUMNS_SQL
+    : `
+ALTER TABLE machines ADD COLUMN IF NOT EXISTS workflow TEXT NOT NULL DEFAULT 'winding';
+ALTER TABLE tanks ADD COLUMN IF NOT EXISTS fab_completed_at TIMESTAMPTZ;
+ALTER TABLE tanks ADD COLUMN IF NOT EXISTS assembly_started_at TIMESTAMPTZ;
+ALTER TABLE tanks ADD COLUMN IF NOT EXISTS assembly_completed_at TIMESTAMPTZ;
+ALTER TABLE tanks ADD COLUMN IF NOT EXISTS testing_started_at TIMESTAMPTZ;
+ALTER TABLE tanks ADD COLUMN IF NOT EXISTS testing_completed_at TIMESTAMPTZ;
+`
+}
 `;
 
 /** Extended tables for pieces and production notes (created after parents). */
@@ -359,7 +378,57 @@ CREATE TABLE IF NOT EXISTS downtime_intervals (
   duration_ms BIGINT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+${
+  phase2SchemaSql
+    ? phase2SchemaSql.PHASE2_TABLES_SQL
+    : `
+CREATE TABLE IF NOT EXISTS stage_labor_sessions (
+  id BIGSERIAL PRIMARY KEY,
+  tank_id BIGINT NOT NULL REFERENCES tanks(id) ON DELETE CASCADE,
+  machine_id BIGINT NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
+  team_id BIGINT REFERENCES teams(id) ON DELETE SET NULL,
+  stage TEXT NOT NULL CHECK (stage IN ('ASSEMBLY', 'TESTING', 'CORRECTION')),
+  status TEXT NOT NULL CHECK (status IN ('active', 'stopped', 'finished')),
+  started_at TIMESTAMPTZ NOT NULL,
+  ended_at TIMESTAMPTZ,
+  started_by_employee_id BIGINT REFERENCES employees(id) ON DELETE SET NULL,
+  started_by_employee_name TEXT,
+  stopped_by_employee_id BIGINT REFERENCES employees(id) ON DELETE SET NULL,
+  stopped_by_employee_name TEXT,
+  notes TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS stage_labor_participants (
+  id BIGSERIAL PRIMARY KEY,
+  session_id BIGINT NOT NULL REFERENCES stage_labor_sessions(id) ON DELETE CASCADE,
+  employee_id BIGINT NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+  employee_code TEXT,
+  employee_name TEXT,
+  team_id BIGINT REFERENCES teams(id) ON DELETE SET NULL,
+  joined_at TIMESTAMPTZ NOT NULL,
+  left_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS test_attempts (
+  id BIGSERIAL PRIMARY KEY,
+  tank_id BIGINT NOT NULL REFERENCES tanks(id) ON DELETE CASCADE,
+  machine_id BIGINT REFERENCES machines(id) ON DELETE SET NULL,
+  team_id BIGINT REFERENCES teams(id) ON DELETE SET NULL,
+  team_name TEXT,
+  result TEXT NOT NULL CHECK (result IN ('PASS', 'FAIL')),
+  attempted_at TIMESTAMPTZ NOT NULL,
+  tester_employee_id BIGINT REFERENCES employees(id) ON DELETE SET NULL,
+  tester_employee_name TEXT,
+  failure_note TEXT,
+  labor_session_id BIGINT REFERENCES stage_labor_sessions(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 `
+}
+`;
 
 /** Stage 4 — indexes. */
 const INDEXES_SQL = `
@@ -405,6 +474,19 @@ CREATE INDEX IF NOT EXISTS idx_employee_team_memberships_emp ON employee_team_me
 CREATE INDEX IF NOT EXISTS idx_employee_team_memberships_team ON employee_team_memberships(team_id, joined_at DESC);
 CREATE INDEX IF NOT EXISTS idx_employee_team_memberships_open ON employee_team_memberships(employee_id) WHERE left_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_machine_session_edits_session ON machine_session_edits(session_id, edited_at DESC);
+${
+  phase2SchemaSql
+    ? phase2SchemaSql.PHASE2_INDEXES_SQL
+    : `
+CREATE INDEX IF NOT EXISTS idx_stage_labor_sessions_tank ON stage_labor_sessions(tank_id);
+CREATE INDEX IF NOT EXISTS idx_stage_labor_sessions_machine ON stage_labor_sessions(machine_id);
+CREATE INDEX IF NOT EXISTS idx_stage_labor_sessions_status ON stage_labor_sessions(status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_stage_labor_participants_open_employee
+  ON stage_labor_participants(employee_id)
+  WHERE left_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_test_attempts_tank ON test_attempts(tank_id);
+`
+}
 `;
 
 const REQUIRED_TABLES = [
@@ -423,6 +505,9 @@ const REQUIRED_TABLES = [
   'alert_email_recipients',
   'tank_pieces',
   'production_notes',
+  'stage_labor_sessions',
+  'stage_labor_participants',
+  'test_attempts',
 ];
 
 async function ensureForeignKey(client, tableName, columnName, refTable, refColumn, onDelete) {
@@ -521,6 +606,18 @@ async function runOptionalBackfills(client, log = console) {
   }
 
   try {
+    const phase2Backfill =
+      (phase2SchemaSql && phase2SchemaSql.PHASE2_BACKFILL_SQL) ||
+      `
+UPDATE machines SET workflow = 'winding' WHERE workflow IS NULL OR workflow = '';
+UPDATE machines SET workflow = 'winding' WHERE workflow = 'winding' OR name ILIKE 'Winding%' OR code ILIKE 'WM-%';
+`;
+    await client.query(phase2Backfill);
+  } catch (err) {
+    log.warn('[migration] phase2 workflow backfill (noncritical):', err.message);
+  }
+
+  try {
     await client.query(`
       UPDATE session_team_members stm
       SET employee_code = COALESCE(stm.employee_code, e.code),
@@ -610,6 +707,29 @@ async function runAdditiveSchemaPass(client, log = console) {
     CREATE INDEX IF NOT EXISTS idx_tanks_deleted_at ON tanks(deleted_at) WHERE deleted_at IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_tank_admin_audit_tank ON tank_admin_audit(tank_number, performed_at DESC);
   `);
+  const phase2Indexes =
+    (phase2SchemaSql && phase2SchemaSql.PHASE2_INDEXES_SQL) ||
+    `
+CREATE INDEX IF NOT EXISTS idx_stage_labor_sessions_tank ON stage_labor_sessions(tank_id);
+CREATE INDEX IF NOT EXISTS idx_stage_labor_sessions_machine ON stage_labor_sessions(machine_id);
+CREATE INDEX IF NOT EXISTS idx_stage_labor_sessions_status ON stage_labor_sessions(status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_stage_labor_participants_open_employee
+  ON stage_labor_participants(employee_id)
+  WHERE left_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_test_attempts_tank ON test_attempts(tank_id);
+`;
+  await client.query(phase2Indexes);
+  const phase2Backfill =
+    (phase2SchemaSql && phase2SchemaSql.PHASE2_BACKFILL_SQL) ||
+    `
+UPDATE machines SET workflow = 'winding' WHERE workflow IS NULL OR workflow = '';
+UPDATE machines SET workflow = 'winding' WHERE workflow = 'winding' OR name ILIKE 'Winding%' OR code ILIKE 'WM-%';
+`;
+  try {
+    await client.query(phase2Backfill);
+  } catch (err) {
+    log.warn('[migration] phase2 workflow backfill (noncritical):', err.message);
+  }
   await client.query(`
     UPDATE machine_sessions ms
     SET piece_id = tp.id

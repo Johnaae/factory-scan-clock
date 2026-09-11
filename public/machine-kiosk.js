@@ -1588,7 +1588,7 @@ async function consumeScanResult(data) {
     showFinishBanner(data.confirmation_line || `Piece ${data.piece_number || ''} complete`);
     if (data.all_pieces_complete) {
       pendingPiece = null;
-      warn(data.message || 'All pieces complete. Status is Ready to Complete — scan Tank Complete to finish.');
+      warn(data.message || 'All pieces complete. Status is Ready to Complete — scan Tank Complete to release to Assembly.');
     } else if (data.next_piece) {
       pendingPiece = Number(data.next_piece);
       warn(`Piece complete. Continue with Piece ${data.next_piece}, then scan a phase.`);
@@ -1605,7 +1605,7 @@ async function consumeScanResult(data) {
     pendingTank = null;
     pendingPiece = null;
     resumablePhase = null;
-    showFinishBanner(data.confirmation_line || 'Tank complete');
+    showFinishBanner(data.confirmation_line || 'Tank released to Assembly');
     await loadConfig();
     return;
   }

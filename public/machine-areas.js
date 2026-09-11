@@ -54,17 +54,25 @@ function openRemoveModal(machine) {
   removeMachineModal.classList.add('show');
 }
 
+function workflowBadgeHtml(m) {
+  const wf = String(m.workflow || 'winding').toLowerCase();
+  const isAsm = wf === 'assembly_testing';
+  const label = m.workflow_label || (isAsm ? 'Assembly + Testing' : 'Winding (FAB)');
+  const cls = isAsm ? 'ma-workflow-badge ma-workflow-badge--assembly' : 'ma-workflow-badge ma-workflow-badge--winding';
+  return `<span class="${cls}">${escapeHtml(label)}</span>`;
+}
+
 async function loadMachines() {
   const showInactive = showInactiveMachines && showInactiveMachines.checked;
   const q = showInactive ? '?show_inactive=1' : '?show_inactive=0';
   const { res, data } = await api(`/api/manager/machine-areas${q}`);
   if (!res.ok || !data.ok) {
-    machinesBody.innerHTML = `<tr><td colspan="5" class="muted">${escapeHtml((data && data.message) || 'Load failed')}</td></tr>`;
+    machinesBody.innerHTML = `<tr><td colspan="6" class="muted">${escapeHtml((data && data.message) || 'Load failed')}</td></tr>`;
     return;
   }
   const rows = data.machines || [];
   if (!rows.length) {
-    machinesBody.innerHTML = `<tr><td colspan="5" class="muted">${
+    machinesBody.innerHTML = `<tr><td colspan="6" class="muted">${
       showInactive ? 'No machines configured.' : 'No active machines. Enable “Show inactive machines” to view deactivated ones.'
     }</td></tr>`;
     return;
@@ -72,13 +80,14 @@ async function loadMachines() {
   machinesBody.innerHTML = rows
     .map((m) => {
       const inactive = !m.active;
-      return `<tr data-machine-id="${Number(m.id)}" data-machine-name="${escapeHtml(m.name)}" class="${
-        inactive ? 'ma-inactive-row' : ''
-      }">
+      return `<tr data-machine-id="${Number(m.id)}" data-machine-name="${escapeHtml(m.name)}" data-workflow="${escapeHtml(
+        String(m.workflow || 'winding')
+      )}" class="${inactive ? 'ma-inactive-row' : ''}">
       <td>
         <input class="ma-name" type="text" value="${escapeHtml(m.name)}" />
         ${inactive ? '<span class="ma-badge ma-badge--inactive">Inactive</span>' : ''}
       </td>
+      <td>${workflowBadgeHtml(m)}</td>
       <td><a class="ma-kiosk-link" href="${escapeHtml(m.kiosk_url)}" target="_blank" rel="noopener">${escapeHtml(
         m.kiosk_url
       )}</a></td>
@@ -152,17 +161,20 @@ const btnAddMachine = document.getElementById('btnAddMachine');
 if (btnAddMachine) {
   btnAddMachine.addEventListener('click', async () => {
     const name = document.getElementById('newMachineName').value.trim();
+    const workflowEl = document.getElementById('newMachineWorkflow');
+    const workflow = workflowEl ? String(workflowEl.value || 'winding') : 'winding';
     if (!name) {
       hint('Machine name is required.', true);
       return;
     }
     const { res, data } = await api('/api/manager/machine-areas', {
       method: 'POST',
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, workflow }),
     });
     if (res.ok && data.machine) {
       hint(`Machine added. Kiosk URL: ${data.machine.kiosk_url}`, false);
       document.getElementById('newMachineName').value = '';
+      if (workflowEl) workflowEl.value = 'winding';
       void loadMachines();
       return;
     }

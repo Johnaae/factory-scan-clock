@@ -92,6 +92,12 @@
                 <option value="4">4</option>
               </select>
             </div>
+            <div class="field manager-checkbox-field">
+              <label class="manager-checkbox-label" for="tankRequiresTest">
+                <input id="tankRequiresTest" type="checkbox" />
+                <span>Require Test</span>
+              </label>
+            </div>
             <div class="field" style="grid-column: 1 / -1;">
               <label for="tankDescription" data-i18n="tank.description">Description</label>
               <textarea id="tankDescription" class="manager-textarea-short" rows="2" placeholder="Optional short description" autocomplete="off"></textarea>
@@ -224,14 +230,26 @@
       <section class="card manager-card">
         <div class="card-header">
           <div class="card-header-main">
-            <h2 class="card-title">Winding Machines</h2>
-            <p class="card-kicker">Live production per machine — team, tank, phase, elapsed time, and open alerts</p>
+            <h2 class="card-title">Fabrication Shop</h2>
+            <p class="card-kicker">Winding (FAB) machines — team, tank, phase, elapsed time, and open alerts</p>
           </div>
         </div>
         <div class="card-body" id="managerMachineCards">
           <p class="muted">Loading machines…</p>
         </div>
         <div class="card-body card-body--flush" id="managerDashboardAlerts"></div>
+      </section>
+
+      <section class="card manager-card">
+        <div class="card-header">
+          <div class="card-header-main">
+            <h2 class="card-title">Assembly + Testing</h2>
+            <p class="card-kicker">Assembly / Testing machines — team, tank duration, and stage labor</p>
+          </div>
+        </div>
+        <div class="card-body" id="managerAssemblyCards">
+          <p class="muted">Loading assembly machines…</p>
+        </div>
       </section>
 
       <section class="card manager-card">
@@ -391,6 +409,12 @@
               </select>
               <p class="muted" id="editTankPieceCountHint" style="margin:6px 0 0;font-size:12px"></p>
             </div>
+            <div class="field manager-checkbox-field">
+              <label class="manager-checkbox-label" for="editTankRequiresTest">
+                <input id="editTankRequiresTest" type="checkbox" />
+                <span>Require Test</span>
+              </label>
+            </div>
             <div class="field" style="grid-column:1/-1"><label for="editTankDescription">Description</label><textarea id="editTankDescription" rows="2"></textarea></div>
             <div class="field" style="grid-column:1/-1"><label for="editTankNotes">Notes</label><textarea id="editTankNotes" rows="3"></textarea></div>
           </div>
@@ -462,10 +486,10 @@
     <script src="/phase-time-editor.js?v=3"></script>
     <script src="/team-member-picker.js?v=6"></script>
     <script src="/team-member-details.js?v=2"></script>
-    <script src="/machine-dashboard.js?v=10"></script>
+    <script src="/machine-dashboard.js?v=12"></script>
     <script src="/team-dashboard.js?v=5"></script>
     <script src="/alert-sound.js"></script>
-    <script src="/manager.js?v=21"></script>
+    <script src="/manager.js?v=22"></script>
     <script>
       document.addEventListener('DOMContentLoaded', () => {
         if (window.FactoryI18n) {
@@ -480,6 +504,7 @@
             alertStripId: 'managerDashboardAlerts',
             allowResolve: true,
           });
+          window.MachineDashboard.mountAssembly('managerAssemblyCards');
         }
         if (window.TeamDashboard) {
           window.TeamDashboard.mount('managerTeamCards', { allowMemberEdit: true, inactiveToggleId: 'showInactiveTeams' });

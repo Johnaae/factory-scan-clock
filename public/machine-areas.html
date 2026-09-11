@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Winding Machines — Factory Manager</title>
+    <title>Manage Machines — Factory Manager</title>
     <link rel="stylesheet" href="/styles.css" />
     <style>
       .ma-toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 12px; }
@@ -12,6 +12,17 @@
       .ma-inactive-row { opacity: 0.72; background: #f8fafc; }
       .ma-badge { display: inline-block; margin-left: 6px; padding: 2px 8px; border-radius: 999px; font-size: 0.75rem; font-weight: 700; }
       .ma-badge--inactive { background: #e2e8f0; color: #475569; }
+      .ma-workflow-badge {
+        display: inline-block;
+        padding: 4px 10px;
+        border-radius: 8px;
+        font-size: 0.78rem;
+        font-weight: 800;
+        letter-spacing: 0.02em;
+        white-space: nowrap;
+      }
+      .ma-workflow-badge--winding { background: #e0f2fe; color: #075985; border: 1px solid #7dd3fc; }
+      .ma-workflow-badge--assembly { background: #ecfdf5; color: #065f46; border: 1px solid #6ee7b7; }
       .ma-modal { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: none; align-items: center; justify-content: center; z-index: 80; padding: 16px; }
       .ma-modal.show { display: flex; }
       .ma-modal-card { background: #fff; border-radius: 14px; padding: 18px; width: min(480px, 100%); display: grid; gap: 12px; }
@@ -23,8 +34,8 @@
     <header class="topbar">
       <div class="topbar-inner">
         <div class="brand-text">
-          <div class="brand-title">Winding Machines</div>
-          <div class="brand-sub">Permanent kiosk URLs — one machine per tablet</div>
+          <div class="brand-title">Manage Machines</div>
+          <div class="brand-sub">Winding (FAB) and Assembly + Testing kiosks — permanent URLs</div>
         </div>
         <nav class="nav">
           <a href="/manager-dashboard">Manager</a>
@@ -46,6 +57,13 @@
             <label for="newMachineName">Machine name</label>
             <input id="newMachineName" type="text" placeholder="Winding Machine 04" autocomplete="off" />
           </div>
+          <div class="field">
+            <label for="newMachineWorkflow">Workflow</label>
+            <select id="newMachineWorkflow">
+              <option value="winding" selected>Winding (FAB)</option>
+              <option value="assembly_testing">Assembly + Testing</option>
+            </select>
+          </div>
           <button id="btnAddMachine" class="btn btn-primary manager-form-action-btn" type="button">Add machine</button>
         </div>
         <div class="toastline manager-alert" id="machineHint"></div>
@@ -61,7 +79,7 @@
           <div class="table-wrap table-scroll manager-table-wrap">
             <table class="manager-table">
               <thead>
-                <tr><th>Machine name</th><th>Kiosk URL</th><th>Active</th><th>Sort</th><th></th></tr>
+                <tr><th>Machine name</th><th>Workflow</th><th>Kiosk URL</th><th>Active</th><th>Sort</th><th></th></tr>
               </thead>
               <tbody id="machinesBody"></tbody>
             </table>
@@ -79,6 +97,6 @@
         </div>
       </div>
     </div>
-    <script src="/machine-areas.js?v=2"></script>
+    <script src="/machine-areas.js?v=3"></script>
   </body>
 </html>
