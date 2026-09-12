@@ -95,6 +95,7 @@
         background: #fff; cursor: pointer; font: inherit;
       }
       .employee-out-row:hover, .employee-out-row:focus { border-color: #ea580c; background: #fff7ed; outline: none; }
+      .employee-out-row.is-selected { border-color: #ea580c; background: #ffedd5; }
       .employee-out-name { display: block; font-size: 1.25rem; font-weight: 800; color: #1e3a5f; }
       .employee-out-meta { display: block; margin-top: 4px; font-size: 0.95rem; font-weight: 700; color: #64748b; }
       .employee-out-confirm-text { margin: 0; font-size: 1.15rem; font-weight: 800; color: #9a3412; line-height: 1.35; }
@@ -122,6 +123,22 @@
       .change-phase-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }
       .change-phase-actions .btn-primary, .change-phase-actions .btn-secondary { min-height: 52px; font-size: 16px; font-weight: 800; }
       @media (max-width: 480px) { .change-phase-list { grid-template-columns: 1fr; } }
+      .piece-select-modal.show { backdrop-filter: blur(8px); background: rgba(15,23,42,.55); }
+      .piece-select-card { width: min(560px, 100%); max-height: min(88vh, 760px); overflow: hidden; }
+      .piece-select-list {
+        display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px;
+        max-height: min(55vh, 480px); overflow-y: auto; -webkit-overflow-scrolling: touch;
+      }
+      .piece-select-btn {
+        min-height: 64px; font-size: 1.2rem; font-weight: 800; border-radius: 12px;
+        border: 2px solid #93c5fd; background: #fff; color: #1e3a5f; cursor: pointer;
+      }
+      .piece-select-btn:hover, .piece-select-btn:focus { border-color: #2563eb; background: #eff6ff; outline: none; }
+      .piece-select-btn.is-done, .piece-select-btn:disabled { opacity: 0.55; cursor: not-allowed; background: #f8fafc; }
+      .piece-select-empty { margin: 0; font-size: 1.05rem; font-weight: 700; color: #64748b; }
+      .piece-select-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }
+      .piece-select-actions .btn-secondary { min-height: 52px; font-size: 16px; font-weight: 800; }
+      @media (max-width: 480px) { .piece-select-list { grid-template-columns: 1fr; } }
       .lang-bar { margin-left: auto; }
       @media (max-width: 640px) { .wk-grid { grid-template-columns: 1fr; } }
     </style>
@@ -147,7 +164,7 @@
         <form id="scanForm" class="scan-input-row" autocomplete="off">
           <label for="manualBarcodeInput">Manual entry</label>
           <div class="scan-input-wrap scan-input-wrap--scanner">
-            <input id="manualBarcodeInput" type="text" placeholder="TEAM · TANK · PHASE · STOP · RESUME" autocomplete="off" />
+            <input id="manualBarcodeInput" type="text" inputmode="text" enterkeyhint="done" placeholder="TEAM · TANK · PHASE · STOP · RESUME" autocomplete="off" />
             <button id="scanButton" type="button" class="scan-submit-btn">Scan</button>
           </div>
         </form>
@@ -292,7 +309,18 @@
         </div>
       </div>
     </div>
+    <div id="pieceSelectModal" class="modal-note piece-select-modal" role="dialog" aria-modal="true" aria-labelledby="pieceSelectTitle" hidden>
+      <div class="modal-note-card piece-select-card">
+        <h3 id="pieceSelectTitle">Select Piece</h3>
+        <p class="muted" id="pieceSelectHint" style="margin:0">Tap a piece to continue. No confirmation needed.</p>
+        <div id="pieceSelectList" class="piece-select-list"></div>
+        <p id="pieceSelectEmpty" class="piece-select-empty" hidden></p>
+        <div class="piece-select-actions">
+          <button type="button" class="btn-secondary" id="btnCancelPieceSelect">Cancel</button>
+        </div>
+      </div>
+    </div>
     <script src="/i18n.js"></script>
-    <script src="/machine-kiosk.js?v=13"></script>
+    <script src="/machine-kiosk.js?v=14"></script>
   </body>
 </html>

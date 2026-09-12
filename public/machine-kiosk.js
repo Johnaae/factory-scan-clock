@@ -77,6 +77,11 @@ const els = {
   changePhaseConfirm: document.getElementById('changePhaseConfirm'),
   btnCancelChangePhase: document.getElementById('btnCancelChangePhase'),
   btnConfirmChangePhase: document.getElementById('btnConfirmChangePhase'),
+  pieceSelectModal: document.getElementById('pieceSelectModal'),
+  pieceSelectHint: document.getElementById('pieceSelectHint'),
+  pieceSelectList: document.getElementById('pieceSelectList'),
+  pieceSelectEmpty: document.getElementById('pieceSelectEmpty'),
+  btnCancelPieceSelect: document.getElementById('btnCancelPieceSelect'),
 };
 
 let config = null;
@@ -96,6 +101,7 @@ let employeeOutSubmitting = false;
 let changePhasePick = null;
 let changePhaseContext = null;
 let changePhaseSubmitting = false;
+let pieceSelectSubmitting = false;
 let phases = [];
 let elapsedTimer = null;
 let scanBuffer = '';
@@ -104,6 +110,13 @@ let noteMode = 'general'; // general | correction
 let pendingCorrectionBarcode = null;
 let downtimeReasons = [];
 let openQaQc = null;
+
+const MAX_TANK_PIECES = 8;
+
+function clampPieceCount(n, fallback) {
+  const fb = fallback == null ? 1 : fallback;
+  return Math.min(MAX_TANK_PIECES, Math.max(0, Number(n) || fb));
+}
 
 function isEmployeeOutModalOpen() {
   return Boolean(
@@ -117,6 +130,12 @@ function isChangePhaseModalOpen() {
   );
 }
 
+function isPieceSelectModalOpen() {
+  return Boolean(
+    els.pieceSelectModal && !els.pieceSelectModal.hidden && els.pieceSelectModal.classList.contains('show')
+  );
+}
+
 function isTextEntryModalOpen() {
   const noteOpen = els.noteModal && !els.noteModal.hidden && els.noteModal.classList.contains('show');
   const downtimeOpen =
@@ -124,7 +143,12 @@ function isTextEntryModalOpen() {
   const resolveOpen =
     els.resolveQaQcModal && !els.resolveQaQcModal.hidden && els.resolveQaQcModal.classList.contains('show');
   return Boolean(
-    noteOpen || downtimeOpen || resolveOpen || isEmployeeOutModalOpen() || isChangePhaseModalOpen()
+    noteOpen ||
+      downtimeOpen ||
+      resolveOpen ||
+      isEmployeeOutModalOpen() ||
+      isChangePhaseModalOpen() ||
+      isPieceSelectModalOpen()
   );
 }
 
@@ -150,29 +174,33 @@ function blurScanInputs() {
 }
 
 /**
- * Keep the kiosk ready for USB barcode scanners: clear + focus the scan box
- * unless a text-entry dialog currently owns the keyboard.
+ * Keep the kiosk ready for USB barcode scanners without opening the Android
+ * soft keyboard. Focus the hidden scanner trap (inputmode=none), never the
+ * Manual Entry box — that opens only when the worker taps it intentionally.
  */
 function focusScanInput(opts) {
   const clear = !opts || opts.clear !== false;
   if (isTextEntryModalOpen()) return;
-  const input = els.manual || els.scannerTrap;
-  if (!input) return;
   if (clear) {
     if (els.manual) els.manual.value = '';
     scanBuffer = '';
   }
   const apply = () => {
     if (isTextEntryModalOpen()) return;
+    // Do not steal focus while the worker is typing in Manual Entry.
+    if (els.manual && document.activeElement === els.manual) return;
     try {
-      input.focus({ preventScroll: true });
-      if (els.manual && input === els.manual && typeof input.setSelectionRange === 'function') {
-        const len = input.value.length;
-        input.setSelectionRange(len, len);
-      }
+      if (els.manual && typeof els.manual.blur === 'function') els.manual.blur();
+    } catch (_err) {
+      /* ignore */
+    }
+    const trap = els.scannerTrap;
+    if (!trap) return;
+    try {
+      trap.focus({ preventScroll: true });
     } catch (_err) {
       try {
-        input.focus();
+        trap.focus();
       } catch (_err2) {
         /* ignore */
       }
@@ -237,7 +265,8 @@ function showEmployeeOutConfirm(emp) {
   employeeOutPick = emp;
   if (els.employeeOutConfirm) {
     els.employeeOutConfirm.hidden = false;
-    els.employeeOutConfirm.textContent = `Mark ${emp.name} out for this shift?`;
+    const label = emp.name || emp.code || 'Employee';
+    els.employeeOutConfirm.textContent = `Confirm Employee Out — ${label}?`;
   }
   if (els.btnConfirmEmployeeOut) {
     els.btnConfirmEmployeeOut.hidden = false;
@@ -275,12 +304,13 @@ function renderEmployeeOutList(employees) {
     btn.setAttribute('data-employee-id', String(emp.id));
     const name = document.createElement('span');
     name.className = 'employee-out-name';
-    name.textContent = emp.name || 'Employee';
+    name.textContent = emp.name || emp.code || 'Employee';
     const meta = document.createElement('span');
     meta.className = 'employee-out-meta';
     meta.textContent = [emp.code, emp.role].filter(Boolean).join('  ·  ');
     btn.appendChild(name);
     btn.appendChild(meta);
+    btn.addEventListener('mousedown', (e) => e.preventDefault());
     btn.addEventListener('click', () => showEmployeeOutConfirm(emp));
     els.employeeOutList.appendChild(btn);
   });
@@ -372,6 +402,107 @@ function closeChangePhaseModal() {
     els.btnConfirmChangePhase.hidden = true;
     els.btnConfirmChangePhase.disabled = false;
   }
+}
+
+function closePieceSelectModal() {
+  pieceSelectSubmitting = false;
+  if (!els.pieceSelectModal) return;
+  els.pieceSelectModal.classList.remove('show');
+  els.pieceSelectModal.hidden = true;
+  if (els.pieceSelectList) els.pieceSelectList.innerHTML = '';
+  if (els.pieceSelectEmpty) {
+    els.pieceSelectEmpty.hidden = true;
+    els.pieceSelectEmpty.textContent = '';
+  }
+}
+
+function pieceSelectSource() {
+  const list = configuredPieces();
+  const count = clampPieceCount(pieceCount || list.length || 1, 1) || 1;
+  if (list.length) {
+    return list.filter((p) => {
+      const n = Number(p.piece_number);
+      return Number.isInteger(n) && n >= 1 && n <= count;
+    });
+  }
+  return Array.from({ length: count }, (_, i) => ({ piece_number: i + 1, status: 'pending' }));
+}
+
+function renderPieceSelectList() {
+  if (!els.pieceSelectList) return;
+  els.pieceSelectList.innerHTML = '';
+  const source = pieceSelectSource();
+  if (!source.length) {
+    if (els.pieceSelectEmpty) {
+      els.pieceSelectEmpty.hidden = false;
+      els.pieceSelectEmpty.textContent = 'No available pieces for this tank.';
+    }
+    return;
+  }
+  if (els.pieceSelectEmpty) els.pieceSelectEmpty.hidden = true;
+  source.forEach((p) => {
+    const n = Number(p.piece_number);
+    const done = String(p.status) === 'completed';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'piece-select-btn' + (done ? ' is-done' : '');
+    btn.setAttribute('data-piece', String(n));
+    btn.textContent = done ? `Piece ${n} ✓` : `Piece ${n}`;
+    btn.disabled = done;
+    btn.addEventListener('mousedown', (e) => e.preventDefault());
+    if (!done) {
+      btn.addEventListener('click', () => {
+        void selectPieceFromModal(n);
+      });
+    }
+    els.pieceSelectList.appendChild(btn);
+  });
+}
+
+function openPieceSelectModal() {
+  if (!els.pieceSelectModal) return;
+  if (!pendingTank && !activeTankNumber()) {
+    warn('Scan or select a tank first.');
+    return;
+  }
+  blurScanInputs();
+  pieceSelectSubmitting = false;
+  els.pieceSelectModal.hidden = false;
+  els.pieceSelectModal.classList.add('show');
+  const tank = pendingTank || activeTankNumber() || '—';
+  const count = clampPieceCount(pieceCount || configuredPieces().length || 1, 1) || 1;
+  if (els.pieceSelectHint) {
+    els.pieceSelectHint.textContent =
+      count <= 1
+        ? `Tank ${tank}: tap Piece 1 to continue.`
+        : `Tank ${tank}: select Piece 1–${count}.`;
+  }
+  renderPieceSelectList();
+  blurScanInputs();
+  window.setTimeout(blurScanInputs, 0);
+}
+
+/** Immediate piece selection — no confirmation step. */
+async function selectPieceFromModal(pieceNum) {
+  const n = Number(pieceNum);
+  if (!Number.isInteger(n) || n < 1 || pieceSelectSubmitting) return;
+  pieceSelectSubmitting = true;
+  blurScanInputs();
+  const data = await postAction({
+    action: 'scan',
+    barcode: `PIECE:${n}`,
+    pending: { tank: pendingTank || activeTankNumber(), piece: pendingPiece },
+    ...confirmerPayload(),
+  });
+  pieceSelectSubmitting = false;
+  if (!data) {
+    // Keep modal open so the worker can try another piece.
+    renderPieceSelectList();
+    return;
+  }
+  closePieceSelectModal();
+  await consumeScanResult(data);
+  if (!isTextEntryModalOpen()) focusScanInput();
 }
 
 function showChangePhaseConfirm(ph) {
@@ -906,6 +1037,7 @@ function renderPieceStatusPanel() {
     row.addEventListener('click', () => {
       const n = Number(row.getAttribute('data-piece'));
       if (!Number.isInteger(n)) return;
+      blurScanInputs();
       void postAction({
         action: 'scan',
         barcode: `PIECE:${n}`,
@@ -920,7 +1052,7 @@ function renderPieceStatusPanel() {
 }
 
 function configuredPieces() {
-  const count = Math.min(4, Math.max(0, Number(pieceCount) || pieces.length || 0));
+  const count = clampPieceCount(pieceCount || pieces.length || 0, 0);
   if (!count) return pieces.slice();
   return pieces.filter((p) => Number(p.piece_number) >= 1 && Number(p.piece_number) <= count);
 }
@@ -941,27 +1073,11 @@ function selectedPieceNumber() {
 }
 
 function renderPieceTouchButtons() {
+  // Piece selection after tank scan uses the Piece Selection modal.
+  // Keep status panel for multi-piece visibility; hide inline piece buttons.
   if (!els.pieceTouchButtons) return;
-  const list = configuredPieces();
-  if (!list.length && !pendingTank && !session) {
-    els.pieceTouchButtons.innerHTML = '';
-    els.pieceTouchButtons.hidden = true;
-    return;
-  }
-  const count = Math.min(4, Math.max(1, Number(pieceCount) || list.length || 1));
-  const source = list.length
-    ? list
-    : Array.from({ length: count }, (_, i) => ({ piece_number: i + 1, status: 'pending' }));
-  const current = selectedPieceNumber();
-  els.pieceTouchButtons.hidden = false;
-  els.pieceTouchButtons.innerHTML = source
-    .map((p) => {
-      const n = Number(p.piece_number);
-      const done = String(p.status) === 'completed';
-      const selected = current === n;
-      return `<button type="button" class="btn-secondary btn-touch${selected ? ' is-selected' : ''}${done ? ' is-done' : ''}" data-barcode="PIECE:${n}" ${done ? 'disabled' : ''}>Piece ${n}${done ? ' ✓' : ''}</button>`;
-    })
-    .join('');
+  els.pieceTouchButtons.innerHTML = '';
+  els.pieceTouchButtons.hidden = true;
 }
 
 function renderPieces() {
@@ -1268,12 +1384,12 @@ function renderUi() {
   }
 
   if (pendingPiece == null) {
-    const count = Math.min(4, Math.max(1, Number(pieceCount) || configuredPieces().length || 1));
+    const count = clampPieceCount(pieceCount || configuredPieces().length || 1, 1) || 1;
     els.workflowTitle.textContent = 'Select Piece';
     els.workflowSub.textContent =
       count <= 1
-        ? `Tank ${pendingTank}: Piece 1 selected. Scan a phase to begin.`
-        : `Tank ${pendingTank}: select Piece 1–${count} (do not assume Piece 1).`;
+        ? `Tank ${pendingTank}: select Piece 1 to continue.`
+        : `Tank ${pendingTank}: select Piece 1–${count}.`;
     els.phasePanel.hidden = true;
     if (els.phaseSummaryPanel) els.phaseSummaryPanel.hidden = true;
     return;
@@ -1358,6 +1474,11 @@ async function loadConfig() {
 async function postAction(body) {
   const { res, data } = await api(`${API}/action`, { method: 'POST', body: JSON.stringify(body) });
   if (!res.ok || !data.ok) {
+    if (data && data.error === 'need_piece') {
+      if (data.piece_count != null) pieceCount = Number(data.piece_count) || pieceCount;
+      if (Array.isArray(data.pieces)) pieces = data.pieces;
+      openPieceSelectModal();
+    }
     warn((data && data.message) || 'Action failed.');
     return null;
   }
@@ -1426,6 +1547,7 @@ async function consumeScanResult(data) {
     return;
   }
   if (data.action === 'team_assigned') {
+    closePieceSelectModal();
     pendingTank = null;
     pendingPiece = null;
     resumablePhase = null;
@@ -1542,6 +1664,7 @@ async function consumeScanResult(data) {
     return;
   }
   if (data.action === 'piece_selected') {
+    closePieceSelectModal();
     if (data.session) session = data.session;
     if (data.pieces) pieces = data.pieces;
     if (data.piece_count != null) pieceCount = Number(data.piece_count) || pieces.length;
@@ -1576,7 +1699,11 @@ async function consumeScanResult(data) {
     }
     warn(data.message || `Tank ${pendingTank} selected.`);
     renderUi();
-    focusScanInput();
+    if (pendingPiece == null) {
+      openPieceSelectModal();
+    } else {
+      focusScanInput();
+    }
     return;
   }
   if (data.action === 'piece_complete') {
@@ -1757,6 +1884,21 @@ if (els.changePhaseModal) {
     }
   });
 }
+if (els.btnCancelPieceSelect) {
+  els.btnCancelPieceSelect.addEventListener('mousedown', (e) => e.preventDefault());
+  els.btnCancelPieceSelect.addEventListener('click', () => {
+    closePieceSelectModal();
+    focusScanInput();
+  });
+}
+if (els.pieceSelectModal) {
+  els.pieceSelectModal.addEventListener('click', (e) => {
+    if (e.target === els.pieceSelectModal) {
+      closePieceSelectModal();
+      focusScanInput();
+    }
+  });
+}
 if (els.touchControls) {
   els.touchControls.addEventListener('mousedown', (e) => {
     const btn = e.target.closest('[data-barcode], button');
@@ -1765,6 +1907,7 @@ if (els.touchControls) {
   els.touchControls.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-barcode]');
     if (!btn) return;
+    blurScanInputs();
     const barcode = btn.getAttribute('data-barcode');
     if (!barcode) return;
     if (barcode === 'PHASE:CORRECTIONS') {

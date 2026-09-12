@@ -310,7 +310,7 @@ const EXTENDED_TABLES_SQL = `
 CREATE TABLE IF NOT EXISTS tank_pieces (
   id BIGSERIAL PRIMARY KEY,
   tank_id BIGINT NOT NULL REFERENCES tanks(id) ON DELETE CASCADE,
-  piece_number INTEGER NOT NULL CHECK (piece_number >= 1 AND piece_number <= 4),
+  piece_number INTEGER NOT NULL CHECK (piece_number >= 1 AND piece_number <= 8),
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'completed')),
   started_at TIMESTAMPTZ,
   completed_at TIMESTAMPTZ,
@@ -594,10 +594,47 @@ const TANK_TRASH_COLUMNS = [
   'restored_by',
 ];
 
+async function ensureTankPiecesPieceLimit(client, log = console) {
+  try {
+    const { rows } = await client.query(
+      `SELECT conname, pg_get_constraintdef(oid) AS def
+       FROM pg_constraint
+       WHERE conrelid = 'tank_pieces'::regclass
+         AND contype = 'c'
+         AND pg_get_constraintdef(oid) ILIKE '%piece_number%'`
+    );
+    for (const row of rows) {
+      const def = String(row.def || '');
+      if (/piece_number\s*>=\s*1\s*AND\s*piece_number\s*<=\s*8/i.test(def)) continue;
+      if (/piece_number/i.test(def)) {
+        await client.query(`ALTER TABLE tank_pieces DROP CONSTRAINT IF EXISTS ${row.conname}`);
+      }
+    }
+    const { rows: after } = await client.query(
+      `SELECT 1
+       FROM pg_constraint
+       WHERE conrelid = 'tank_pieces'::regclass
+         AND contype = 'c'
+         AND pg_get_constraintdef(oid) ILIKE '%piece_number%<=%8%'`
+    );
+    if (!after.length) {
+      await client.query(
+        `ALTER TABLE tank_pieces
+         ADD CONSTRAINT tank_pieces_piece_number_check
+         CHECK (piece_number >= 1 AND piece_number <= 8)`
+      );
+      log.log('[migration] expanded tank_pieces.piece_number check to allow 1–8');
+    }
+  } catch (err) {
+    log.warn('[migration] tank_pieces piece limit expansion (noncritical):', err.message);
+  }
+}
+
 /** Idempotent additive pass — always safe on existing production databases. */
 async function runAdditiveSchemaPass(client, log = console) {
   await client.query(ADD_COLUMNS_SQL);
   await client.query(EXTENDED_TABLES_SQL);
+  await ensureTankPiecesPieceLimit(client, log);
   await client.query(`
     CREATE INDEX IF NOT EXISTS idx_tank_pieces_tank ON tank_pieces(tank_id);
     CREATE INDEX IF NOT EXISTS idx_production_notes_created ON production_notes(created_at DESC);

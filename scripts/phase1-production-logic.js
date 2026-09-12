@@ -565,7 +565,7 @@ function createPhase1ProductionLogic(deps) {
       return { ok: false, status: 404, body: { ok: false, error: 'not_found', message: 'Tank not found.' } };
     }
     const tankRow = tankRes.rows[0];
-    const pieceCount = Math.min(4, Math.max(1, Number(tankRow.piece_count) || 1));
+    const pieceCount = Math.min(8, Math.max(1, Number(tankRow.piece_count) || 1));
     await ensureTankPieces(tid, pieceCount);
     const pieces = (await getTankPieces(tid)).filter((p) => Number(p.piece_number) <= pieceCount);
 
@@ -736,7 +736,7 @@ function createPhase1ProductionLogic(deps) {
   async function fetchPieceReports(tankId) {
     const tid = Number(tankId);
     const tankRes = await pool.query('SELECT piece_count FROM tanks WHERE id = $1', [tid]);
-    const pieceCount = Math.min(4, Math.max(1, Number(tankRes.rows[0] && tankRes.rows[0].piece_count) || 1));
+    const pieceCount = Math.min(8, Math.max(1, Number(tankRes.rows[0] && tankRes.rows[0].piece_count) || 1));
     await ensureTankPieces(tid, pieceCount);
     const pieces = await getTankPieces(tid);
     const reports = [];
@@ -894,7 +894,7 @@ function createPhase1ProductionLogic(deps) {
     const tid = Number(tankId);
     const pieceNum = Number(pieceNumber);
     if (!Number.isInteger(mid) || mid <= 0 || !Number.isInteger(tid) || tid <= 0) return null;
-    if (!Number.isInteger(pieceNum) || pieceNum < 1 || pieceNum > 4) return null;
+    if (!Number.isInteger(pieceNum) || pieceNum < 1 || pieceNum > 8) return null;
     const { rows } = await pool.query(
       `SELECT ms.*,
               t.name AS team_name, t.barcode AS team_barcode,
@@ -924,7 +924,7 @@ function createPhase1ProductionLogic(deps) {
   }
 
   async function ensureTankPieces(tankId, pieceCount, opts = {}) {
-    const count = Math.min(4, Math.max(1, Number(pieceCount) || 1));
+    const count = Math.min(8, Math.max(1, Number(pieceCount) || 1));
     const tid = Number(tankId);
     for (let n = 1; n <= count; n += 1) {
       await pool.query(
@@ -975,7 +975,7 @@ function createPhase1ProductionLogic(deps) {
 
   async function getTankPieceByNumber(tankId, pieceNumber) {
     const n = Number(pieceNumber);
-    if (!Number.isInteger(n) || n < 1 || n > 4) return null;
+    if (!Number.isInteger(n) || n < 1 || n > 8) return null;
     const { rows } = await pool.query(
       'SELECT * FROM tank_pieces WHERE tank_id = $1 AND piece_number = $2 LIMIT 1',
       [Number(tankId), n]
@@ -997,7 +997,7 @@ function createPhase1ProductionLogic(deps) {
     const pieces = await getTankPieces(tankId);
     const tankRes = await pool.query('SELECT piece_count FROM tanks WHERE id = $1', [Number(tankId)]);
     const pieceCount = Math.min(
-      4,
+      8,
       Math.max(1, Number(tankRes.rows[0] && tankRes.rows[0].piece_count) || pieces.length || 1)
     );
     const n = Number(pieceNumber);
@@ -1060,7 +1060,7 @@ function createPhase1ProductionLogic(deps) {
   }
 
   function computePieceProgress(pieces, pieceCount) {
-    const count = Math.min(4, Math.max(1, Number(pieceCount) || (pieces && pieces.length) || 1));
+    const count = Math.min(8, Math.max(1, Number(pieceCount) || (pieces && pieces.length) || 1));
     const configured = (pieces || []).filter((p) => Number(p.piece_number) >= 1 && Number(p.piece_number) <= count);
     const completed = configured.filter((p) => String(p.status) === 'completed').length;
     const incomplete = configured.filter((p) => String(p.status) !== 'completed');
@@ -1499,7 +1499,7 @@ function createPhase1ProductionLogic(deps) {
     // Multi-piece: block only if THIS tank + piece already has an open session on this machine.
     // (checked after piece resolution below)
 
-    const pieceCount = Math.min(4, Math.max(1, Number(tankRow.piece_count) || 1));
+    const pieceCount = Math.min(8, Math.max(1, Number(tankRow.piece_count) || 1));
     await ensureTankPieces(tankRow.id, pieceCount);
     const requestedPiece = pieceNumber != null ? Number(pieceNumber) : null;
     if (requestedPiece == null || !Number.isInteger(requestedPiece)) {
@@ -1731,7 +1731,7 @@ function createPhase1ProductionLogic(deps) {
 
     const pieceCountRes = await pool.query(`SELECT piece_count FROM tanks WHERE id = $1`, [session.tank_id]);
     const pieceCount = Math.min(
-      4,
+      8,
       Math.max(1, Number(pieceCountRes.rows[0] && pieceCountRes.rows[0].piece_count) || 1)
     );
     await ensureTankPieces(session.tank_id, pieceCount);
@@ -1873,7 +1873,7 @@ function createPhase1ProductionLogic(deps) {
     }
     const pieceCountRes = await pool.query('SELECT piece_count FROM tanks WHERE id = $1', [session.tank_id]);
     const pieceCount = Math.min(
-      4,
+      8,
       Math.max(1, Number(pieceCountRes.rows[0] && pieceCountRes.rows[0].piece_count) || 1)
     );
     await ensureTankPieces(session.tank_id, pieceCount);
@@ -2372,9 +2372,9 @@ function createPhase1ProductionLogic(deps) {
       const endShift = resolveEndShift(s);
       if (endShift) return { type: 'end_shift', value: endShift.barcode };
     }
-    if (s.startsWith('PIECE:') || s.startsWith('PIECE_') || /^PIECE\s*[1-4]$/.test(s)) {
+    if (s.startsWith('PIECE:') || s.startsWith('PIECE_') || /^PIECE\s*[1-8]$/.test(s)) {
       const num = Number(String(s).replace(/^PIECE[_:\s]*/i, '').trim());
-      if (Number.isInteger(num) && num >= 1 && num <= 4) {
+      if (Number.isInteger(num) && num >= 1 && num <= 8) {
         return { type: 'piece', value: num };
       }
     }

@@ -352,13 +352,13 @@ function updateTankTableHead(filter) {
   if (!tankTableHead) return;
   if (filter === 'trash') {
     tankTableHead.innerHTML = `<tr>
-      <th>Tank #</th><th>Customer</th><th>Model</th><th>Pieces</th><th>Previous Status</th><th>Deleted At</th><th>Deleted By</th><th>Actions</th>
+      <th>Tank #</th><th>Project Name</th><th>Model</th><th>Pieces</th><th>Previous Status</th><th>Deleted At</th><th>Deleted By</th><th>Actions</th>
     </tr>`;
     return;
   }
   tankTableHead.innerHTML = `<tr>
     <th><input type="checkbox" id="tankSelectAll" aria-label="Select all" /></th>
-    <th>Tank #</th><th>Customer</th><th>Model</th><th>Pieces</th><th>Status</th><th>Created</th><th>Started</th><th>Duration</th><th>Actions</th>
+    <th>Tank #</th><th>Project Name</th><th>Model</th><th>Pieces</th><th>Status</th><th>Created</th><th>Started</th><th>Duration</th><th>Actions</th>
   </tr>`;
   const selectAll = document.getElementById('tankSelectAll');
   if (selectAll) {
@@ -1049,7 +1049,7 @@ function renderTankReport(data) {
           }</div>
         </div>
         <div class="tank-lifecycle-item">
-          <div class="tank-lifecycle-label">Customer / Model</div>
+          <div class="tank-lifecycle-label">Project Name / Model</div>
           <div class="tank-lifecycle-value">${escapeHtml(tank.customer || '—')} / ${escapeHtml(tank.model || '—')}</div>
         </div>
         <div class="tank-lifecycle-item">

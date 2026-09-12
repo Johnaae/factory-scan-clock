@@ -270,7 +270,7 @@ function buildTankReportCsv(data) {
     'Tank Total Labor Hours',
     'Tank Total Running',
     'Tank Total Running Hours',
-    'Customer',
+    'Project Name',
     'Model',
   ];
   const lines = [csvRow(header)];
@@ -371,7 +371,7 @@ async function buildTankReportXlsxBuffer(data) {
     ['Completed Pieces', overview.completed_pieces],
     ['Current/Final Phase', overview.current_phase],
     ['Piece', overview.piece_label],
-    ['Customer', overview.customer],
+    ['Project Name', overview.customer],
     ['Model', overview.model],
     ['Description', overview.description],
     ['Downtime Total', overview.downtime_total],

@@ -2133,8 +2133,8 @@ function mapTankRowForApi(row) {
     priority: row.priority || '',
     due_date: row.due_date || null,
     notes: row.notes || '',
-    piece_count: Math.min(4, Math.max(1, Number(row.piece_count) || 1)),
-    current_piece_number: Math.min(4, Math.max(1, Number(row.current_piece_number) || 1)),
+    piece_count: Math.min(8, Math.max(1, Number(row.piece_count) || 1)),
+    current_piece_number: Math.min(8, Math.max(1, Number(row.current_piece_number) || 1)),
     status,
     created_at,
     first_scanned_at,
@@ -4933,7 +4933,7 @@ async function handleWindingScanAction(machine, body) {
     tank: pendingIn.tank || null,
     piece: pendingIn.piece != null ? Number(pendingIn.piece) : null,
   };
-  if (pending.piece != null && (!Number.isInteger(pending.piece) || pending.piece < 1 || pending.piece > 4)) {
+  if (pending.piece != null && (!Number.isInteger(pending.piece) || pending.piece < 1 || pending.piece > 8)) {
     pending.piece = null;
   }
   let parsed = phase1.parseScan(barcode);
@@ -5122,11 +5122,13 @@ async function handleWindingScanAction(machine, body) {
       }
       return { ok: false, status: 403, body: tankBlock };
     }
-    const pieceCount = Math.min(4, Math.max(1, Number(tankRow.piece_count) || 1));
+    const pieceCount = Math.min(8, Math.max(1, Number(tankRow.piece_count) || 1));
     await phase1.ensureTankPieces(tankRow.id, pieceCount);
     const pieces = await phase1.getTankPieces(tankRow.id);
     const configuredPieces = pieces.filter((p) => Number(p.piece_number) <= pieceCount);
-    // Multi-tank: if this tank already has an open session on this machine, switch to it.
+    // Always require explicit piece selection via the Piece Selection popup.
+    pending.piece = null;
+    // Multi-tank: if this tank already has an open session on this machine, switch focus to it.
     const openRows = await phase1.getOpenSessionsForMachine(machine.id);
     const match = openRows.find(
       (r) => String(r.tank_number || '').toUpperCase() === String(pending.tank).toUpperCase()
@@ -5134,7 +5136,6 @@ async function handleWindingScanAction(machine, body) {
     if (match) {
       await phase1.setMachineActiveTank(machine.id, match.tank_id);
       const tankSessions = openRows.filter((r) => Number(r.tank_id) === Number(match.tank_id));
-      if (pieceCount === 1) pending.piece = 1;
       return {
         ok: true,
         status: 200,
@@ -5149,12 +5150,11 @@ async function handleWindingScanAction(machine, body) {
           tank_open_sessions: await Promise.all(tankSessions.map((r) => phase1.mapSession(r))),
           message:
             pieceCount === 1
-              ? 'Piece 1 selected. Scan a phase to begin.'
+              ? 'Select Piece 1 for this tank.'
               : `Select Piece 1–${pieceCount} for this tank.`,
         },
       };
     }
-    if (pieceCount === 1) pending.piece = 1;
     const pausedTank = await phase1.getPausedTankByNumber(pending.tank);
     const resumablePhase =
       pausedTank && pausedTank.wip_phase_name ? pausedTank.wip_phase_name : null;
@@ -5172,7 +5172,7 @@ async function handleWindingScanAction(machine, body) {
         resumable_phase: resumablePhase,
         message:
           pieceCount === 1
-            ? 'Piece 1 selected. Scan a phase to begin.'
+            ? 'Select Piece 1 for this tank.'
             : `Select Piece 1–${pieceCount} for this tank.`,
       },
     };
@@ -5333,7 +5333,7 @@ async function handleWindingScanAction(machine, body) {
             };
           }
           const pieces = await phase1.getTankPieces(tankRow.id);
-          const pieceCount = Math.min(4, Math.max(1, Number(tankRow.piece_count) || 1));
+          const pieceCount = Math.min(8, Math.max(1, Number(tankRow.piece_count) || 1));
           const progress = phase1.computePieceProgress(pieces, pieceCount);
           if (!progress.all_pieces_complete) {
             return {
@@ -5623,7 +5623,7 @@ app.get('/api/kiosk/winding/config', async (req, res) => {
         [piecesTankId]
       );
       if (tankMeta.rows[0]) {
-        piece_count = Math.min(4, Math.max(1, Number(tankMeta.rows[0].piece_count) || 1));
+        piece_count = Math.min(8, Math.max(1, Number(tankMeta.rows[0].piece_count) || 1));
         active_tank_number = tankMeta.rows[0].tank_number;
         await phase1.ensureTankPieces(piecesTankId, piece_count);
         pieces = (await phase1.getTankPieces(piecesTankId)).filter((p) => Number(p.piece_number) <= piece_count);
@@ -5829,7 +5829,7 @@ app.post('/api/kiosk/winding/action', async (req, res) => {
         tankId,
       ]);
       if (tankMeta.rows[0]) {
-        piece_count = Math.min(4, Math.max(1, Number(tankMeta.rows[0].piece_count) || 1));
+        piece_count = Math.min(8, Math.max(1, Number(tankMeta.rows[0].piece_count) || 1));
         pieces = pieces.filter((p) => Number(p.piece_number) <= piece_count);
       }
       let open_qa_qc = null;
@@ -8119,7 +8119,7 @@ app.post('/api/tanks', async (req, res) => {
   const priority = body.priority != null ? String(body.priority).trim().slice(0, 40) : '';
   const due_date = body.due_date ? String(body.due_date).slice(0, 10) : null;
   const notes = body.notes != null ? String(body.notes).trim().slice(0, 2000) : '';
-  const piece_count = Math.min(4, Math.max(1, Number(body.piece_count) || 1));
+  const piece_count = Math.min(8, Math.max(1, Number(body.piece_count) || 1));
   if (!tank_number) {
     return res.status(400).json({ ok: false, error: 'validation', message: 'tank_number is required.' });
   }
@@ -8181,10 +8181,10 @@ app.put('/api/tanks/:id', async (req, res) => {
       : current.rows[0].due_date || null;
   const notes = body.notes != null ? String(body.notes).trim().slice(0, 2000) : current.rows[0].notes || '';
   let piece_count = Math.min(
-    4,
+    8,
     Math.max(1, Number(body.piece_count != null ? body.piece_count : current.rows[0].piece_count) || 1)
   );
-  const prevPieceCount = Math.min(4, Math.max(1, Number(current.rows[0].piece_count) || 1));
+  const prevPieceCount = Math.min(8, Math.max(1, Number(current.rows[0].piece_count) || 1));
   if (body.piece_count != null && piece_count !== prevPieceCount) {
     const hasActivity = await phase1.tankHasProductionActivity(id);
     if (hasActivity && piece_count < prevPieceCount) {
@@ -8514,7 +8514,7 @@ async function buildTankDailySummary(date) {
   const tanks = [];
   for (const r of rows) {
     const tankId = Number(r.tank_id);
-    const pieceCount = Math.min(4, Math.max(1, Number(r.piece_count) || Number(r.total_pieces) || 1));
+    const pieceCount = Math.min(8, Math.max(1, Number(r.piece_count) || Number(r.total_pieces) || 1));
     const completedPieces = Number(r.completed_pieces) || 0;
     const currentPiece =
       r.open_piece_number != null
@@ -8997,7 +8997,7 @@ async function getTankReportPayload(id) {
         reportMeta.machine_name = s0.machine_name || reportMeta.machine_name;
       }
     }
-    const pieceCount = Math.min(4, Math.max(1, Number(tank.piece_count) || pieces.length || 1));
+    const pieceCount = Math.min(8, Math.max(1, Number(tank.piece_count) || pieces.length || 1));
     const completedPieces = pieces.filter((p) => String(p.status) === 'completed' && Number(p.piece_number) <= pieceCount).length;
     reportMeta.percent_complete = Math.round((completedPieces / pieceCount) * 100);
     reportMeta.piece_count = pieceCount;

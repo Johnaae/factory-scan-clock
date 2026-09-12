@@ -335,7 +335,7 @@ function buildTankReportPdfBuffer(data) {
     { label: 'Current Phase', value: meta.current_phase || '—' },
     { label: 'Piece', value: meta.piece_label || `Piece ${tank.current_piece_number || 1}` },
     { label: 'Started', value: fmtWhen(tank.first_scanned_at || tank.started_at || meta.started_at) },
-    { label: 'Customer', value: tank.customer || '—' },
+    { label: 'Project Name', value: tank.customer || '—' },
     { label: 'Model', value: tank.model || '—' },
     { label: 'Completed', value: fmtWhen(tank.completed_at) },
     { label: 'Duration', value: tank.duration_display || '—' },
