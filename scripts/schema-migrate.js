@@ -211,7 +211,7 @@ CREATE TABLE IF NOT EXISTS alert_email_recipients (
 );
 `;
 
-/** Stage 3 — additive columns for databases created before columns existed on CREATE. */
+/** Stage 4 — additive columns, run after extended/Phase 2 tables exist. */
 const ADD_COLUMNS_SQL = `
 ALTER TABLE employees ADD COLUMN IF NOT EXISTS badge_role TEXT;
 ALTER TABLE tanks ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
@@ -324,7 +324,7 @@ ALTER TABLE tanks ADD COLUMN IF NOT EXISTS testing_completed_at TIMESTAMPTZ;
 }
 `;
 
-/** Extended tables for pieces and production notes (created after parents). */
+/** Stage 3 — extended/Phase 2 tables, created after all parent tables. */
 const EXTENDED_TABLES_SQL = `
 CREATE TABLE IF NOT EXISTS tank_pieces (
   id BIGSERIAL PRIMARY KEY,
@@ -430,7 +430,7 @@ CREATE TABLE IF NOT EXISTS test_attempts (
 }
 `;
 
-/** Stage 4 — indexes. */
+/** Stage 5 — indexes. */
 const INDEXES_SQL = `
 CREATE INDEX IF NOT EXISTS idx_employees_code ON employees(code);
 CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
@@ -729,8 +729,10 @@ async function ensureTankPiecesPieceLimit(client, log = console) {
 
 /** Idempotent additive pass — always safe on existing production databases. */
 async function runAdditiveSchemaPass(client, log = console) {
-  await client.query(ADD_COLUMNS_SQL);
+  // Some additive ALTER statements target Phase 2 tables (for example
+  // test_attempts.previous_status), so those tables must exist first.
   await client.query(EXTENDED_TABLES_SQL);
+  await client.query(ADD_COLUMNS_SQL);
   await ensureTankPiecesPieceLimit(client, log);
   await client.query(`
     CREATE INDEX IF NOT EXISTS idx_tank_pieces_tank ON tank_pieces(tank_id);
@@ -888,11 +890,11 @@ async function runSchemaMigration(client, options = {}) {
       log.log('[migration] creating junction tables');
       await client.query(JUNCTION_TABLES_SQL);
 
-      log.log('[migration] adding columns');
-      await client.query(ADD_COLUMNS_SQL);
-
       log.log('[migration] creating extended tables');
       await client.query(EXTENDED_TABLES_SQL);
+
+      log.log('[migration] adding columns');
+      await client.query(ADD_COLUMNS_SQL);
 
       log.log('[migration] creating indexes');
       await client.query(INDEXES_SQL);
