@@ -15,6 +15,8 @@ const els = {
   assignmentBanner: document.getElementById('assignmentBanner'),
   assignmentTeam: document.getElementById('assignmentTeam'),
   finishBanner: document.getElementById('finishBanner'),
+  reworkBanner: document.getElementById('reworkBanner'),
+  reworkFailNote: document.getElementById('reworkFailNote'),
   valTeam: document.getElementById('valTeam'),
   valTank: document.getElementById('valTank'),
   valPhase: document.getElementById('valPhase'),
@@ -25,6 +27,7 @@ const els = {
   pieceChips: document.getElementById('pieceChips'),
   pieceStatusPanel: document.getElementById('pieceStatusPanel'),
   pieceTouchButtons: document.getElementById('pieceTouchButtons'),
+  btnSelectPiece: document.getElementById('btnSelectPiece'),
   openTanksPanel: document.getElementById('openTanksPanel'),
   phaseSummaryPanel: document.getElementById('phaseSummaryPanel'),
   phaseSummaryList: document.getElementById('phaseSummaryList'),
@@ -77,6 +80,11 @@ const els = {
   changePhaseConfirm: document.getElementById('changePhaseConfirm'),
   btnCancelChangePhase: document.getElementById('btnCancelChangePhase'),
   btnConfirmChangePhase: document.getElementById('btnConfirmChangePhase'),
+  pieceSelectModal: document.getElementById('pieceSelectModal'),
+  pieceSelectHint: document.getElementById('pieceSelectHint'),
+  pieceSelectList: document.getElementById('pieceSelectList'),
+  pieceSelectEmpty: document.getElementById('pieceSelectEmpty'),
+  btnCancelPieceSelect: document.getElementById('btnCancelPieceSelect'),
 };
 
 let config = null;
@@ -90,12 +98,15 @@ let phaseTimeSummary = [];
 let pendingTank = null;
 let pendingPiece = null;
 let resumablePhase = null;
+let tankReworkRequired = false;
+let latestFailureNote = null;
 let pendingConfirmer = null;
 let employeeOutPick = null;
 let employeeOutSubmitting = false;
 let changePhasePick = null;
 let changePhaseContext = null;
 let changePhaseSubmitting = false;
+let pieceSelectSubmitting = false;
 let phases = [];
 let elapsedTimer = null;
 let scanBuffer = '';
@@ -104,6 +115,13 @@ let noteMode = 'general'; // general | correction
 let pendingCorrectionBarcode = null;
 let downtimeReasons = [];
 let openQaQc = null;
+
+const MAX_TANK_PIECES = 8;
+
+function clampPieceCount(n, fallback) {
+  const fb = fallback == null ? 1 : fallback;
+  return Math.min(MAX_TANK_PIECES, Math.max(0, Number(n) || fb));
+}
 
 function isEmployeeOutModalOpen() {
   return Boolean(
@@ -117,6 +135,12 @@ function isChangePhaseModalOpen() {
   );
 }
 
+function isPieceSelectModalOpen() {
+  return Boolean(
+    els.pieceSelectModal && !els.pieceSelectModal.hidden && els.pieceSelectModal.classList.contains('show')
+  );
+}
+
 function isTextEntryModalOpen() {
   const noteOpen = els.noteModal && !els.noteModal.hidden && els.noteModal.classList.contains('show');
   const downtimeOpen =
@@ -124,7 +148,12 @@ function isTextEntryModalOpen() {
   const resolveOpen =
     els.resolveQaQcModal && !els.resolveQaQcModal.hidden && els.resolveQaQcModal.classList.contains('show');
   return Boolean(
-    noteOpen || downtimeOpen || resolveOpen || isEmployeeOutModalOpen() || isChangePhaseModalOpen()
+    noteOpen ||
+      downtimeOpen ||
+      resolveOpen ||
+      isEmployeeOutModalOpen() ||
+      isChangePhaseModalOpen() ||
+      isPieceSelectModalOpen()
   );
 }
 
@@ -150,29 +179,33 @@ function blurScanInputs() {
 }
 
 /**
- * Keep the kiosk ready for USB barcode scanners: clear + focus the scan box
- * unless a text-entry dialog currently owns the keyboard.
+ * Keep the kiosk ready for USB barcode scanners without opening the Android
+ * soft keyboard. Focus the hidden scanner trap (inputmode=none), never the
+ * Manual Entry box — that opens only when the worker taps it intentionally.
  */
 function focusScanInput(opts) {
   const clear = !opts || opts.clear !== false;
   if (isTextEntryModalOpen()) return;
-  const input = els.manual || els.scannerTrap;
-  if (!input) return;
   if (clear) {
     if (els.manual) els.manual.value = '';
     scanBuffer = '';
   }
   const apply = () => {
     if (isTextEntryModalOpen()) return;
+    // Do not steal focus while the worker is typing in Manual Entry.
+    if (els.manual && document.activeElement === els.manual) return;
     try {
-      input.focus({ preventScroll: true });
-      if (els.manual && input === els.manual && typeof input.setSelectionRange === 'function') {
-        const len = input.value.length;
-        input.setSelectionRange(len, len);
-      }
+      if (els.manual && typeof els.manual.blur === 'function') els.manual.blur();
+    } catch (_err) {
+      /* ignore */
+    }
+    const trap = els.scannerTrap;
+    if (!trap) return;
+    try {
+      trap.focus({ preventScroll: true });
     } catch (_err) {
       try {
-        input.focus();
+        trap.focus();
       } catch (_err2) {
         /* ignore */
       }
@@ -237,7 +270,8 @@ function showEmployeeOutConfirm(emp) {
   employeeOutPick = emp;
   if (els.employeeOutConfirm) {
     els.employeeOutConfirm.hidden = false;
-    els.employeeOutConfirm.textContent = `Mark ${emp.name} out for this shift?`;
+    const label = emp.name || emp.code || 'Employee';
+    els.employeeOutConfirm.textContent = `Confirm Employee Out — ${label}?`;
   }
   if (els.btnConfirmEmployeeOut) {
     els.btnConfirmEmployeeOut.hidden = false;
@@ -275,12 +309,13 @@ function renderEmployeeOutList(employees) {
     btn.setAttribute('data-employee-id', String(emp.id));
     const name = document.createElement('span');
     name.className = 'employee-out-name';
-    name.textContent = emp.name || 'Employee';
+    name.textContent = emp.name || emp.code || 'Employee';
     const meta = document.createElement('span');
     meta.className = 'employee-out-meta';
     meta.textContent = [emp.code, emp.role].filter(Boolean).join('  ·  ');
     btn.appendChild(name);
     btn.appendChild(meta);
+    btn.addEventListener('mousedown', (e) => e.preventDefault());
     btn.addEventListener('click', () => showEmployeeOutConfirm(emp));
     els.employeeOutList.appendChild(btn);
   });
@@ -372,6 +407,137 @@ function closeChangePhaseModal() {
     els.btnConfirmChangePhase.hidden = true;
     els.btnConfirmChangePhase.disabled = false;
   }
+}
+
+function closePieceSelectModal() {
+  pieceSelectSubmitting = false;
+  if (!els.pieceSelectModal) return;
+  els.pieceSelectModal.classList.remove('show');
+  els.pieceSelectModal.hidden = true;
+  if (els.pieceSelectList) els.pieceSelectList.innerHTML = '';
+  if (els.pieceSelectEmpty) {
+    els.pieceSelectEmpty.hidden = true;
+    els.pieceSelectEmpty.textContent = '';
+  }
+}
+
+function pieceSelectSource() {
+  const list = configuredPieces();
+  const count = clampPieceCount(pieceCount || list.length || 1, 1) || 1;
+  if (list.length) {
+    return list.filter((p) => {
+      const n = Number(p.piece_number);
+      return Number.isInteger(n) && n >= 1 && n <= count;
+    });
+  }
+  return Array.from({ length: count }, (_, i) => ({ piece_number: i + 1, status: 'pending' }));
+}
+
+function isPieceEligibleForSelect(piece) {
+  const done = String(piece && piece.status) === 'completed';
+  // Rework tanks may re-select previously completed pieces without deleting history.
+  return !done || tankReworkRequired;
+}
+
+function renderPieceSelectList() {
+  if (!els.pieceSelectList) return;
+  els.pieceSelectList.innerHTML = '';
+  const source = pieceSelectSource();
+  if (!source.length) {
+    if (els.pieceSelectEmpty) {
+      els.pieceSelectEmpty.hidden = false;
+      els.pieceSelectEmpty.textContent = 'No available pieces for this tank.';
+    }
+    return;
+  }
+  if (els.pieceSelectEmpty) els.pieceSelectEmpty.hidden = true;
+  source.forEach((p) => {
+    const n = Number(p.piece_number);
+    const done = String(p.status) === 'completed';
+    const eligible = isPieceEligibleForSelect(p);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    // Never style rework-eligible completed pieces as disabled (is-done).
+    btn.className =
+      'piece-select-btn' +
+      (done && eligible ? ' is-rework' : '') +
+      (done && !eligible ? ' is-done' : '');
+    btn.setAttribute('data-piece', String(n));
+    btn.textContent = done ? (eligible ? `Piece ${n} (rework)` : `Piece ${n} ✓`) : `Piece ${n}`;
+    btn.disabled = !eligible;
+    btn.addEventListener('mousedown', (e) => e.preventDefault());
+    if (eligible) {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        void selectPieceFromModal(n);
+      });
+    }
+    els.pieceSelectList.appendChild(btn);
+  });
+}
+
+/**
+ * Single entry for Piece Selection modal (auto-open after tank scan AND Piece button).
+ * Renders from current tank/rework/piece state — callers must commit that state first.
+ */
+function openPieceSelectModal() {
+  if (!els.pieceSelectModal) return;
+  if (!pendingTank && !activeTankNumber()) {
+    warn('Scan or select a tank first.');
+    return;
+  }
+  // Ensure piece rows exist before enabling taps (avoid empty → synthetic flicker).
+  const count = clampPieceCount(pieceCount || configuredPieces().length || 1, 1) || 1;
+  if (!configuredPieces().length && count >= 1) {
+    pieceCount = count;
+  }
+  blurScanInputs();
+  pieceSelectSubmitting = false;
+  els.pieceSelectModal.hidden = false;
+  els.pieceSelectModal.classList.add('show');
+  const tank = pendingTank || activeTankNumber() || '—';
+  if (els.pieceSelectHint) {
+    if (tankReworkRequired) {
+      els.pieceSelectHint.textContent =
+        count <= 1
+          ? `Rework Required — Tank ${tank}: tap Piece 1.`
+          : `Rework Required — Tank ${tank}: select Piece 1–${count}.`;
+    } else {
+      els.pieceSelectHint.textContent =
+        count <= 1
+          ? `Tank ${tank}: tap Piece 1 to continue.`
+          : `Tank ${tank}: select Piece 1–${count}.`;
+    }
+  }
+  renderPieceSelectList();
+  blurScanInputs();
+  window.requestAnimationFrame(() => {
+    if (isPieceSelectModalOpen()) blurScanInputs();
+  });
+}
+
+/** Immediate piece selection — no confirmation step. */
+async function selectPieceFromModal(pieceNum) {
+  const n = Number(pieceNum);
+  if (!Number.isInteger(n) || n < 1 || pieceSelectSubmitting) return;
+  pieceSelectSubmitting = true;
+  blurScanInputs();
+  const data = await postAction({
+    action: 'scan',
+    barcode: `PIECE:${n}`,
+    pending: { tank: pendingTank || activeTankNumber(), piece: pendingPiece },
+    ...confirmerPayload(),
+  });
+  pieceSelectSubmitting = false;
+  if (!data) {
+    // Keep modal open so the worker can try another piece.
+    renderPieceSelectList();
+    return;
+  }
+  closePieceSelectModal();
+  await consumeScanResult(data);
+  if (!isTextEntryModalOpen()) focusScanInput();
 }
 
 function showChangePhaseConfirm(ph) {
@@ -906,6 +1072,7 @@ function renderPieceStatusPanel() {
     row.addEventListener('click', () => {
       const n = Number(row.getAttribute('data-piece'));
       if (!Number.isInteger(n)) return;
+      blurScanInputs();
       void postAction({
         action: 'scan',
         barcode: `PIECE:${n}`,
@@ -920,7 +1087,7 @@ function renderPieceStatusPanel() {
 }
 
 function configuredPieces() {
-  const count = Math.min(4, Math.max(0, Number(pieceCount) || pieces.length || 0));
+  const count = clampPieceCount(pieceCount || pieces.length || 0, 0);
   if (!count) return pieces.slice();
   return pieces.filter((p) => Number(p.piece_number) >= 1 && Number(p.piece_number) <= count);
 }
@@ -940,28 +1107,28 @@ function selectedPieceNumber() {
   return null;
 }
 
-function renderPieceTouchButtons() {
-  if (!els.pieceTouchButtons) return;
-  const list = configuredPieces();
-  if (!list.length && !pendingTank && !session) {
-    els.pieceTouchButtons.innerHTML = '';
-    els.pieceTouchButtons.hidden = true;
+function renderReworkBanner() {
+  if (!els.reworkBanner) return;
+  if (!tankReworkRequired || !pendingTank) {
+    els.reworkBanner.hidden = true;
+    if (els.reworkFailNote) els.reworkFailNote.textContent = '';
     return;
   }
-  const count = Math.min(4, Math.max(1, Number(pieceCount) || list.length || 1));
-  const source = list.length
-    ? list
-    : Array.from({ length: count }, (_, i) => ({ piece_number: i + 1, status: 'pending' }));
-  const current = selectedPieceNumber();
-  els.pieceTouchButtons.hidden = false;
-  els.pieceTouchButtons.innerHTML = source
-    .map((p) => {
-      const n = Number(p.piece_number);
-      const done = String(p.status) === 'completed';
-      const selected = current === n;
-      return `<button type="button" class="btn-secondary btn-touch${selected ? ' is-selected' : ''}${done ? ' is-done' : ''}" data-barcode="PIECE:${n}" ${done ? 'disabled' : ''}>Piece ${n}${done ? ' ✓' : ''}</button>`;
-    })
-    .join('');
+  els.reworkBanner.hidden = false;
+  if (els.reworkFailNote) {
+    const note = String(latestFailureNote || '').trim();
+    els.reworkFailNote.textContent = note
+      ? `QA/QC fail note: ${note}`
+      : 'QA/QC failed this tank — select Piece, then Correction/phase.';
+  }
+}
+
+function renderPieceTouchButtons() {
+  // Piece selection after tank scan uses the Piece Selection modal.
+  // Keep status panel for multi-piece visibility; hide inline piece buttons.
+  if (!els.pieceTouchButtons) return;
+  els.pieceTouchButtons.innerHTML = '';
+  els.pieceTouchButtons.hidden = true;
 }
 
 function renderPieces() {
@@ -1177,6 +1344,7 @@ function renderUi() {
   renderPieces();
   renderPieceStatusPanel();
   renderQaQcUi();
+  renderReworkBanner();
 
   const displaySession = focusedSession();
 
@@ -1213,11 +1381,17 @@ function renderUi() {
     els.valPhase.textContent = displaySession.phase_name || displaySession.activity_name || '—';
     const st = displaySession.status || 'running';
     const stopReason = String(displaySession.stop_reason || '').toLowerCase();
-    els.valStatus.textContent = sessionStatusLabel(st, displaySession.status_label);
+    els.valStatus.textContent = tankReworkRequired
+      ? 'Rework Required'
+      : sessionStatusLabel(st, displaySession.status_label);
     els.valStatus.className = statusCssClass(displaySession);
     els.pendingPanel.hidden = true;
     els.phasePanel.hidden = true;
-    els.workflowTitle.textContent = stopReason === 'qa_qc' ? 'QA/QC in progress' : 'Production in progress';
+    els.workflowTitle.textContent = tankReworkRequired
+      ? 'Rework Required'
+      : stopReason === 'qa_qc'
+        ? 'QA/QC in progress'
+        : 'Production in progress';
     if (pendingConfirmer) {
       els.workflowSub.textContent = `${pendingConfirmer.name} will confirm completion — scan Piece/Tank Complete or tap a button.`;
     } else if (stopReason === 'qa_qc') {
@@ -1268,25 +1442,34 @@ function renderUi() {
   }
 
   if (pendingPiece == null) {
-    const count = Math.min(4, Math.max(1, Number(pieceCount) || configuredPieces().length || 1));
-    els.workflowTitle.textContent = 'Select Piece';
-    els.workflowSub.textContent =
-      count <= 1
-        ? `Tank ${pendingTank}: Piece 1 selected. Scan a phase to begin.`
-        : `Tank ${pendingTank}: select Piece 1–${count} (do not assume Piece 1).`;
+    const count = clampPieceCount(pieceCount || configuredPieces().length || 1, 1) || 1;
+    els.workflowTitle.textContent = tankReworkRequired ? 'Rework Required — Select Piece' : 'Select Piece';
+    els.workflowSub.textContent = tankReworkRequired
+      ? count <= 1
+        ? `Tank ${pendingTank}: Rework Required — select Piece 1, then Correction/phase.`
+        : `Tank ${pendingTank}: Rework Required — select Piece 1–${count}, then Correction/phase.`
+      : count <= 1
+        ? `Tank ${pendingTank}: select Piece 1 to continue.`
+        : `Tank ${pendingTank}: select Piece 1–${count}.`;
     els.phasePanel.hidden = true;
     if (els.phaseSummaryPanel) els.phaseSummaryPanel.hidden = true;
     return;
   }
 
   if (resumablePhase) {
-    els.workflowTitle.textContent = 'Scan Phase or RESUME';
+    els.workflowTitle.textContent = tankReworkRequired
+      ? 'Rework Required — Scan Phase or RESUME'
+      : 'Scan Phase or RESUME';
     els.workflowSub.textContent = `Tank ${pendingTank} · Piece ${pendingPiece}: scan RESUME to continue ${resumablePhase}, or scan a new Phase.`;
   } else {
-    els.workflowTitle.textContent = 'Scan or select Phase';
+    els.workflowTitle.textContent = tankReworkRequired
+      ? 'Rework Required — Select Correction / Phase'
+      : 'Scan or select Phase';
     els.workflowSub.textContent = configuringNewTank
       ? `Tank ${pendingTank} · Piece ${pendingPiece}: scan a Phase to add this tank (other active tanks stay running).`
-      : `Tank ${pendingTank} · Piece ${pendingPiece}: scan a Phase to begin production (timer starts on first scan).`;
+      : tankReworkRequired
+        ? `Tank ${pendingTank} · Piece ${pendingPiece}: select Correction or phase, then Tank Complete when rework is done.`
+        : `Tank ${pendingTank} · Piece ${pendingPiece}: scan a Phase to begin production (timer starts on first scan).`;
   }
   els.phasePanel.hidden = false;
   renderPhases();
@@ -1307,8 +1490,25 @@ async function loadConfig() {
   phases = data.phases || [];
   openSessions = data.open_sessions || [];
   tankOpenSessions = data.tank_open_sessions || [];
-  pieces = data.pieces || [];
-  pieceCount = Number(data.piece_count) || pieces.length || pieceCount || 0;
+  {
+    // Do not clobber in-progress tank/piece selection with a stale config poll.
+    // After tank_selected (especially rework with no open session yet), config may
+    // still point at a previous active_tank_id and return empty/wrong pieces.
+    const incomingPieces = Array.isArray(data.pieces) ? data.pieces : [];
+    const incomingCount = Number(data.piece_count) || 0;
+    const pendingNorm = pendingTank ? String(pendingTank).toUpperCase() : '';
+    const activeNorm = data.active_tank_number ? String(data.active_tank_number).toUpperCase() : '';
+    const configMatchesPending = !pendingNorm || !activeNorm || pendingNorm === activeNorm;
+    const preserveLocalPieces =
+      Boolean(pendingTank) &&
+      (!configMatchesPending || (incomingPieces.length === 0 && pieces.length > 0));
+    if (!preserveLocalPieces) {
+      pieces = incomingPieces;
+      pieceCount = incomingCount || pieces.length || pieceCount || 0;
+    } else if (incomingCount && configMatchesPending) {
+      pieceCount = incomingCount;
+    }
+  }
   assignment = data.assignment || null;
   phaseTimeSummary = data.phase_time_summary || [];
   downtimeReasons = data.downtime_reasons || downtimeReasons;
@@ -1332,6 +1532,8 @@ async function loadConfig() {
     pendingTank = null;
     pendingPiece = null;
     resumablePhase = null;
+    tankReworkRequired = false;
+    latestFailureNote = null;
   }
   if (data.pending && data.pending.tank) pendingTank = data.pending.tank;
   if (data.pending && data.pending.piece != null) pendingPiece = Number(data.pending.piece);
@@ -1353,11 +1555,18 @@ async function loadConfig() {
   }
   if (els.machineLabel && data.machine) els.machineLabel.textContent = data.machine.name;
   renderUi();
+  // Keep auto-open and Piece-button modal in sync with the same render path.
+  if (isPieceSelectModalOpen()) renderPieceSelectList();
 }
 
 async function postAction(body) {
   const { res, data } = await api(`${API}/action`, { method: 'POST', body: JSON.stringify(body) });
   if (!res.ok || !data.ok) {
+    if (data && data.error === 'need_piece') {
+      if (data.piece_count != null) pieceCount = Number(data.piece_count) || pieceCount;
+      if (Array.isArray(data.pieces)) pieces = data.pieces;
+      openPieceSelectModal();
+    }
     warn((data && data.message) || 'Action failed.');
     return null;
   }
@@ -1426,9 +1635,12 @@ async function consumeScanResult(data) {
     return;
   }
   if (data.action === 'team_assigned') {
+    closePieceSelectModal();
     pendingTank = null;
     pendingPiece = null;
     resumablePhase = null;
+    tankReworkRequired = false;
+    latestFailureNote = null;
     warn(`Team ${data.assignment ? data.assignment.team_name : ''} assigned for today. Scan a Tank to begin.`);
     await loadConfig();
     return;
@@ -1472,6 +1684,8 @@ async function consumeScanResult(data) {
     pendingTank = null;
     pendingPiece = null;
     resumablePhase = null;
+    tankReworkRequired = false;
+    latestFailureNote = null;
     warn(
       data.confirmation_line ||
         data.message ||
@@ -1493,6 +1707,8 @@ async function consumeScanResult(data) {
     pendingPiece = null;
     resumablePhase = null;
     pendingConfirmer = null;
+    tankReworkRequired = false;
+    latestFailureNote = null;
     warn(
       data.confirmation_line ||
         data.message ||
@@ -1542,6 +1758,7 @@ async function consumeScanResult(data) {
     return;
   }
   if (data.action === 'piece_selected') {
+    closePieceSelectModal();
     if (data.session) session = data.session;
     if (data.pieces) pieces = data.pieces;
     if (data.piece_count != null) pieceCount = Number(data.piece_count) || pieces.length;
@@ -1564,7 +1781,13 @@ async function consumeScanResult(data) {
     pendingTank = data.pending ? data.pending.tank : pendingTank;
     pendingPiece = data.pending && data.pending.piece != null ? Number(data.pending.piece) : null;
     resumablePhase = data.resumable_phase || null;
-    if (data.pieces) pieces = data.pieces;
+    tankReworkRequired =
+      data.rework_required === true || String(data.tank_status || '').toLowerCase() === 'rework_required';
+    latestFailureNote =
+      data.latest_failure_note ||
+      (data.latest_test_failure && data.latest_test_failure.failure_note) ||
+      null;
+    if (Array.isArray(data.pieces)) pieces = data.pieces;
     if (data.piece_count != null) pieceCount = Number(data.piece_count) || pieces.length;
     if (Array.isArray(data.open_sessions)) openSessions = data.open_sessions;
     if (Array.isArray(data.tank_open_sessions)) tankOpenSessions = data.tank_open_sessions;
@@ -1576,7 +1799,10 @@ async function consumeScanResult(data) {
     }
     warn(data.message || `Tank ${pendingTank} selected.`);
     renderUi();
-    focusScanInput();
+    if (pendingPiece == null) {
+      // Same function as the Piece button — state above is fully committed first.
+      openPieceSelectModal();
+    }
     return;
   }
   if (data.action === 'piece_complete') {
@@ -1605,6 +1831,8 @@ async function consumeScanResult(data) {
     pendingTank = null;
     pendingPiece = null;
     resumablePhase = null;
+    tankReworkRequired = false;
+    latestFailureNote = null;
     showFinishBanner(data.confirmation_line || 'Tank released to Assembly');
     await loadConfig();
     return;
@@ -1660,7 +1888,8 @@ async function handleScan(raw) {
     return;
   }
   await consumeScanResult(data);
-  focusScanInput();
+  // Auto-opened Piece modal owns focus; do not steal it back to the scanner trap.
+  if (!isTextEntryModalOpen()) focusScanInput();
 }
 
 function processScan(v) {
@@ -1693,6 +1922,15 @@ if (els.btnShowPhases) {
     e.stopPropagation();
     blurScanInputs();
     openChangePhaseModal();
+  });
+}
+if (els.btnSelectPiece) {
+  els.btnSelectPiece.addEventListener('mousedown', (e) => e.preventDefault());
+  els.btnSelectPiece.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    blurScanInputs();
+    openPieceSelectModal();
   });
 }
 if (els.btnSaveNote) els.btnSaveNote.addEventListener('click', () => void saveNoteModal());
@@ -1757,6 +1995,21 @@ if (els.changePhaseModal) {
     }
   });
 }
+if (els.btnCancelPieceSelect) {
+  els.btnCancelPieceSelect.addEventListener('mousedown', (e) => e.preventDefault());
+  els.btnCancelPieceSelect.addEventListener('click', () => {
+    closePieceSelectModal();
+    focusScanInput();
+  });
+}
+if (els.pieceSelectModal) {
+  els.pieceSelectModal.addEventListener('click', (e) => {
+    if (e.target === els.pieceSelectModal) {
+      closePieceSelectModal();
+      focusScanInput();
+    }
+  });
+}
 if (els.touchControls) {
   els.touchControls.addEventListener('mousedown', (e) => {
     const btn = e.target.closest('[data-barcode], button');
@@ -1765,6 +2018,7 @@ if (els.touchControls) {
   els.touchControls.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-barcode]');
     if (!btn) return;
+    blurScanInputs();
     const barcode = btn.getAttribute('data-barcode');
     if (!barcode) return;
     if (barcode === 'PHASE:CORRECTIONS') {

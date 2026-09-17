@@ -35,6 +35,16 @@
       .wk-qaqc-note { margin: 8px 0 0; font-size: 0.9rem; color: #7f1d1d; }
       .wk-qaqc-actions { margin-top: 12px; }
       .wk-qaqc-actions .btn-touch--resolve-qa { width: 100%; min-height: 64px; font-size: 18px; font-weight: 800; }
+      .wk-rework-banner {
+        margin: 12px 0;
+        padding: 14px 16px;
+        border: 2px solid #f59e0b;
+        border-radius: 12px;
+        background: #fffbeb;
+      }
+      .wk-rework-banner[hidden] { display: none !important; }
+      .wk-rework-banner__title { display: block; font-size: 1.1rem; font-weight: 800; color: #92400e; margin-bottom: 6px; }
+      .wk-rework-banner__note { margin: 0; font-size: 0.95rem; font-weight: 600; color: #78350f; white-space: pre-wrap; }
       .wk-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
       .wk-touch { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin-top: 14px; }
       .wk-touch .btn-touch { min-height: 52px; font-size: 15px; font-weight: 800; border-radius: 12px; }
@@ -95,6 +105,7 @@
         background: #fff; cursor: pointer; font: inherit;
       }
       .employee-out-row:hover, .employee-out-row:focus { border-color: #ea580c; background: #fff7ed; outline: none; }
+      .employee-out-row.is-selected { border-color: #ea580c; background: #ffedd5; }
       .employee-out-name { display: block; font-size: 1.25rem; font-weight: 800; color: #1e3a5f; }
       .employee-out-meta { display: block; margin-top: 4px; font-size: 0.95rem; font-weight: 700; color: #64748b; }
       .employee-out-confirm-text { margin: 0; font-size: 1.15rem; font-weight: 800; color: #9a3412; line-height: 1.35; }
@@ -122,6 +133,33 @@
       .change-phase-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }
       .change-phase-actions .btn-primary, .change-phase-actions .btn-secondary { min-height: 52px; font-size: 16px; font-weight: 800; }
       @media (max-width: 480px) { .change-phase-list { grid-template-columns: 1fr; } }
+      .piece-select-modal.show { backdrop-filter: blur(8px); background: rgba(15,23,42,.55); }
+      .piece-select-card { width: min(560px, 100%); max-height: min(88vh, 760px); overflow: hidden; }
+      .piece-select-list {
+        display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px;
+        max-height: min(55vh, 480px); overflow-y: auto; -webkit-overflow-scrolling: touch;
+      }
+      .piece-select-btn {
+        min-height: 64px; font-size: 1.2rem; font-weight: 800; border-radius: 12px;
+        border: 2px solid #93c5fd; background: #fff; color: #1e3a5f; cursor: pointer;
+        touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+      }
+      .piece-select-btn:hover, .piece-select-btn:focus { border-color: #2563eb; background: #eff6ff; outline: none; }
+      /* Only truly ineligible pieces look disabled — rework-eligible completed pieces stay clickable. */
+      .piece-select-btn:disabled,
+      .piece-select-btn.is-done:disabled {
+        opacity: 0.55; cursor: not-allowed; background: #f8fafc; pointer-events: none;
+      }
+      .piece-select-btn.is-rework {
+        border-color: #f59e0b; background: #fffbeb; color: #92400e; cursor: pointer; opacity: 1;
+      }
+      .piece-select-btn.is-rework:hover, .piece-select-btn.is-rework:focus {
+        border-color: #d97706; background: #fef3c7; outline: none;
+      }
+      .piece-select-empty { margin: 0; font-size: 1.05rem; font-weight: 700; color: #64748b; }
+      .piece-select-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }
+      .piece-select-actions .btn-secondary { min-height: 52px; font-size: 16px; font-weight: 800; }
+      @media (max-width: 480px) { .piece-select-list { grid-template-columns: 1fr; } }
       .lang-bar { margin-left: auto; }
       @media (max-width: 640px) { .wk-grid { grid-template-columns: 1fr; } }
     </style>
@@ -147,7 +185,7 @@
         <form id="scanForm" class="scan-input-row" autocomplete="off">
           <label for="manualBarcodeInput">Manual entry</label>
           <div class="scan-input-wrap scan-input-wrap--scanner">
-            <input id="manualBarcodeInput" type="text" placeholder="TEAM · TANK · PHASE · STOP · RESUME" autocomplete="off" />
+            <input id="manualBarcodeInput" type="text" inputmode="text" enterkeyhint="done" placeholder="TEAM · TANK · PHASE · STOP · RESUME" autocomplete="off" />
             <button id="scanButton" type="button" class="scan-submit-btn">Scan</button>
           </div>
         </form>
@@ -158,6 +196,10 @@
         </div>
         <div id="finishBanner" class="finish-success-banner" role="status" hidden>
           <strong class="finish-success-banner__title">Part complete — tank finished</strong>
+        </div>
+        <div id="reworkBanner" class="wk-rework-banner" role="status" hidden>
+          <strong class="wk-rework-banner__title">REWORK REQUIRED</strong>
+          <p id="reworkFailNote" class="wk-rework-banner__note"></p>
         </div>
         <div class="wk-grid">
           <div class="wk-item"><p class="wk-label">Team</p><p id="valTeam" class="wk-value">—</p></div>
@@ -188,13 +230,13 @@
         <div class="wk-touch" id="touchControls" aria-label="Touch controls">
           <button type="button" class="btn-primary btn-touch btn-touch--resolve-qa" id="btnResolveQaQc" data-barcode="QA_QC_RESOLVE" hidden>Resolve QA/QC</button>
           <button type="button" class="btn-primary btn-touch" data-barcode="RESUME" data-i18n="kiosk.resume">Resume</button>
-          <button type="button" class="btn-secondary btn-touch" data-barcode="STOP:BREAK" data-i18n="kiosk.break">Break</button>
           <button type="button" class="btn-secondary btn-touch" data-barcode="STOP:LUNCH" data-i18n="kiosk.lunch">Lunch</button>
           <button type="button" class="btn-secondary btn-touch btn-touch--downtime" data-barcode="STOP:DOWNTIME" data-i18n="kiosk.downtime">Downtime</button>
           <button type="button" class="btn-secondary btn-touch btn-touch--qa-qc" id="btnQaQc" data-barcode="ALERT:QA_QC">QA/QC</button>
           <button type="button" class="btn-secondary btn-touch" data-barcode="PHASE:CORRECTIONS" data-i18n="kiosk.correction">Correction</button>
           <button type="button" class="btn-primary btn-touch" data-barcode="PHASE:PIECE_COMPLETE" data-i18n="kiosk.pieceComplete">Piece Complete</button>
           <button type="button" class="btn-primary btn-touch" data-barcode="PHASE:TANK_COMPLETE" data-i18n="kiosk.tankComplete">Tank Complete</button>
+          <button type="button" class="btn-secondary btn-touch" id="btnSelectPiece">Piece</button>
           <button type="button" class="btn-secondary btn-touch" data-barcode="REASON:END_SHIFT" data-i18n="kiosk.endShift">End Shift</button>
           <div id="pieceTouchButtons" class="wk-piece-touch" aria-label="Piece selection"></div>
           <button type="button" class="btn-secondary btn-touch btn-touch--employee-out" id="btnEmployeeOut">Employee Out</button>
@@ -292,7 +334,18 @@
         </div>
       </div>
     </div>
+    <div id="pieceSelectModal" class="modal-note piece-select-modal" role="dialog" aria-modal="true" aria-labelledby="pieceSelectTitle" hidden>
+      <div class="modal-note-card piece-select-card">
+        <h3 id="pieceSelectTitle">Select Piece</h3>
+        <p class="muted" id="pieceSelectHint" style="margin:0">Tap a piece to continue. No confirmation needed.</p>
+        <div id="pieceSelectList" class="piece-select-list"></div>
+        <p id="pieceSelectEmpty" class="piece-select-empty" hidden></p>
+        <div class="piece-select-actions">
+          <button type="button" class="btn-secondary" id="btnCancelPieceSelect">Cancel</button>
+        </div>
+      </div>
+    </div>
     <script src="/i18n.js"></script>
-    <script src="/machine-kiosk.js?v=13"></script>
+    <script src="/machine-kiosk.js?v=14"></script>
   </body>
 </html>

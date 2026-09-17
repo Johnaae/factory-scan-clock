@@ -3684,6 +3684,71 @@ textarea:focus-visible,
   gap: 14px 18px;
 }
 
+.tank-report-dept-list {
+  display: grid;
+  gap: 12px;
+}
+
+.tank-report-dept-card {
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  background: #f8fafc;
+  overflow: hidden;
+}
+
+.tank-report-dept-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  padding: 14px 16px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.tank-report-dept-summary::-webkit-details-marker {
+  display: none;
+}
+
+.tank-report-dept-summary::after {
+  content: '▼';
+  margin-left: auto;
+  color: #64748b;
+  font-size: 12px;
+  transition: transform 0.15s ease;
+}
+
+.tank-report-dept-card[open] > .tank-report-dept-summary::after {
+  transform: rotate(180deg);
+}
+
+.tank-report-dept-title {
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: var(--text);
+}
+
+.tank-report-dept-meta {
+  font-size: 13px;
+  font-weight: 600;
+  color: #475569;
+}
+
+.tank-report-dept-body {
+  padding: 0 16px 16px;
+  border-top: 1px solid #e2e8f0;
+  background: #fff;
+}
+
+.tank-report-subsection-title {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--text);
+}
+
 .tank-lifecycle-label {
   font-size: 11px;
   font-weight: 700;

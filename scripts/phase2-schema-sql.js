@@ -49,6 +49,9 @@ ALTER TABLE tanks ADD COLUMN IF NOT EXISTS assembly_machine_id BIGINT;
 ALTER TABLE tanks ADD COLUMN IF NOT EXISTS testing_machine_id BIGINT;
 ALTER TABLE tanks ADD COLUMN IF NOT EXISTS testing_confirmed_at TIMESTAMPTZ;
 ALTER TABLE tanks ADD COLUMN IF NOT EXISTS requires_test BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE tanks ADD COLUMN IF NOT EXISTS last_rework_completed_at TIMESTAMPTZ;
+
+ALTER TABLE test_attempts ADD COLUMN IF NOT EXISTS previous_status TEXT;
 `;
 
 /** Alias used by existing schema-migrate ADD_COLUMNS_SQL embedding. */
@@ -97,6 +100,7 @@ CREATE TABLE IF NOT EXISTS test_attempts (
   tester_employee_name TEXT,
   failure_note TEXT,
   labor_session_id BIGINT REFERENCES stage_labor_sessions(id) ON DELETE SET NULL,
+  previous_status TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 `;
@@ -130,7 +134,8 @@ CREATE INDEX IF NOT EXISTS idx_tanks_assembly_status
     'ready_for_testing',
     'testing_in_progress',
     'ready_for_dome_install',
-    'ready_for_final_completion'
+    'ready_for_final_completion',
+    'rework_required'
   );
 `;
 

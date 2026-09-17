@@ -29,7 +29,7 @@ const els = {
   testingTankList: document.getElementById('testingTankList'),
   testingEmptyState: document.getElementById('testingEmptyState'),
   logoutBtn: document.getElementById('logoutBtn'),
-  btnBreak: document.getElementById('btnBreak'),
+  btnResume: document.getElementById('btnResume'),
   btnLunch: document.getElementById('btnLunch'),
   btnEmployeeOut: document.getElementById('btnEmployeeOut'),
   btnEndShift: document.getElementById('btnEndShift'),
@@ -248,7 +248,7 @@ function renderWorkflowHints() {
   els.workflowTitle.textContent = 'Assembly / Testing';
   els.workflowSub.textContent = pendingConfirmer
     ? `${pendingConfirmer.name} selected — use Assembly CONFIRM TANK or Testing CONFIRM TEST, then the section buttons.`
-    : 'ASSEMBLY: Confirm → START / STOP / FINISH. TESTING: Confirm Test → START TESTING → PASS / FAIL. Separate sections.';
+    : 'ASSEMBLY: Confirm → START / STOP / FINISH. TESTING: Confirm Test → START TESTING → PASS / FAIL. FAIL returns tank to FAB for rework.';
 }
 
 function renderAssignment() {
@@ -361,20 +361,16 @@ function assemblyActionButtons(tank) {
 
 function testingActionButtons(tank) {
   const status = String(tank.status || '').toLowerCase();
-  const session = tank.active_session || null;
-  const stage = session ? String(session.stage || '').toUpperCase() : '';
   const tid = Number(tank.id);
   const btns = [];
   const requiresTest =
     tank.requires_test === true || tank.requires_test === 1 || tank.requires_test === 'true';
   if (!requiresTest) return '';
 
+  // QA/QC only — Correction/rework labor belongs on FAB after FAIL (rework_required).
   if (status === 'ready_for_testing') {
     btns.push(
       `<button type="button" class="btn-primary btn-touch" data-ak-action="start_testing" data-tank-id="${tid}">START TESTING</button>`
-    );
-    btns.push(
-      `<button type="button" class="btn-secondary btn-touch" data-ak-action="start_correction" data-tank-id="${tid}">START CORRECTION</button>`
     );
   }
   if (status === 'testing_in_progress') {
@@ -383,11 +379,6 @@ function testingActionButtons(tank) {
     );
     btns.push(
       `<button type="button" class="btn-secondary btn-touch btn-touch--fail" data-ak-action="test_fail" data-tank-id="${tid}">FAIL</button>`
-    );
-  }
-  if (session && stage === 'CORRECTION') {
-    btns.push(
-      `<button type="button" class="btn-secondary btn-touch" data-ak-action="stop" data-tank-id="${tid}">STOP</button>`
     );
   }
   return btns.join('');
@@ -471,8 +462,6 @@ function renderAssemblyTankCard(tank) {
 
 function renderTestingTankCard(tank) {
   const status = String(tank.status || '').toLowerCase();
-  const session = tank.active_session || null;
-  const sessionStage = session ? String(session.stage || '').toUpperCase() : '';
 
   if (status === 'testing_in_progress') {
     const elapsed = liveTestingElapsedDisplay(tank);
@@ -495,17 +484,14 @@ function renderTestingTankCard(tank) {
   </article>`;
   }
 
-  // Ready for Testing (after CONFIRM TEST) — or correction labor
-  const correctionActive = session && sessionStage === 'CORRECTION';
-  return `<article class="ak-tank-card ${correctionActive ? 'is-active' : ''}" data-tank-id="${Number(tank.id)}">
+  // Ready for Testing (after CONFIRM TEST) — QA only (no Correction on this kiosk).
+  return `<article class="ak-tank-card" data-tank-id="${Number(tank.id)}">
     <div class="ak-tank-head">
       <div>
         <h3 class="ak-tank-title">Tank ${escapeHtml(tank.tank_number || '—')}</h3>
         <p class="ak-tank-stage">Status: ${escapeHtml(statusLabel(status))}</p>
       </div>
-      <span class="ak-badge ${correctionActive ? 'ak-badge--active' : 'ak-badge--waiting'}">${
-        correctionActive ? 'CORRECTION LABOR' : 'READY FOR TESTING'
-      }</span>
+      <span class="ak-badge ak-badge--waiting">READY FOR TESTING</span>
     </div>
     <div class="ak-tank-actions">${testingActionButtons(tank)}</div>
   </article>`;
@@ -534,7 +520,10 @@ function renderAssemblyTanks() {
 
 function renderTestingTanks() {
   if (!els.testingTankList) return;
-  const tanks = Array.isArray(testingConfirmedTanks) ? testingConfirmedTanks : [];
+  const tanks = (Array.isArray(testingConfirmedTanks) ? testingConfirmedTanks : []).filter((t) => {
+    const st = String((t && t.status) || '').toLowerCase();
+    return st === 'ready_for_testing' || st === 'testing_in_progress';
+  });
   if (els.testingConfirmedHeading) els.testingConfirmedHeading.hidden = tanks.length === 0;
   if (!tanks.length) {
     els.testingTankList.innerHTML = '';
@@ -744,6 +733,7 @@ const ASSEMBLY_SCAN_ACTION_KEYWORDS = new Set([
   'fail',
   'break',
   'lunch',
+  'resume',
   'end_shift',
   'pause',
 ]);
@@ -868,7 +858,7 @@ async function confirmEmployeeOut() {
 
 function wireStationButtons() {
   const map = [
-    [els.btnBreak, () => runAction({ action: 'break' }, 'Break — station labor paused.')],
+    [els.btnResume, () => runAction({ action: 'resume' }, 'Assembly work resumed after Lunch.')],
     [els.btnLunch, () => runAction({ action: 'lunch' }, 'Lunch — station labor paused.')],
     [els.btnEmployeeOut, () => openEmployeeOut()],
     [

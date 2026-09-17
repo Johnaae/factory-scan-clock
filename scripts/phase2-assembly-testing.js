@@ -18,7 +18,8 @@
  *     requires_test=false → ready_for_dome_install (skip Testing)
  *   CONFIRM TEST → testing_machine_id (QA selects tank); status stays ready_for_testing until START TESTING
  *   Testing PASS → testing_completed_at + ready_for_dome_install (NOT archived / NOT completed_at)
- *   Testing FAIL → insert test_attempts row; status ready_for_testing; allow correction/retest
+ *   Testing FAIL → insert test_attempts row; status rework_required; clear Testing kiosk; FAB rework
+ *   FAB Tank Complete after rework → ready_for_testing (skip re-Assembly; requires_test stays true)
  *   Manager Complete Tank → archived + completed_at (final factory completion / ready to ship)
  *   START/STOP WORK manage stage labor only; Tank Duration freezes at Assembly FINISH
  *   Team assign does NOT start labor
@@ -35,6 +36,7 @@ const ASSEMBLY_STATUSES = Object.freeze({
   READY_FOR_DOME_INSTALL: 'ready_for_dome_install',
   /** @deprecated alias — normalize to ready_for_dome_install */
   READY_FOR_FINAL_COMPLETION: 'ready_for_dome_install',
+  REWORK_REQUIRED: 'rework_required',
   ARCHIVED: 'archived',
 });
 
@@ -121,6 +123,14 @@ function normalizeAssemblyTankStatus(raw) {
   if (s === 'ready_for_testing' || s === 'ready-for-testing') return ASSEMBLY_STATUSES.READY_FOR_TESTING;
   if (s === 'testing_in_progress' || s === 'testing-in-progress') {
     return ASSEMBLY_STATUSES.TESTING_IN_PROGRESS;
+  }
+  if (
+    s === 'rework_required' ||
+    s === 'returned_to_fab' ||
+    s === 'fab_rework' ||
+    s === 'rework'
+  ) {
+    return ASSEMBLY_STATUSES.REWORK_REQUIRED;
   }
   if (
     s === 'ready_for_dome_install' ||
@@ -410,7 +420,35 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
     );
     const startedMs = toMs(row.started_at);
     const endedMs = toMs(row.ended_at) || (row.status === 'active' ? Date.now() : startedMs);
-    const elapsedMs = startedMs != null && endedMs != null ? Math.max(0, endedMs - startedMs) : 0;
+    let elapsedMs = startedMs != null && endedMs != null ? Math.max(0, endedMs - startedMs) : 0;
+    const participantIds = parts.map((part) => Number(part.employee_id));
+    const hasResumedParticipants = new Set(participantIds).size < participantIds.length;
+    if (hasResumedParticipants) {
+      const intervals = parts
+        .map((part) => {
+          const start = toMs(part.joined_at);
+          const end =
+            toMs(part.left_at) ||
+            (row.status === 'active' ? Date.now() : toMs(row.ended_at));
+          return start != null && end != null ? [start, Math.max(start, end)] : null;
+        })
+        .filter(Boolean)
+        .sort((a, b) => a[0] - b[0]);
+      let productiveMs = 0;
+      let current = null;
+      for (const interval of intervals) {
+        if (!current) {
+          current = interval.slice();
+        } else if (interval[0] <= current[1]) {
+          current[1] = Math.max(current[1], interval[1]);
+        } else {
+          productiveMs += current[1] - current[0];
+          current = interval.slice();
+        }
+      }
+      if (current) productiveMs += current[1] - current[0];
+      elapsedMs = productiveMs;
+    }
     return {
       id: sid,
       tank_id: Number(row.tank_id),
@@ -1618,8 +1656,11 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
     if (!result) {
       return errResult(400, 'validation', 'result must be PASS or FAIL.');
     }
-    if (result === 'FAIL' && !(opts.note || opts.failure_note || opts.failureNote)) {
-      // Note preferred but not strictly required — allow empty with warning in message.
+    if (result === 'FAIL') {
+      const noteText = String(opts.note || opts.failure_note || opts.failureNote || '').trim();
+      if (!noteText) {
+        return errResult(400, 'validation', 'A failure note is required.');
+      }
     }
 
     return withTransaction(async (client) => {
@@ -1656,6 +1697,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         : null;
       const testerName = tester ? tester.name || tester.employee_name || null : null;
       const note = opts.note || opts.failure_note || opts.failureNote || null;
+      const previousStatus = status;
 
       // Close legacy TESTING labor sessions if any (historical). Do not create labor.
       let laborSessionId = null;
@@ -1676,26 +1718,54 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       }
 
       // Always INSERT — never overwrite historical attempts.
-      const attemptRes = await client.query(
-        `INSERT INTO test_attempts
-           (tank_id, machine_id, team_id, team_name, result, attempted_at,
-            tester_employee_id, tester_employee_name, failure_note, labor_session_id, created_at)
-         VALUES ($1,$2,$3,$4,$5,$6::timestamptz,$7,$8,$9,$10,$6::timestamptz)
-         RETURNING id, tank_id, result, attempted_at, failure_note`,
-        [
-          tankId,
-          mid,
-          assignment ? assignment.team_id : null,
-          assignment ? assignment.team_name : null,
-          result,
-          ts,
-          testerId,
-          testerName,
-          result === 'FAIL' && note ? String(note).slice(0, 4000) : note ? String(note).slice(0, 4000) : null,
-          laborSessionId,
-        ]
-      );
-      const attempt = attemptRes.rows[0];
+      let attempt;
+      try {
+        const attemptRes = await client.query(
+          `INSERT INTO test_attempts
+             (tank_id, machine_id, team_id, team_name, result, attempted_at,
+              tester_employee_id, tester_employee_name, failure_note, labor_session_id,
+              previous_status, created_at)
+           VALUES ($1,$2,$3,$4,$5,$6::timestamptz,$7,$8,$9,$10,$11,$6::timestamptz)
+           RETURNING id, tank_id, result, attempted_at, failure_note, previous_status`,
+          [
+            tankId,
+            mid,
+            assignment ? assignment.team_id : null,
+            assignment ? assignment.team_name : null,
+            result,
+            ts,
+            testerId,
+            testerName,
+            result === 'FAIL' && note ? String(note).slice(0, 4000) : note ? String(note).slice(0, 4000) : null,
+            laborSessionId,
+            previousStatus || null,
+          ]
+        );
+        attempt = attemptRes.rows[0];
+      } catch (err) {
+        // Older DBs without previous_status column — still record the attempt.
+        if (!/previous_status/i.test(String(err && err.message))) throw err;
+        const attemptRes = await client.query(
+          `INSERT INTO test_attempts
+             (tank_id, machine_id, team_id, team_name, result, attempted_at,
+              tester_employee_id, tester_employee_name, failure_note, labor_session_id, created_at)
+           VALUES ($1,$2,$3,$4,$5,$6::timestamptz,$7,$8,$9,$10,$6::timestamptz)
+           RETURNING id, tank_id, result, attempted_at, failure_note`,
+          [
+            tankId,
+            mid,
+            assignment ? assignment.team_id : null,
+            assignment ? assignment.team_name : null,
+            result,
+            ts,
+            testerId,
+            testerName,
+            result === 'FAIL' && note ? String(note).slice(0, 4000) : note ? String(note).slice(0, 4000) : null,
+            laborSessionId,
+          ]
+        );
+        attempt = attemptRes.rows[0];
+      }
 
       if (result === 'PASS') {
         // Testing PASS → Ready for Dome Install (NOT final factory completion).
@@ -1722,14 +1792,36 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
           /* ignore */
         }
       } else {
-        // FAIL → ready_for_testing so correction then retest can start.
-        await client.query(
+        // FAIL → rework_required (FAB). Never ready_for_testing here.
+        // Preserve requires_test, assembly/testing history, and prior FAIL attempts.
+        const failUpd = await client.query(
           `UPDATE tanks
-           SET status = $1,
-               updated_at = $2::timestamptz
-           WHERE id = $3`,
-          [ASSEMBLY_STATUSES.READY_FOR_TESTING, ts, tankId]
+           SET status = 'rework_required',
+               testing_machine_id = NULL,
+               testing_confirmed_at = NULL,
+               testing_started_at = NULL,
+               requires_test = TRUE,
+               completed_at = NULL,
+               updated_at = $1::timestamptz
+           WHERE id = $2
+           RETURNING status, testing_machine_id, requires_test`,
+          [ts, tankId]
         );
+        const failRow = failUpd.rows[0];
+        if (!failRow || String(failRow.status).toLowerCase() !== 'rework_required') {
+          throw new Error(
+            `FAIL status transition failed: expected rework_required, got ${failRow && failRow.status}`
+          );
+        }
+        try {
+          await client.query(
+            `UPDATE machines SET active_tank_id = NULL, updated_at = $1::timestamptz
+             WHERE id = $2 AND active_tank_id = $3`,
+            [ts, mid, tankId]
+          );
+        } catch (_err) {
+          /* ignore */
+        }
       }
 
       const updated = await getTankById(tankId, client);
@@ -1742,13 +1834,14 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
           result: attempt.result,
           attempted_at: attempt.attempted_at,
           failure_note: attempt.failure_note || null,
+          previous_status: attempt.previous_status || previousStatus || null,
           labor_session_id: laborSessionId,
         },
         tank: mapTankSummary(updated),
         message:
           result === 'PASS'
             ? 'Testing PASS — ready for Dome Install. Manager Complete Tank is still required for final completion.'
-            : 'Testing FAIL recorded. Tank remains ready_for_testing for correction/retest.',
+            : 'Testing FAIL — returned to FAB for rework. Scan on a Winding kiosk, correct, then Tank Complete to return to Testing.',
       });
     });
   }
@@ -1829,7 +1922,12 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
   }
 
   async function startCorrection(machine, opts = {}) {
-    return startWork(machine, { ...opts, stage: STAGE_CODES.CORRECTION });
+    // Post-test correction/rework belongs on FAB / Winder kiosks (rework_required), not QA/QC.
+    return errResult(
+      409,
+      'use_fab_rework',
+      'Correction after Testing FAIL is done on FAB / Winder kiosks. Failed tanks show as Rework Required — scan the tank there, select the piece, and use Correction.'
+    );
   }
 
   async function employeeOutFromStage(machine, opts = {}) {
@@ -1909,6 +2007,141 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         reason: reasonText,
         stopped_sessions: closed,
         count: closed.length,
+      });
+    });
+  }
+
+  async function resumeStationLabor(machine) {
+    const mid = Number(machine && machine.id);
+    if (!Number.isInteger(mid) || mid <= 0) {
+      return errResult(400, 'validation', 'Machine is required.');
+    }
+
+    return withTransaction(async (client) => {
+      const assignment = await getMachineAssignment(mid);
+      if (!assignment || !assignment.team_id) {
+        return errResult(409, 'no_team', 'Assign a team to this machine before resuming work.');
+      }
+
+      // LUNCH closes every active session with one shared timestamp. Resume only
+      // that latest batch; older Lunch history is never changed.
+      const { rows: pausedRows } = await client.query(
+        `SELECT sls.*, tk.tank_number, t.name AS team_name
+         FROM stage_labor_sessions sls
+         JOIN tanks tk ON tk.id = sls.tank_id
+         LEFT JOIN teams t ON t.id = sls.team_id
+         WHERE sls.machine_id = $1
+           AND sls.status = 'stopped'
+           AND UPPER(COALESCE(sls.notes, '')) = 'LUNCH'
+           AND sls.ended_at = (
+             SELECT MAX(s2.ended_at)
+             FROM stage_labor_sessions s2
+             WHERE s2.machine_id = $1
+               AND s2.status = 'stopped'
+               AND UPPER(COALESCE(s2.notes, '')) = 'LUNCH'
+           )
+         ORDER BY sls.id ASC
+         FOR UPDATE OF sls`,
+        [mid]
+      );
+      if (!pausedRows.length) {
+        return errResult(409, 'nothing_to_resume', 'No Assembly or Testing work is paused for Lunch on this kiosk.');
+      }
+
+      const roster = await listOpenShiftEmployeesLocal(assignment.team_id);
+      const rosterById = new Map(roster.map((employee) => [Number(employee.id || employee.employee_id), employee]));
+      const prepared = [];
+
+      for (const row of pausedRows) {
+        if (Number(row.team_id) !== Number(assignment.team_id)) continue;
+
+        const tank = await getTankById(Number(row.tank_id), client);
+        if (!tank) continue;
+        const stage = normalizeStageCode(row.stage);
+        const status = normalizeAssemblyTankStatus(tank.status);
+        if (!stage || !(STAGE_ELIGIBLE_STATUSES[stage] || []).includes(status)) continue;
+        if (
+          (stage === STAGE_CODES.ASSEMBLY && Number(tank.assembly_machine_id) !== mid) ||
+          (stage === STAGE_CODES.TESTING && Number(tank.testing_machine_id) !== mid)
+        ) {
+          continue;
+        }
+
+        const active = await getActiveSessionForTank(Number(row.tank_id), null, client);
+        if (active) continue;
+
+        const { rows: priorParticipants } = await client.query(
+          `SELECT DISTINCT ON (employee_id)
+                  employee_id, employee_code, employee_name, team_id
+           FROM stage_labor_participants
+           WHERE session_id = $1
+           ORDER BY employee_id, joined_at DESC, id DESC`,
+          [Number(row.id)]
+        );
+        const employees = priorParticipants
+          .map((participant) => rosterById.get(Number(participant.employee_id)))
+          .filter(Boolean);
+        if (!employees.length) continue;
+        prepared.push({ row, employees });
+      }
+
+      if (!prepared.length) {
+        return errResult(
+          409,
+          'nothing_to_resume',
+          'The Lunch-paused work no longer matches this kiosk team or its active employees.'
+        );
+      }
+
+      const employeeIds = [
+        ...new Set(
+          prepared.flatMap(({ employees }) =>
+            employees.map((employee) => Number(employee.id || employee.employee_id))
+          )
+        ),
+      ];
+      const conflicts = await findOpenParticipationConflicts(employeeIds, client);
+      if (conflicts.length) {
+        const names = conflicts.map((conflict) => conflict.employee_name || `Employee ${conflict.employee_id}`).join(', ');
+        return errResult(409, 'employee_busy', `Employee(s) already in active stage labor: ${names}.`);
+      }
+
+      const ts = nowIso();
+      const resumed = [];
+      for (const { row, employees } of prepared) {
+        await client.query(
+          `UPDATE stage_labor_sessions
+           SET status = 'active',
+               ended_at = NULL,
+               stopped_by_employee_id = NULL,
+               stopped_by_employee_name = NULL,
+               notes = 'RESUMED_AFTER_LUNCH',
+               updated_at = $1::timestamptz
+           WHERE id = $2 AND status = 'stopped'`,
+          [ts, Number(row.id)]
+        );
+        for (const employee of employees) {
+          await client.query(
+            `INSERT INTO stage_labor_participants
+               (session_id, employee_id, employee_code, employee_name, team_id, joined_at, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6::timestamptz,$6::timestamptz)`,
+            [
+              Number(row.id),
+              Number(employee.id || employee.employee_id),
+              employee.code || employee.employee_code || null,
+              employee.name || employee.employee_name || null,
+              Number(assignment.team_id),
+              ts,
+            ]
+          );
+        }
+        resumed.push(await mapStageSession(await getSessionById(Number(row.id), client), client));
+      }
+
+      return okResult({
+        action: 'resume_station',
+        resumed_sessions: resumed,
+        count: resumed.length,
       });
     });
   }
@@ -2122,6 +2355,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
     startCorrection,
     employeeOutFromStage,
     pauseStationLabor,
+    resumeStationLabor,
     computeStageLaborForTank,
     computeAssemblyDurationMs,
     computeTankDurationMs,

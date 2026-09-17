@@ -571,7 +571,7 @@ function createPhase1ProductionLogic(deps) {
       return { ok: false, status: 404, body: { ok: false, error: 'not_found', message: 'Tank not found.' } };
     }
     const tankRow = tankRes.rows[0];
-    const pieceCount = Math.min(4, Math.max(1, Number(tankRow.piece_count) || 1));
+    const pieceCount = Math.min(8, Math.max(1, Number(tankRow.piece_count) || 1));
     await ensureTankPieces(tid, pieceCount);
     const pieces = (await getTankPieces(tid)).filter((p) => Number(p.piece_number) <= pieceCount);
 
@@ -742,7 +742,7 @@ function createPhase1ProductionLogic(deps) {
   async function fetchPieceReports(tankId) {
     const tid = Number(tankId);
     const tankRes = await pool.query('SELECT piece_count FROM tanks WHERE id = $1', [tid]);
-    const pieceCount = Math.min(4, Math.max(1, Number(tankRes.rows[0] && tankRes.rows[0].piece_count) || 1));
+    const pieceCount = Math.min(8, Math.max(1, Number(tankRes.rows[0] && tankRes.rows[0].piece_count) || 1));
     await ensureTankPieces(tid, pieceCount);
     const pieces = await getTankPieces(tid);
     const reports = [];
@@ -901,7 +901,7 @@ function createPhase1ProductionLogic(deps) {
     const tid = Number(tankId);
     const pieceNum = Number(pieceNumber);
     if (!Number.isInteger(mid) || mid <= 0 || !Number.isInteger(tid) || tid <= 0) return null;
-    if (!Number.isInteger(pieceNum) || pieceNum < 1 || pieceNum > 4) return null;
+    if (!Number.isInteger(pieceNum) || pieceNum < 1 || pieceNum > 8) return null;
     const { rows } = await pool.query(
       `SELECT ms.*,
               t.name AS team_name, t.barcode AS team_barcode,
@@ -931,7 +931,7 @@ function createPhase1ProductionLogic(deps) {
   }
 
   async function ensureTankPieces(tankId, pieceCount, opts = {}) {
-    const count = Math.min(4, Math.max(1, Number(pieceCount) || 1));
+    const count = Math.min(8, Math.max(1, Number(pieceCount) || 1));
     const tid = Number(tankId);
     for (let n = 1; n <= count; n += 1) {
       await pool.query(
@@ -982,7 +982,7 @@ function createPhase1ProductionLogic(deps) {
 
   async function getTankPieceByNumber(tankId, pieceNumber) {
     const n = Number(pieceNumber);
-    if (!Number.isInteger(n) || n < 1 || n > 4) return null;
+    if (!Number.isInteger(n) || n < 1 || n > 8) return null;
     const { rows } = await pool.query(
       'SELECT * FROM tank_pieces WHERE tank_id = $1 AND piece_number = $2 LIMIT 1',
       [Number(tankId), n]
@@ -1004,7 +1004,7 @@ function createPhase1ProductionLogic(deps) {
     const pieces = await getTankPieces(tankId);
     const tankRes = await pool.query('SELECT piece_count FROM tanks WHERE id = $1', [Number(tankId)]);
     const pieceCount = Math.min(
-      4,
+      8,
       Math.max(1, Number(tankRes.rows[0] && tankRes.rows[0].piece_count) || pieces.length || 1)
     );
     const n = Number(pieceNumber);
@@ -1067,7 +1067,7 @@ function createPhase1ProductionLogic(deps) {
   }
 
   function computePieceProgress(pieces, pieceCount) {
-    const count = Math.min(4, Math.max(1, Number(pieceCount) || (pieces && pieces.length) || 1));
+    const count = Math.min(8, Math.max(1, Number(pieceCount) || (pieces && pieces.length) || 1));
     const configured = (pieces || []).filter((p) => Number(p.piece_number) >= 1 && Number(p.piece_number) <= count);
     const completed = configured.filter((p) => String(p.status) === 'completed').length;
     const incomplete = configured.filter((p) => String(p.status) !== 'completed');
@@ -1515,14 +1515,16 @@ function createPhase1ProductionLogic(deps) {
         body: { ok: false, error: 'validation', message: 'Use Piece Complete or Tank Complete during an active session.' },
       };
     }
-    const tankRow = await validateTankExists(tankNorm);
-    if (!tankRow) {
+    const tankRowRaw = await validateTankExists(tankNorm);
+    if (!tankRowRaw) {
       return {
         ok: false,
         status: 404,
         body: { ok: false, error: 'tank_not_found', message: TANK_NOT_FOUND_MESSAGE },
       };
     }
+    // Heal rework_required if a prior End Shift wiped it to paused.
+    const tankRow = await ensurePersistentReworkStatus(tankRowRaw);
     if (normalizeTankStatus(tankRow.status) === 'archived') {
       return {
         ok: false,
@@ -1530,11 +1532,34 @@ function createPhase1ProductionLogic(deps) {
         body: { ok: false, error: 'tank_archived', message: 'Tank is completed. Restore before use.' },
       };
     }
+    // Post-FAB tanks cannot casually restart winding unless returned for rework.
+    {
+      const st = normalizeTankStatus(tankRow.status);
+      const rework = st === 'rework_required';
+      const fabDone =
+        tankRow.fab_completed_at != null ||
+        st === 'ready_for_assembly' ||
+        st === 'assembly_in_progress' ||
+        st === 'ready_for_testing' ||
+        st === 'testing_in_progress' ||
+        st === 'ready_for_dome_install';
+      if (fabDone && !rework) {
+        return {
+          ok: false,
+          status: 403,
+          body: {
+            ok: false,
+            error: 'fab_complete_no_rework',
+            message: 'Tank has completed FAB and is not assigned for rework.',
+          },
+        };
+      }
+    }
 
     // Multi-piece: block only if THIS tank + piece already has an open session on this machine.
     // (checked after piece resolution below)
 
-    const pieceCount = Math.min(4, Math.max(1, Number(tankRow.piece_count) || 1));
+    const pieceCount = Math.min(8, Math.max(1, Number(tankRow.piece_count) || 1));
     await ensureTankPieces(tankRow.id, pieceCount);
     const requestedPiece = pieceNumber != null ? Number(pieceNumber) : null;
     if (requestedPiece == null || !Number.isInteger(requestedPiece)) {
@@ -1552,7 +1577,8 @@ function createPhase1ProductionLogic(deps) {
     }
     const resolved = await resolvePieceForTank(tankRow.id, requestedPiece);
     if (!resolved.ok) return resolved;
-    if (String(resolved.piece.status) === 'completed') {
+    const reworkAllowed = normalizeTankStatus(tankRow.status) === 'rework_required';
+    if (String(resolved.piece.status) === 'completed' && !reworkAllowed) {
       return {
         ok: false,
         status: 409,
@@ -1601,7 +1627,11 @@ function createPhase1ProductionLogic(deps) {
     const ts = nowIso();
     await pool.query(
       `UPDATE tanks
-       SET status = 'active',
+       SET status = CASE
+             WHEN LOWER(TRIM(COALESCE(status, ''))) = 'rework_required' THEN status
+             WHEN LOWER(TRIM(COALESCE(status, ''))) = 'archived' THEN status
+             ELSE 'active'
+           END,
            first_scanned_at = COALESCE(first_scanned_at, $5::timestamptz),
            paused_reason = NULL,
            wip_team_id = $1,
@@ -1613,15 +1643,20 @@ function createPhase1ProductionLogic(deps) {
        WHERE id = $7`,
       [team.id, phase.code, phase.label, machine.id, ts, pieceNum, tankRow.id]
     );
+    // Rework may reopen a previously completed piece for correction without deleting session history.
     await pool.query(
       `UPDATE tank_pieces
-       SET status = CASE WHEN status = 'completed' THEN status ELSE 'in_progress' END,
+       SET status = CASE
+             WHEN $5::boolean AND status = 'completed' THEN 'in_progress'
+             WHEN status = 'completed' THEN status
+             ELSE 'in_progress'
+           END,
            started_at = COALESCE(started_at, $1::timestamptz),
            machine_id = $2,
            team_id = $3,
            updated_at = $1::timestamptz
        WHERE id = $4`,
-      [ts, machine.id, team.id, pieceId]
+      [ts, machine.id, team.id, pieceId, reworkAllowed]
     );
     const insertRes = await pool.query(
       `INSERT INTO machine_sessions
@@ -1766,7 +1801,7 @@ function createPhase1ProductionLogic(deps) {
 
     const pieceCountRes = await pool.query(`SELECT piece_count FROM tanks WHERE id = $1`, [session.tank_id]);
     const pieceCount = Math.min(
-      4,
+      8,
       Math.max(1, Number(pieceCountRes.rows[0] && pieceCountRes.rows[0].piece_count) || 1)
     );
     await ensureTankPieces(session.tank_id, pieceCount);
@@ -1812,11 +1847,12 @@ function createPhase1ProductionLogic(deps) {
     );
     const nextPieceNum = nextPiece ? Number(nextPiece.piece_number) : pieceNum;
 
-    // Keep tank Active. Clear WIP phase fields; do NOT set status=archived.
+    // Keep tank Active (or Rework Required during FAB rework). Clear WIP phase fields; do NOT archive.
     await pool.query(
       `UPDATE tanks
        SET status = CASE
              WHEN LOWER(TRIM(COALESCE(status, ''))) = 'archived' THEN status
+             WHEN LOWER(TRIM(COALESCE(status, ''))) = 'rework_required' THEN status
              ELSE 'active'
            END,
            current_piece_number = $1,
@@ -1857,13 +1893,113 @@ function createPhase1ProductionLogic(deps) {
   }
 
   /**
-   * FAB Tank Complete: release tank to Assembly (ready_for_assembly).
+   * FAB Tank Complete: release tank from winding.
+   * First complete → ready_for_assembly.
+   * After Testing FAIL (rework_required) → ready_for_testing (skip re-Assembly).
    * Does not archive or set final completed_at — that is Manager Complete Tank only.
-   * Does NOT assign any Assembly kiosk, does NOT set assembly_started_at,
-   * does NOT start Assembly Duration or labor. Tank stays unassigned until
-   * an Assembly kiosk presses CONFIRM TANK.
    */
   async function finishFabComplete(machine, session, opts, ts) {
+    const tankRes = await pool.query(
+      `SELECT id, status, requires_test, fab_completed_at, assembly_completed_at
+       FROM tanks WHERE id = $1`,
+      [session.tank_id]
+    );
+    const tankRow = tankRes.rows[0] || null;
+    const priorStatus = normalizeTankStatus(tankRow && tankRow.status);
+    const fromRework = priorStatus === 'rework_required';
+    const requiresTest =
+      tankRow &&
+      (tankRow.requires_test === true ||
+        tankRow.requires_test === 1 ||
+        tankRow.requires_test === 't' ||
+        tankRow.requires_test === 'true');
+
+    if (fromRework && requiresTest) {
+      // Rework cycle done → return directly to Testing. Preserve assembly_* and FAIL history.
+      try {
+        await pool.query(
+          `UPDATE tanks
+           SET status = 'ready_for_testing',
+               fab_completed_at = COALESCE(fab_completed_at, $1::timestamptz),
+               completed_at = NULL,
+               testing_started_at = NULL,
+               testing_completed_at = NULL,
+               testing_machine_id = NULL,
+               testing_confirmed_at = NULL,
+               last_rework_completed_at = $1::timestamptz,
+               requires_test = TRUE,
+               paused_reason = NULL,
+               wip_team_id = NULL,
+               wip_phase_code = NULL,
+               wip_phase_name = NULL,
+               wip_machine_id = NULL,
+               updated_at = $1::timestamptz
+           WHERE id = $2`,
+          [ts, session.tank_id]
+        );
+      } catch (err) {
+        if (!/last_rework_completed_at/i.test(String(err && err.message))) throw err;
+        await pool.query(
+          `UPDATE tanks
+           SET status = 'ready_for_testing',
+               fab_completed_at = COALESCE(fab_completed_at, $1::timestamptz),
+               completed_at = NULL,
+               testing_started_at = NULL,
+               testing_completed_at = NULL,
+               testing_machine_id = NULL,
+               testing_confirmed_at = NULL,
+               requires_test = TRUE,
+               paused_reason = NULL,
+               wip_team_id = NULL,
+               wip_phase_code = NULL,
+               wip_phase_name = NULL,
+               wip_machine_id = NULL,
+               updated_at = $1::timestamptz
+           WHERE id = $2`,
+          [ts, session.tank_id]
+        );
+      }
+      await setMachineActiveTank(machine.id, null);
+      try {
+        await pool.query(
+          `UPDATE machines
+           SET active_tank_id = NULL, updated_at = $1::timestamptz
+           WHERE active_tank_id = $2`,
+          [ts, session.tank_id]
+        );
+      } catch (_err) {
+        /* ignore */
+      }
+      let mapped = null;
+      try {
+        if (session && session.id) mapped = await mapSession(session);
+      } catch (_err) {
+        mapped = null;
+      }
+      const confirmer = opts.confirmedByEmployeeName
+        ? `${opts.confirmedByEmployeeName} confirmed Tank Complete — returned to Testing`
+        : 'Rework complete — returned to Testing';
+      return {
+        ok: true,
+        body: {
+          ok: true,
+          action: 'tank_complete',
+          tank_complete: true,
+          fab_complete: true,
+          rework_complete: true,
+          ready_for_testing: true,
+          session: mapped,
+          tank_number: session.tank_number || null,
+          confirmation_line: confirmer,
+          message:
+            'Rework complete — ready for Testing. Confirm on Testing / QA-QC, then START TESTING.',
+          team_name: session.team_name,
+          confirmed_by_employee_name: opts.confirmedByEmployeeName || null,
+        },
+      };
+    }
+
+    // First FAB complete (or non-RT rework edge) → Assembly handoff.
     await pool.query(
       `UPDATE tanks
        SET status = 'ready_for_assembly',
@@ -1871,6 +2007,10 @@ function createPhase1ProductionLogic(deps) {
            completed_at = NULL,
            assembly_started_at = NULL,
            assembly_machine_id = NULL,
+           testing_started_at = NULL,
+           testing_completed_at = NULL,
+           testing_machine_id = NULL,
+           testing_confirmed_at = NULL,
            paused_reason = NULL,
            wip_team_id = NULL,
            wip_phase_code = NULL,
@@ -1938,7 +2078,7 @@ function createPhase1ProductionLogic(deps) {
     }
     const pieceCountRes = await pool.query('SELECT piece_count FROM tanks WHERE id = $1', [session.tank_id]);
     const pieceCount = Math.min(
-      4,
+      8,
       Math.max(1, Number(pieceCountRes.rows[0] && pieceCountRes.rows[0].piece_count) || 1)
     );
     await ensureTankPieces(session.tank_id, pieceCount);
@@ -2437,9 +2577,9 @@ function createPhase1ProductionLogic(deps) {
       const endShift = resolveEndShift(s);
       if (endShift) return { type: 'end_shift', value: endShift.barcode };
     }
-    if (s.startsWith('PIECE:') || s.startsWith('PIECE_') || /^PIECE\s*[1-4]$/.test(s)) {
+    if (s.startsWith('PIECE:') || s.startsWith('PIECE_') || /^PIECE\s*[1-8]$/.test(s)) {
       const num = Number(String(s).replace(/^PIECE[_:\s]*/i, '').trim());
-      if (Number.isInteger(num) && num >= 1 && num <= 4) {
+      if (Number.isInteger(num) && num >= 1 && num <= 8) {
         return { type: 'piece', value: num };
       }
     }
@@ -3174,7 +3314,71 @@ function createPhase1ProductionLogic(deps) {
   }
 
   /**
+   * Restore rework_required when End Shift incorrectly overwrote it to paused.
+   * Persistent FAIL/rework evidence: requires_test + fab_completed + unrepaired FAIL attempt.
+   * Does not hardcode tank numbers.
+   */
+  async function repairEndShiftClearedRework(clientOrPool, tankId) {
+    const db = clientOrPool || pool;
+    const tid = tankId != null ? Number(tankId) : null;
+    const params = [];
+    let whereTank = '';
+    if (Number.isInteger(tid) && tid > 0) {
+      params.push(tid);
+      whereTank = ` AND t.id = $${params.length}`;
+    }
+    const sql =
+      `UPDATE tanks t
+       SET status = 'rework_required',
+           paused_reason = NULL,
+           wip_team_id = NULL,
+           wip_phase_code = NULL,
+           wip_phase_name = NULL,
+           wip_machine_id = NULL,
+           updated_at = NOW()
+       WHERE LOWER(TRIM(COALESCE(t.status, ''))) = 'paused'
+         AND LOWER(TRIM(COALESCE(t.paused_reason, ''))) = 'end_shift'
+         AND t.fab_completed_at IS NOT NULL
+         AND t.requires_test IS TRUE
+         AND t.deleted_at IS NULL
+         AND EXISTS (
+           SELECT 1 FROM test_attempts ta
+           WHERE ta.tank_id = t.id AND UPPER(TRIM(ta.result)) = 'FAIL'
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM test_attempts pass
+           WHERE pass.tank_id = t.id
+             AND UPPER(TRIM(pass.result)) = 'PASS'
+             AND pass.attempted_at > (
+               SELECT MAX(fail.attempted_at)
+               FROM test_attempts fail
+               WHERE fail.tank_id = t.id AND UPPER(TRIM(fail.result)) = 'FAIL'
+             )
+         )
+         ${whereTank}
+       RETURNING t.id, t.tank_number, t.status, t.requires_test`;
+    const { rows } = await db.query(sql, params);
+    return rows;
+  }
+
+  /**
+   * If this tank's rework_required was wiped by End Shift, restore it and return the fresh row.
+   */
+  async function ensurePersistentReworkStatus(tankRow) {
+    if (!tankRow || !tankRow.id) return tankRow;
+    const st = normalizeTankStatus(tankRow.status);
+    if (st === 'rework_required') return tankRow;
+    if (st !== 'paused') return tankRow;
+    if (normalizeStopReason(tankRow.paused_reason) !== 'end_shift') return tankRow;
+    const repaired = await repairEndShiftClearedRework(pool, tankRow.id);
+    if (!repaired.length) return tankRow;
+    const refreshed = await pool.query(`SELECT * FROM tanks WHERE id = $1`, [Number(tankRow.id)]);
+    return refreshed.rows[0] || tankRow;
+  }
+
+  /**
    * Winder-level End Shift: stop ALL open sessions, preserve each tank's phase as WIP, clear team assignment.
+   * Persistent rework_required MUST survive — only temporary shift/WIP pointers are cleared for those tanks.
    */
   async function endShiftSession(machine, opts = {}) {
     void opts;
@@ -3209,14 +3413,40 @@ function createPhase1ProductionLogic(deps) {
       for (const session of openRows) {
         await closeOpenDowntimeIntervalsForSession(session.id, ts, client);
         await finalizeSessionBeforeTransition(session, ts, client);
+        // Preserve persistent rework_required business state across End Shift.
+        // Clear temporary WIP/team/machine pointers for rework so next day starts clean.
         await client.query(
           `UPDATE tanks
-           SET status = 'paused',
-               paused_reason = 'end_shift',
-               wip_team_id = $1,
-               wip_phase_code = $2,
-               wip_phase_name = $3,
-               wip_machine_id = $4,
+           SET status = CASE
+                 WHEN LOWER(TRIM(COALESCE(status, ''))) IN ('rework_required', 'returned_to_fab', 'fab_rework')
+                   THEN 'rework_required'
+                 ELSE 'paused'
+               END,
+               paused_reason = CASE
+                 WHEN LOWER(TRIM(COALESCE(status, ''))) IN ('rework_required', 'returned_to_fab', 'fab_rework')
+                   THEN NULL
+                 ELSE 'end_shift'
+               END,
+               wip_team_id = CASE
+                 WHEN LOWER(TRIM(COALESCE(status, ''))) IN ('rework_required', 'returned_to_fab', 'fab_rework')
+                   THEN NULL
+                 ELSE $1::bigint
+               END,
+               wip_phase_code = CASE
+                 WHEN LOWER(TRIM(COALESCE(status, ''))) IN ('rework_required', 'returned_to_fab', 'fab_rework')
+                   THEN NULL
+                 ELSE $2
+               END,
+               wip_phase_name = CASE
+                 WHEN LOWER(TRIM(COALESCE(status, ''))) IN ('rework_required', 'returned_to_fab', 'fab_rework')
+                   THEN NULL
+                 ELSE $3
+               END,
+               wip_machine_id = CASE
+                 WHEN LOWER(TRIM(COALESCE(status, ''))) IN ('rework_required', 'returned_to_fab', 'fab_rework')
+                   THEN NULL
+                 ELSE $4::bigint
+               END,
                updated_at = $5::timestamptz
            WHERE id = $6`,
           [
@@ -3545,6 +3775,12 @@ function createPhase1ProductionLogic(deps) {
       return {
         total_hours: 0,
         total_machine_hours: 0,
+        total_running_ms: 0,
+        total_running_hours: 0,
+        total_running_display: '0h 0m',
+        total_labor_ms: 0,
+        total_labor_hours: 0,
+        total_labor_display: '0h 0m',
         total_estimated_labor_cost: 0,
         phases: [],
         phase_time_summary,
@@ -3661,10 +3897,20 @@ function createPhase1ProductionLogic(deps) {
     return {
       total_hours: membershipLabor ? membershipLabor.total_labor_hours : roundHours2(totalHours),
       total_labor_hours: membershipLabor ? membershipLabor.total_labor_hours : roundHours2(totalHours),
-      total_labor_display: membershipLabor ? membershipLabor.total_labor_display : null,
+      total_labor_ms: membershipLabor
+        ? membershipLabor.total_labor_ms
+        : Math.round(roundHours2(totalHours) * 3600000),
+      total_labor_display: membershipLabor
+        ? membershipLabor.total_labor_display
+        : formatDurationSummary(Math.round(roundHours2(totalHours) * 3600000)),
       total_machine_hours: membershipLabor ? membershipLabor.total_running_hours : totalMachineHours,
+      total_running_ms: membershipLabor
+        ? membershipLabor.total_running_ms
+        : Math.round(totalMachineHours * 3600000),
       total_running_hours: membershipLabor ? membershipLabor.total_running_hours : totalMachineHours,
-      total_running_display: membershipLabor ? membershipLabor.total_running_display : null,
+      total_running_display: membershipLabor
+        ? membershipLabor.total_running_display
+        : formatDurationSummary(Math.round(totalMachineHours * 3600000)),
       total_estimated_labor_cost: roundMoney(totalEstimatedCost),
       phases,
       phase_time_summary,
@@ -3679,7 +3925,13 @@ function createPhase1ProductionLogic(deps) {
         ? membershipLabor.hours_per_piece
         : [...pieceHoursMap.entries()]
             .sort((a, b) => a[0] - b[0])
-            .map(([piece_number, hours]) => ({ piece_number, hours })),
+            .map(([piece_number, hours]) => ({
+              piece_number,
+              hours,
+              running_hours: hours,
+              running_ms: Math.round(hours * 3600000),
+              running_display: formatDurationSummary(Math.round(hours * 3600000)),
+            })),
       labor_source: membershipLabor ? 'membership_history' : 'session_snapshot',
     };
   }
@@ -3878,6 +4130,8 @@ function createPhase1ProductionLogic(deps) {
     resumeSession,
     resumeSelectedSession,
     endShiftSession,
+    repairEndShiftClearedRework,
+    ensurePersistentReworkStatus,
     createAlert,
     resolveAlertById,
     resolveQaQcForMachine,

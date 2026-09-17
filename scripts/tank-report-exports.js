@@ -103,6 +103,8 @@ function overviewFields(data) {
   const meta = (data && data.report_meta) || {};
   const laborHours = (data && data.labor_hours) || {};
   const teamProduction = (data && data.team_production) || {};
+  const totals = (data && data.overview_totals) || {};
+  const at = (data && data.assembly_testing) || {};
   const pieces = data.pieces || [];
   const completedPieces = pieces.filter((p) => String(p.status || '').toLowerCase() === 'completed').length;
 
@@ -123,6 +125,11 @@ function overviewFields(data) {
           ? teamProduction.total_running_hours
           : totalLaborHours;
 
+  const msHours = (ms) => {
+    const n = Number(ms);
+    return Number.isFinite(n) ? Math.round((n / 3600000) * 100) / 100 : 0;
+  };
+
   return {
     tank_number: tank.tank_number || '',
     team: meta.team_name || '',
@@ -132,22 +139,71 @@ function overviewFields(data) {
       meta.percent_complete != null && meta.percent_complete !== ''
         ? `${meta.percent_complete}%`
         : '',
+    // Combined tank-wide production/labor totals (Testing excluded).
+    total_production_running: formatDurationHm({
+      ms: totals.total_production_running_ms,
+      display: totals.total_production_running_display,
+    }),
+    total_production_running_hours: numericHours({
+      ms: totals.total_production_running_ms,
+      hours: msHours(totals.total_production_running_ms),
+    }),
+    fab_running: formatDurationHm({
+      ms: totals.fab_running_ms != null ? totals.fab_running_ms : teamProduction.total_running_ms,
+      hours: totalRunningHours,
+      display: totals.fab_running_display || teamProduction.total_running_display,
+    }),
+    fab_running_hours: numericHours({
+      ms: totals.fab_running_ms != null ? totals.fab_running_ms : teamProduction.total_running_ms,
+      hours: totalRunningHours,
+    }),
+    assembly_duration: formatDurationHm({
+      ms: totals.assembly_duration_ms != null ? totals.assembly_duration_ms : at.assembly_duration_ms,
+      display: totals.assembly_duration_display || at.assembly_duration_display,
+    }),
+    assembly_duration_hours: numericHours({
+      ms: totals.assembly_duration_ms != null ? totals.assembly_duration_ms : at.assembly_duration_ms,
+    }),
     total_labor: formatDurationHm({
-      ms: teamProduction.total_labor_ms,
-      hours: totalLaborHours,
-      display: teamProduction.total_labor_display,
+      ms: totals.total_labor_ms,
+      display: totals.total_labor_display,
+      hours: msHours(totals.total_labor_ms),
     }),
     total_labor_hours: numericHours({
-      ms: teamProduction.total_labor_ms,
+      ms: totals.total_labor_ms,
+      hours: msHours(totals.total_labor_ms),
+    }),
+    fab_labor: formatDurationHm({
+      ms: totals.fab_labor_ms != null ? totals.fab_labor_ms : teamProduction.total_labor_ms,
+      hours: totalLaborHours,
+      display: totals.fab_labor_display || teamProduction.total_labor_display,
+    }),
+    fab_labor_hours: numericHours({
+      ms: totals.fab_labor_ms != null ? totals.fab_labor_ms : teamProduction.total_labor_ms,
       hours: totalLaborHours,
     }),
+    assembly_labor: formatDurationHm({
+      ms: totals.assembly_labor_ms != null ? totals.assembly_labor_ms : at.total_stage_labor_ms,
+      display: totals.assembly_labor_display || at.total_stage_labor_display,
+    }),
+    assembly_labor_hours: numericHours({
+      ms: totals.assembly_labor_ms != null ? totals.assembly_labor_ms : at.total_stage_labor_ms,
+    }),
+    testing_elapsed: formatDurationHm({
+      ms: totals.testing_elapsed_ms != null ? totals.testing_elapsed_ms : at.testing_elapsed_ms,
+      display: totals.testing_elapsed_display || at.testing_elapsed_display,
+    }),
+    testing_elapsed_hours: numericHours({
+      ms: totals.testing_elapsed_ms != null ? totals.testing_elapsed_ms : at.testing_elapsed_ms,
+    }),
+    // Legacy aliases (FAB-only) kept for older CSV consumers.
     total_running: formatDurationHm({
-      ms: teamProduction.total_running_ms,
+      ms: totals.fab_running_ms != null ? totals.fab_running_ms : teamProduction.total_running_ms,
       hours: totalRunningHours,
-      display: teamProduction.total_running_display || tank.duration_display,
+      display: totals.fab_running_display || teamProduction.total_running_display || tank.duration_display,
     }),
     total_running_hours: numericHours({
-      ms: teamProduction.total_running_ms,
+      ms: totals.fab_running_ms != null ? totals.fab_running_ms : teamProduction.total_running_ms,
       hours: totalRunningHours,
     }),
     duration: formatDurationHm({
@@ -323,11 +379,21 @@ function buildTankReportCsv(data) {
     'Edited By',
     'Edit Reason',
     'Tank Status',
-    'Tank Total Labor',
-    'Tank Total Labor Hours',
-    'Tank Total Running',
-    'Tank Total Running Hours',
-    'Customer',
+    'Total Running Time',
+    'Total Running Hours',
+    'FAB Running Time',
+    'FAB Running Hours',
+    'Assembly Duration',
+    'Assembly Duration Hours',
+    'Total Labor Time',
+    'Total Labor Hours',
+    'FAB Labor',
+    'FAB Labor Hours',
+    'Assembly Labor',
+    'Assembly Labor Hours',
+    'Testing/QA-QC Time',
+    'Testing/QA-QC Hours',
+    'Project Name',
     'Model',
     'Require Test',
   ];
@@ -351,10 +417,20 @@ function buildTankReportCsv(data) {
         row.edited_by || '',
         row.edit_reason || '',
         overview.status,
+        overview.total_production_running,
+        overview.total_production_running_hours != null ? overview.total_production_running_hours : '',
+        overview.fab_running,
+        overview.fab_running_hours != null ? overview.fab_running_hours : '',
+        overview.assembly_duration,
+        overview.assembly_duration_hours != null ? overview.assembly_duration_hours : '',
         overview.total_labor,
         overview.total_labor_hours != null ? overview.total_labor_hours : '',
-        overview.total_running,
-        overview.total_running_hours != null ? overview.total_running_hours : '',
+        overview.fab_labor,
+        overview.fab_labor_hours != null ? overview.fab_labor_hours : '',
+        overview.assembly_labor,
+        overview.assembly_labor_hours != null ? overview.assembly_labor_hours : '',
+        overview.testing_elapsed,
+        overview.testing_elapsed_hours != null ? overview.testing_elapsed_hours : '',
         overview.customer,
         overview.model,
         overview.requires_test,
@@ -421,47 +497,54 @@ async function buildTankReportXlsxBuffer(data) {
   ];
   const overviewPairs = [
     ['Tank #', overview.tank_number],
-    ['Team', overview.team],
-    ['Machine', overview.machine],
     ['Status', overview.status],
     ['Progress', overview.progress],
-    ['Total Labor Hours', overview.total_labor],
-    ['Total Labor Hours (decimal)', overview.total_labor_hours],
-    ['Total Running Time', overview.total_running],
-    ['Total Running Hours (decimal)', overview.total_running_hours],
-    ['Duration', overview.duration],
-    ['Configured Pieces', overview.configured_pieces],
-    ['Completed Pieces', overview.completed_pieces],
-    ['Current/Final Phase', overview.current_phase],
-    ['Piece', overview.piece_label],
-    ['Customer', overview.customer],
+    ['Project Name', overview.customer],
     ['Model', overview.model],
-    ['Require Test', overview.requires_test],
-    ['Description', overview.description],
-    ['Downtime Total', overview.downtime_total],
-    ['Created', fmtWhen(overview.created_at)],
     ['Started', fmtWhen(overview.started_at)],
     ['Completed', fmtWhen(overview.completed_at)],
+    ['Configured Pieces', overview.configured_pieces],
+    ['Completed Pieces', overview.completed_pieces],
+    ['Require Test', overview.requires_test],
+    ['Current/Final Phase', overview.current_phase],
+    ['Piece', overview.piece_label],
+    ['Total Running Time', overview.total_production_running],
+    ['Total Running Hours (decimal)', overview.total_production_running_hours],
+    ['Total Labor Time', overview.total_labor],
+    ['Total Labor Hours (decimal)', overview.total_labor_hours],
+    ['Testing / QA-QC Time', overview.testing_elapsed],
+    ['Testing / QA-QC Hours (decimal)', overview.testing_elapsed_hours],
+    ['Duration (lifecycle)', overview.duration],
+    ['Downtime Total', overview.downtime_total],
+    ['Description', overview.description],
+    ['Created', fmtWhen(overview.created_at)],
   ];
-  const assemblyTestingOverview = data.assembly_testing || null;
-  if (assemblyTestingOverview) {
-    overviewPairs.push(
-      ['— Production —', ''],
-      ['Assembly Duration', assemblyTestingOverview.assembly_duration_display || ''],
-      ['Production Labor (Assembly/Correction)', assemblyTestingOverview.total_stage_labor_display || ''],
-      ['— Quality (QA/QC) —', ''],
-      ['Test Started', fmtWhen(assemblyTestingOverview.testing_started_at)],
-      ['Test Completed', fmtWhen(assemblyTestingOverview.testing_completed_at)],
-      ['Test Result', assemblyTestingOverview.latest_test_result || ''],
-      ['QA/QC Testing Elapsed', assemblyTestingOverview.testing_elapsed_display || '']
-    );
-  }
   for (const [field, value] of overviewPairs) {
     sheet1.addRow({ field, value: dash(value) });
   }
   styleHeader(sheet1);
 
-  const sheet2 = workbook.addWorksheet('Labor Breakdown', {
+  const sheetFabSummary = workbook.addWorksheet('FAB SHOP', {
+    views: [{ state: 'frozen', ySplit: 1 }],
+  });
+  sheetFabSummary.columns = [
+    { header: 'Field', key: 'field', width: 28 },
+    { header: 'Value', key: 'value', width: 48 },
+  ];
+  for (const [field, value] of [
+    ['Winding Machine', overview.machine],
+    ['FAB Team', overview.team],
+    ['FAB Running Time', overview.fab_running],
+    ['FAB Running Hours (decimal)', overview.fab_running_hours],
+    ['FAB Labor Time', overview.fab_labor],
+    ['FAB Labor Hours (decimal)', overview.fab_labor_hours],
+    ['FAB Downtime Total', overview.downtime_total],
+  ]) {
+    sheetFabSummary.addRow({ field, value: dash(value) });
+  }
+  styleHeader(sheetFabSummary);
+
+  const sheet2 = workbook.addWorksheet('FAB Labor', {
     views: [{ state: 'frozen', ySplit: 1 }],
   });
   sheet2.columns = [
@@ -484,7 +567,7 @@ async function buildTankReportXlsxBuffer(data) {
   }
   styleHeader(sheet2);
 
-  const sheet3 = workbook.addWorksheet('Piece & Phase History', {
+  const sheet3 = workbook.addWorksheet('FAB Phase History', {
     views: [{ state: 'frozen', ySplit: 1 }],
   });
   sheet3.columns = [
@@ -536,7 +619,7 @@ async function buildTankReportXlsxBuffer(data) {
   }
   styleHeader(sheet3);
 
-  const sheet4 = workbook.addWorksheet('Downtime Alerts QA-QC', {
+  const sheet4 = workbook.addWorksheet('FAB Downtime QA-QC', {
     views: [{ state: 'frozen', ySplit: 1 }],
   });
   sheet4.columns = [
@@ -580,7 +663,7 @@ async function buildTankReportXlsxBuffer(data) {
   styleHeader(sheet4);
 
   const at = (data && data.assembly_testing) || {};
-  const sheet5 = workbook.addWorksheet('Assembly', {
+  const sheet5 = workbook.addWorksheet('ASSEMBLY', {
     views: [{ state: 'frozen', ySplit: 1 }],
   });
   sheet5.columns = [
@@ -589,11 +672,19 @@ async function buildTankReportXlsxBuffer(data) {
   ];
   sheet5.addRow({ field: 'FAB Completed', value: dash(fmtWhen(at.fab_completed_at)) });
   sheet5.addRow({ field: 'Assembly Started', value: dash(fmtWhen(at.assembly_started_at)) });
-  sheet5.addRow({ field: 'Assembly Completed', value: dash(fmtWhen(at.assembly_completed_at)) });
+  sheet5.addRow({ field: 'Assembly Finished', value: dash(fmtWhen(at.assembly_completed_at)) });
+  sheet5.addRow({ field: 'Assembly Duration', value: dash(overview.assembly_duration) });
   sheet5.addRow({
-    field: 'Stage Labor Total',
-    value: dash(at.total_stage_labor_display || '0h 0m'),
+    field: 'Assembly Duration Hours (decimal)',
+    value: dash(overview.assembly_duration_hours),
   });
+  sheet5.addRow({ field: 'Assembly Labor Time', value: dash(overview.assembly_labor) });
+  sheet5.addRow({
+    field: 'Assembly Labor Hours (decimal)',
+    value: dash(overview.assembly_labor_hours),
+  });
+  sheet5.addRow({ field: 'Testing / QA-QC Time', value: dash(overview.testing_elapsed) });
+  sheet5.addRow({ field: 'Test Result', value: dash(at.latest_test_result || '') });
   styleHeader(sheet5);
   sheet5.addRow({});
   sheet5.addRow({ field: 'Stage', value: 'Session history below' });

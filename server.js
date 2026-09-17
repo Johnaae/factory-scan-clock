@@ -2073,16 +2073,21 @@ const PHASE2_TANK_STATUSES = [
   'testing_in_progress',
   'ready_for_dome_install',
   'ready_for_final_completion',
+  'rework_required',
 ];
 
 /** Registry status: waiting | active | paused | archived | Phase 2 stage statuses. */
 function normalizeTankStatus(raw) {
   const s = String(raw == null || raw === '' ? 'waiting' : raw)
     .trim()
-    .toLowerCase();
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_');
   if (s === 'waiting' || s === 'pending') return 'waiting';
   if (s === 'paused') return 'paused';
   if (s === 'archived' || s === 'completed') return 'archived';
+  if (s === 'rework_required' || s === 'returned_to_fab' || s === 'fab_rework') {
+    return 'rework_required';
+  }
   if (
     s === 'ready_for_dome_install' ||
     s === 'ready_for_final_completion' ||
@@ -2094,6 +2099,64 @@ function normalizeTankStatus(raw) {
   if (PHASE2_TANK_STATUSES.includes(s)) return s;
   if (s === 'active') return 'active';
   return 'active';
+}
+
+/** True when tank may re-enter FAB after Testing FAIL. */
+function tankIsReworkRequired(tankRow) {
+  return normalizeTankStatus(tankRow && tankRow.status) === 'rework_required';
+}
+
+/**
+ * FAB production is closed for tanks that finished FAB / moved into Assembly+Testing,
+ * unless explicitly returned via Testing FAIL (rework_required).
+ */
+function tankFabRestartBlocked(tankRow) {
+  if (!tankRow || tankIsReworkRequired(tankRow)) return false;
+  if (tankRow.fab_completed_at) return true;
+  const st = normalizeTankStatus(tankRow.status);
+  return (
+    st === 'ready_for_assembly' ||
+    st === 'assembly_in_progress' ||
+    st === 'ready_for_testing' ||
+    st === 'testing_in_progress' ||
+    st === 'ready_for_dome_install'
+  );
+}
+
+function tankFabRestartBlockBody(tankRow) {
+  if (!tankFabRestartBlocked(tankRow)) return null;
+  return {
+    ok: false,
+    error: 'fab_complete_no_rework',
+    message: 'Tank has completed FAB and is not assigned for rework.',
+  };
+}
+
+/** Latest Testing FAIL note for FAB rework display (additive history). */
+async function latestTestFailureForTank(tankId) {
+  const tid = Number(tankId);
+  if (!Number.isInteger(tid) || tid <= 0) return null;
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, result, failure_note, attempted_at, previous_status
+       FROM test_attempts
+       WHERE tank_id = $1 AND UPPER(TRIM(result)) = 'FAIL'
+       ORDER BY attempted_at DESC NULLS LAST, id DESC
+       LIMIT 1`,
+      [tid]
+    );
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      id: Number(row.id),
+      result: 'FAIL',
+      failure_note: row.failure_note || null,
+      attempted_at: row.attempted_at || null,
+      previous_status: row.previous_status || null,
+    };
+  } catch (_err) {
+    return null;
+  }
 }
 
 const TANK_SELECT_COLUMNS =
@@ -2170,8 +2233,8 @@ function mapTankRowForApi(row) {
     priority: row.priority || '',
     due_date: row.due_date || null,
     notes: row.notes || '',
-    piece_count: Math.min(4, Math.max(1, Number(row.piece_count) || 1)),
-    current_piece_number: Math.min(4, Math.max(1, Number(row.current_piece_number) || 1)),
+    piece_count: Math.min(8, Math.max(1, Number(row.piece_count) || 1)),
+    current_piece_number: Math.min(8, Math.max(1, Number(row.current_piece_number) || 1)),
     status,
     created_at,
     first_scanned_at,
@@ -2989,6 +3052,8 @@ function tankProductionBlockBody(tankRow) {
       message: 'This tank is completed. Restore it in Tank Management before resuming work.',
     };
   }
+  const fabBlock = tankFabRestartBlockBody(tankRow);
+  if (fabBlock) return fabBlock;
   return null;
 }
 
@@ -3082,15 +3147,8 @@ async function permanentlyDeleteTank(client, tankId, auditMeta) {
     details: { tank_id: tid, tank_number: tank.tank_number },
   });
 
-  await client.query(`UPDATE machines SET active_tank_id = NULL, updated_at = NOW() WHERE active_tank_id = $1`, [tid]);
-  await client.query(`DELETE FROM machine_sessions WHERE tank_id = $1`, [tid]);
-  await client.query(`DELETE FROM part_complete_events WHERE tank_id = $1`, [tid]);
-  await client.query(`DELETE FROM downtime_intervals WHERE tank_id = $1`, [tid]);
-  await client.query(`UPDATE alert_events SET tank_id = NULL WHERE tank_id = $1`, [tid]);
-  await client.query(`UPDATE production_notes SET tank_id = NULL WHERE tank_id = $1`, [tid]);
-  await client.query(`UPDATE job_finish_events SET tank_id = NULL WHERE tank_id = $1`, [tid]);
-  await client.query(`DELETE FROM tank_pieces WHERE tank_id = $1`, [tid]);
-  await client.query(`DELETE FROM tanks WHERE id = $1`, [tid]);
+  const { permanentlyDeleteTankOwnedRows } = require('./scripts/permanent-delete-tank');
+  await permanentlyDeleteTankOwnedRows(client, tid);
   return { ok: true, tank_number: tank.tank_number };
 }
 
@@ -4836,6 +4894,22 @@ const phase1 = createPhase1ProductionLogic({
   weekBoundsLocal,
 });
 
+// Heal any tanks whose persistent rework_required was wiped to paused by End Shift.
+void dbReady
+  .then(() => phase1.repairEndShiftClearedRework(pool))
+  .then((rows) => {
+    if (rows && rows.length) {
+      console.log(
+        `[rework] restored rework_required on ${rows.length} tank(s): ${rows
+          .map((r) => r.tank_number)
+          .join(', ')}`
+      );
+    }
+  })
+  .catch((err) => {
+    console.error('[rework] End Shift rework repair failed:', err && err.message ? err.message : err);
+  });
+
 /** Phase 2 assembly + testing production logic */
 const { createPhase2AssemblyTesting } = require('./scripts/phase2-assembly-testing');
 const phase2 = createPhase2AssemblyTesting(pool, {
@@ -5104,7 +5178,7 @@ async function handleWindingScanAction(machine, body) {
     tank: pendingIn.tank || null,
     piece: pendingIn.piece != null ? Number(pendingIn.piece) : null,
   };
-  if (pending.piece != null && (!Number.isInteger(pending.piece) || pending.piece < 1 || pending.piece > 4)) {
+  if (pending.piece != null && (!Number.isInteger(pending.piece) || pending.piece < 1 || pending.piece > 8)) {
     pending.piece = null;
   }
   let parsed = phase1.parseScan(barcode);
@@ -5282,10 +5356,12 @@ async function handleWindingScanAction(machine, body) {
   if (parsed.type === 'tank') {
     pending.tank = parsed.value;
     pending.piece = null;
-    const tankRow = await validateTankExists(pending.tank);
-    if (!tankRow) {
+    const tankRowRaw = await validateTankExists(pending.tank);
+    if (!tankRowRaw) {
       return { ok: false, status: 404, body: tankNotFoundBody() };
     }
+    // Persistent rework_required must survive End Shift; heal if a prior shift wiped it.
+    const tankRow = (await phase1.ensurePersistentReworkStatus(tankRowRaw)) || tankRowRaw;
     const tankBlock = tankProductionBlockBody(tankRow);
     if (tankBlock) {
       if (tankBlock.error === 'tank_archived') {
@@ -5293,11 +5369,13 @@ async function handleWindingScanAction(machine, body) {
       }
       return { ok: false, status: 403, body: tankBlock };
     }
-    const pieceCount = Math.min(4, Math.max(1, Number(tankRow.piece_count) || 1));
+    const pieceCount = Math.min(8, Math.max(1, Number(tankRow.piece_count) || 1));
     await phase1.ensureTankPieces(tankRow.id, pieceCount);
     const pieces = await phase1.getTankPieces(tankRow.id);
     const configuredPieces = pieces.filter((p) => Number(p.piece_number) <= pieceCount);
-    // Multi-tank: if this tank already has an open session on this machine, switch to it.
+    // Always require explicit piece selection via the Piece Selection popup.
+    pending.piece = null;
+    // Multi-tank: if this tank already has an open session on this machine, switch focus to it.
     const openRows = await phase1.getOpenSessionsForMachine(machine.id);
     const match = openRows.find(
       (r) => String(r.tank_number || '').toUpperCase() === String(pending.tank).toUpperCase()
@@ -5305,7 +5383,8 @@ async function handleWindingScanAction(machine, body) {
     if (match) {
       await phase1.setMachineActiveTank(machine.id, match.tank_id);
       const tankSessions = openRows.filter((r) => Number(r.tank_id) === Number(match.tank_id));
-      if (pieceCount === 1) pending.piece = 1;
+      const reworkRequired = tankIsReworkRequired(tankRow);
+      const latestFail = reworkRequired ? await latestTestFailureForTank(tankRow.id) : null;
       return {
         ok: true,
         status: 200,
@@ -5316,19 +5395,30 @@ async function handleWindingScanAction(machine, body) {
           pending,
           pieces: configuredPieces,
           piece_count: pieceCount,
+          tank_status: normalizeTankStatus(tankRow.status),
+          rework_required: reworkRequired,
+          latest_failure_note: latestFail ? latestFail.failure_note : null,
+          latest_test_failure: latestFail,
           open_sessions: await Promise.all(openRows.map((r) => phase1.mapSession(r))),
           tank_open_sessions: await Promise.all(tankSessions.map((r) => phase1.mapSession(r))),
-          message:
-            pieceCount === 1
-              ? 'Piece 1 selected. Scan a phase to begin.'
+          message: reworkRequired
+            ? pieceCount === 1
+              ? 'REWORK REQUIRED — select Piece, then Correction/phase.'
+              : `REWORK REQUIRED — select Piece 1–${pieceCount}, then Correction/phase.`
+            : pieceCount === 1
+              ? 'Select Piece 1 for this tank.'
               : `Select Piece 1–${pieceCount} for this tank.`,
         },
       };
     }
-    if (pieceCount === 1) pending.piece = 1;
+    // Focus this tank on the kiosk even before a session starts so config polls
+    // return the selected tank's pieces (needed for rework Piece modal).
+    await phase1.setMachineActiveTank(machine.id, tankRow.id);
     const pausedTank = await phase1.getPausedTankByNumber(pending.tank);
     const resumablePhase =
       pausedTank && pausedTank.wip_phase_name ? pausedTank.wip_phase_name : null;
+    const reworkRequired = tankIsReworkRequired(tankRow);
+    const latestFail = reworkRequired ? await latestTestFailureForTank(tankRow.id) : null;
     return {
       ok: true,
       status: 200,
@@ -5339,11 +5429,18 @@ async function handleWindingScanAction(machine, body) {
         pending,
         pieces: configuredPieces,
         piece_count: pieceCount,
+        tank_status: normalizeTankStatus(tankRow.status),
+        rework_required: reworkRequired,
+        latest_failure_note: latestFail ? latestFail.failure_note : null,
+        latest_test_failure: latestFail,
         open_sessions: await Promise.all(openRows.map((r) => phase1.mapSession(r))),
         resumable_phase: resumablePhase,
-        message:
-          pieceCount === 1
-            ? 'Piece 1 selected. Scan a phase to begin.'
+        message: reworkRequired
+          ? pieceCount === 1
+            ? 'REWORK REQUIRED — select Piece, then Correction/phase.'
+            : `REWORK REQUIRED — select Piece 1–${pieceCount}, then Correction/phase.`
+          : pieceCount === 1
+            ? 'Select Piece 1 for this tank.'
             : `Select Piece 1–${pieceCount} for this tank.`,
       },
     };
@@ -5371,9 +5468,11 @@ async function handleWindingScanAction(machine, body) {
         body: { ok: false, error: 'need_tank', message: 'Scan a tank before selecting a piece.' },
       };
     }
+    tankRow = (await phase1.ensurePersistentReworkStatus(tankRow)) || tankRow;
     const resolved = await phase1.resolvePieceForTank(tankRow.id, pieceNum);
     if (!resolved.ok) return resolved;
-    if (String(resolved.piece.status) === 'completed') {
+    const reworkAllowed = normalizeTankStatus(tankRow.status) === 'rework_required';
+    if (String(resolved.piece.status) === 'completed' && !reworkAllowed) {
       return {
         ok: false,
         status: 409,
@@ -5504,7 +5603,7 @@ async function handleWindingScanAction(machine, body) {
             };
           }
           const pieces = await phase1.getTankPieces(tankRow.id);
-          const pieceCount = Math.min(4, Math.max(1, Number(tankRow.piece_count) || 1));
+          const pieceCount = Math.min(8, Math.max(1, Number(tankRow.piece_count) || 1));
           const progress = phase1.computePieceProgress(pieces, pieceCount);
           if (!progress.all_pieces_complete) {
             return {
@@ -5795,7 +5894,7 @@ app.get('/api/kiosk/winding/config', async (req, res) => {
         [piecesTankId]
       );
       if (tankMeta.rows[0]) {
-        piece_count = Math.min(4, Math.max(1, Number(tankMeta.rows[0].piece_count) || 1));
+        piece_count = Math.min(8, Math.max(1, Number(tankMeta.rows[0].piece_count) || 1));
         active_tank_number = tankMeta.rows[0].tank_number;
         await phase1.ensureTankPieces(piecesTankId, piece_count);
         pieces = (await phase1.getTankPieces(piecesTankId)).filter((p) => Number(p.piece_number) <= piece_count);
@@ -6004,7 +6103,7 @@ app.post('/api/kiosk/winding/action', async (req, res) => {
         tankId,
       ]);
       if (tankMeta.rows[0]) {
-        piece_count = Math.min(4, Math.max(1, Number(tankMeta.rows[0].piece_count) || 1));
+        piece_count = Math.min(8, Math.max(1, Number(tankMeta.rows[0].piece_count) || 1));
         pieces = pieces.filter((p) => Number(p.piece_number) <= piece_count);
       }
       let open_qa_qc = null;
@@ -6453,6 +6552,8 @@ app.post('/api/kiosk/assembly/action', async (req, res) => {
       const reason =
         action === 'break' ? 'BREAK' : action === 'lunch' ? 'LUNCH' : String(body.reason || 'PAUSE').trim() || 'PAUSE';
       result = await phase2.pauseStationLabor(machine, reason);
+    } else if (action === 'resume') {
+      result = await phase2.resumeStationLabor(machine);
     } else if (action === 'employee_out') {
       result = await phase2.employeeOutFromStage(machine, {
         employee_id: body.employee_id,
@@ -8675,14 +8776,14 @@ app.get('/api/tanks', async (req, res) => {
   } else {
     sql += ` AND ${tankNotDeletedClause()}`;
     if (statusFilter === 'active') {
-      sql += ` AND LOWER(TRIM(COALESCE(status, ''))) IN ('active', 'paused', 'waiting', '', 'ready_for_assembly', 'assembly_in_progress', 'ready_for_testing', 'testing_in_progress', 'ready_for_dome_install', 'ready_for_final_completion')`;
+      sql += ` AND LOWER(TRIM(COALESCE(status, ''))) IN ('active', 'paused', 'waiting', '', 'ready_for_assembly', 'assembly_in_progress', 'ready_for_testing', 'testing_in_progress', 'ready_for_dome_install', 'ready_for_final_completion', 'rework_required')`;
     } else if (statusFilter === 'waiting') {
       sql += ` AND LOWER(TRIM(COALESCE(status, ''))) = 'waiting'`;
     } else if (statusFilter === 'archived') {
       sql += ` AND LOWER(TRIM(status)) = 'archived'`;
     } else if (statusFilter === 'all') {
       if (activeOnly) {
-        sql += ` AND (LOWER(TRIM(COALESCE(status, ''))) IN ('active', 'waiting', 'paused', 'ready_for_assembly', 'assembly_in_progress', 'ready_for_testing', 'testing_in_progress', 'ready_for_dome_install', 'ready_for_final_completion') OR TRIM(COALESCE(status, '')) = '')`;
+        sql += ` AND (LOWER(TRIM(COALESCE(status, ''))) IN ('active', 'waiting', 'paused', 'ready_for_assembly', 'assembly_in_progress', 'ready_for_testing', 'testing_in_progress', 'ready_for_dome_install', 'ready_for_final_completion', 'rework_required') OR TRIM(COALESCE(status, '')) = '')`;
       }
     } else {
       return res.status(400).json({
@@ -8700,7 +8801,7 @@ app.get('/api/tanks', async (req, res) => {
   if (statusFilter === 'trash') {
     sql += ` ORDER BY deleted_at DESC NULLS LAST, tank_number ASC`;
   } else {
-    sql += ` ORDER BY CASE WHEN LOWER(TRIM(COALESCE(status, ''))) IN ('active', '', 'ready_for_assembly', 'assembly_in_progress', 'ready_for_testing', 'testing_in_progress', 'ready_for_dome_install', 'ready_for_final_completion', 'paused', 'waiting') THEN 0 ELSE 1 END, updated_at DESC, tank_number ASC`;
+    sql += ` ORDER BY CASE WHEN LOWER(TRIM(COALESCE(status, ''))) IN ('active', '', 'ready_for_assembly', 'assembly_in_progress', 'ready_for_testing', 'testing_in_progress', 'ready_for_dome_install', 'ready_for_final_completion', 'rework_required', 'paused', 'waiting') THEN 0 ELSE 1 END, updated_at DESC, tank_number ASC`;
   }
   const { rows } = await pool.query(sql, params);
   const trashCount = await getTrashTankCount();
@@ -8716,7 +8817,8 @@ app.post('/api/tanks', async (req, res) => {
   const priority = body.priority != null ? String(body.priority).trim().slice(0, 40) : '';
   const due_date = body.due_date ? String(body.due_date).slice(0, 10) : null;
   const notes = body.notes != null ? String(body.notes).trim().slice(0, 2000) : '';
-  const piece_count = Math.min(4, Math.max(1, Number(body.piece_count) || 1));
+  // Phase 1 (main): up to 8 pieces. Phase 2: requires_test flag.
+  const piece_count = Math.min(8, Math.max(1, Number(body.piece_count) || 1));
   const requires_test = parseRequiresTestFlag(body.requires_test, false);
   if (!tank_number) {
     return res.status(400).json({ ok: false, error: 'validation', message: 'tank_number is required.' });
@@ -8783,10 +8885,10 @@ app.put('/api/tanks/:id', async (req, res) => {
       ? parseRequiresTestFlag(body.requires_test, false)
       : parseRequiresTestFlag(current.rows[0].requires_test, false);
   let piece_count = Math.min(
-    4,
+    8,
     Math.max(1, Number(body.piece_count != null ? body.piece_count : current.rows[0].piece_count) || 1)
   );
-  const prevPieceCount = Math.min(4, Math.max(1, Number(current.rows[0].piece_count) || 1));
+  const prevPieceCount = Math.min(8, Math.max(1, Number(current.rows[0].piece_count) || 1));
   if (body.piece_count != null && piece_count !== prevPieceCount) {
     const hasActivity = await phase1.tankHasProductionActivity(id);
     if (hasActivity && piece_count < prevPieceCount) {
@@ -9088,7 +9190,15 @@ app.delete('/api/tanks/:id/permanent', async (req, res) => {
     return res.json({ ok: true, tank_number: result.tank_number, permanently_deleted: true });
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error('[tank permanent delete]', err);
+    console.error('[tank permanent delete]', {
+      tank_id: id,
+      tank_number: tank && tank.tank_number,
+      code: err && err.code,
+      constraint: err && err.constraint,
+      table: err && err.table,
+      detail: err && err.detail,
+      message: err && err.message,
+    });
     return res.status(500).json({ ok: false, error: 'server', message: 'Permanent delete failed and was rolled back.' });
   } finally {
     client.release();
@@ -9159,7 +9269,7 @@ async function buildTankDailySummary(date) {
   const tanks = [];
   for (const r of rows) {
     const tankId = Number(r.tank_id);
-    const pieceCount = Math.min(4, Math.max(1, Number(r.piece_count) || Number(r.total_pieces) || 1));
+    const pieceCount = Math.min(8, Math.max(1, Number(r.piece_count) || Number(r.total_pieces) || 1));
     const completedPieces = Number(r.completed_pieces) || 0;
     const currentPiece =
       r.open_piece_number != null
@@ -9514,6 +9624,119 @@ app.get('/api/manager/tanks/print-selected', async (req, res) => {
   }
 });
 
+/**
+ * Tank Report Overview production/labor totals.
+ * Reuses existing FAB membership running/labor + Assembly duration/stage labor.
+ * Testing/QA-QC elapsed is reported separately and never added into these totals.
+ */
+function buildTankOverviewProductionTotals(teamProduction, assemblyTesting) {
+  const tp = teamProduction || {};
+  const at = assemblyTesting || {};
+  const fmt = (ms) =>
+    phase2 && typeof phase2.formatDurationXhYm === 'function'
+      ? phase2.formatDurationXhYm(ms)
+      : (() => {
+          const totalMin = Math.floor(Math.max(0, Number(ms) || 0) / 60000);
+          if (totalMin < 1) return '0h 0m';
+          const h = Math.floor(totalMin / 60);
+          const m = totalMin % 60;
+          return `${h}h ${m}m`;
+        })();
+
+  const hoursToMs = (hours) => {
+    const h = Number(hours);
+    return Number.isFinite(h) ? Math.round(h * 3600000) : 0;
+  };
+
+  let fabRunningMs = Number(tp.total_running_ms);
+  if (!Number.isFinite(fabRunningMs) || fabRunningMs < 0) {
+    fabRunningMs = hoursToMs(tp.total_running_hours != null ? tp.total_running_hours : tp.total_machine_hours);
+  }
+  let fabLaborMs = Number(tp.total_labor_ms);
+  if (!Number.isFinite(fabLaborMs) || fabLaborMs < 0) {
+    fabLaborMs = hoursToMs(tp.total_labor_hours != null ? tp.total_labor_hours : tp.total_hours);
+  }
+
+  const assemblyDurationMs = Math.max(0, Number(at.assembly_duration_ms) || 0);
+  // Existing stage labor total already excludes TESTING (ASSEMBLY + CORRECTION only).
+  const assemblyLaborMs = Math.max(0, Number(at.total_stage_labor_ms) || 0);
+  const testingElapsedMs = Math.max(0, Number(at.testing_elapsed_ms) || 0);
+
+  const totalProductionMs = fabRunningMs + assemblyDurationMs;
+  const totalLaborMs = fabLaborMs + assemblyLaborMs;
+
+  const stageLabor = at.stage_labor || {};
+  const byStage = Array.isArray(stageLabor.by_stage) ? stageLabor.by_stage : [];
+  const assemblyEmpMap = new Map();
+  for (const stageRow of byStage) {
+    const stage = String(stageRow.stage || '').toUpperCase();
+    if (stage !== 'ASSEMBLY' && stage !== 'CORRECTION') continue;
+    for (const emp of stageRow.employees || []) {
+      const key =
+        emp.employee_id != null ? `id:${Number(emp.employee_id)}` : `name:${String(emp.employee_name || '')}`;
+      const prev = assemblyEmpMap.get(key) || {
+        employee_id: emp.employee_id != null ? Number(emp.employee_id) : null,
+        employee_code: emp.employee_code || null,
+        employee_name: emp.employee_name || '—',
+        stage,
+        total_ms: 0,
+      };
+      prev.total_ms += Number(emp.total_ms) || 0;
+      if (stage === 'CORRECTION') prev.stage = 'CORRECTION';
+      assemblyEmpMap.set(key, prev);
+    }
+  }
+  const assemblyEmployees = [...assemblyEmpMap.values()]
+    .map((e) => ({
+      ...e,
+      total_display: fmt(e.total_ms),
+    }))
+    .sort((a, b) => (Number(b.total_ms) || 0) - (Number(a.total_ms) || 0));
+
+  const fabPieces = (tp.hours_per_piece || []).map((p) => {
+    const runningMs =
+      p.running_ms != null
+        ? Number(p.running_ms) || 0
+        : hoursToMs(p.running_hours != null ? p.running_hours : p.hours);
+    return {
+      piece_number: Number(p.piece_number) || 1,
+      running_ms: runningMs,
+      running_display: p.running_display || fmt(runningMs),
+      labor_ms: p.labor_ms != null ? Number(p.labor_ms) || 0 : hoursToMs(p.labor_hours),
+      labor_display:
+        p.labor_display ||
+        fmt(p.labor_ms != null ? Number(p.labor_ms) || 0 : hoursToMs(p.labor_hours)),
+    };
+  });
+
+  return {
+    fab_running_ms: fabRunningMs,
+    fab_running_display: tp.total_running_display || fmt(fabRunningMs),
+    assembly_duration_ms: assemblyDurationMs,
+    assembly_duration_display: at.assembly_duration_display || fmt(assemblyDurationMs),
+    total_production_running_ms: totalProductionMs,
+    total_production_running_display: fmt(totalProductionMs),
+    fab_labor_ms: fabLaborMs,
+    fab_labor_display: tp.total_labor_display || fmt(fabLaborMs),
+    assembly_labor_ms: assemblyLaborMs,
+    assembly_labor_display: at.total_stage_labor_display || fmt(assemblyLaborMs),
+    total_labor_ms: totalLaborMs,
+    total_labor_display: fmt(totalLaborMs),
+    testing_elapsed_ms: testingElapsedMs,
+    testing_elapsed_display: at.testing_elapsed_display || fmt(testingElapsedMs),
+    fab_pieces: fabPieces,
+    fab_labor_members: (tp.member_breakdown || []).map((m) => ({
+      employee_id: m.employee_id != null ? Number(m.employee_id) : null,
+      employee_code: m.employee_code || null,
+      employee_name: m.employee_name || '—',
+      team_name: m.team_name || null,
+      total_ms: Number(m.total_ms) || hoursToMs(m.total_hours),
+      total_display: m.total_hours_display || m.total_display || fmt(Number(m.total_ms) || hoursToMs(m.total_hours)),
+    })),
+    assembly_labor_employees: assemblyEmployees,
+  };
+}
+
 async function getTankReportPayload(id) {
   if (!Number.isInteger(id) || id <= 0) return { ok: false, status: 400, error: 'invalid_id' };
   const tankRes = await pool.query(`SELECT ${TANK_SELECT_COLUMNS} FROM tanks WHERE id = $1`, [id]);
@@ -9643,7 +9866,7 @@ async function getTankReportPayload(id) {
         reportMeta.machine_name = s0.machine_name || reportMeta.machine_name;
       }
     }
-    const pieceCount = Math.min(4, Math.max(1, Number(tank.piece_count) || pieces.length || 1));
+    const pieceCount = Math.min(8, Math.max(1, Number(tank.piece_count) || pieces.length || 1));
     const completedPieces = pieces.filter((p) => String(p.status) === 'completed' && Number(p.piece_number) <= pieceCount).length;
     reportMeta.percent_complete = Math.round((completedPieces / pieceCount) * 100);
     reportMeta.piece_count = pieceCount;
@@ -9657,6 +9880,7 @@ async function getTankReportPayload(id) {
         'testing_in_progress',
         'ready_for_dome_install',
         'ready_for_final_completion',
+        'rework_required',
       ]);
       if (!postFab.has(st) && !tank.fab_completed_at) {
         reportMeta.production_status = 'Ready to Complete';
@@ -9668,6 +9892,7 @@ async function getTankReportPayload(id) {
           testing_in_progress: 'Testing In Progress',
           ready_for_dome_install: 'Ready for Dome Install',
           ready_for_final_completion: 'Ready for Dome Install',
+          rework_required: 'Rework Required',
         };
         reportMeta.production_status = labels[st] || reportMeta.production_status;
       }
@@ -9806,6 +10031,7 @@ async function getTankReportPayload(id) {
     downtime_total_display: phase1.formatElapsedDisplay(downtimeTotalMs),
     qa_qc_history: qaQcHistory,
     assembly_testing,
+    overview_totals: buildTankOverviewProductionTotals(teamProduction, assembly_testing),
     labor_hours: {
       total_labor_hours: totalLaborHours,
       total_machine_hours: totalMachineHours,

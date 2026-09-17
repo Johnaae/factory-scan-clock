@@ -291,6 +291,7 @@ function buildTankReportPdfBuffer(data) {
   const w = contentW();
   const generatedAt = new Date().toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 
+  const totals = data.overview_totals || {};
   const totalLabor =
     laborHours.total_labor_hours != null
       ? laborHours.total_labor_hours
@@ -311,32 +312,23 @@ function buildTankReportPdfBuffer(data) {
     metaLine: `Generated: ${generatedAt}`,
   });
 
-  y = drawSectionHeading(doc, M, w, y, 'Page 1 — Tank Information');
+  y = drawSectionHeading(doc, M, w, y, 'Overview — Tank Information');
   y = drawInfoGrid(doc, M, w, y, [
     { label: 'Tank Number', value: tankNo },
-    { label: 'Team', value: meta.team_name || '—' },
-    { label: 'Machine', value: meta.machine_name || '—' },
     { label: 'Status', value: meta.production_status || tank.status || '—' },
     { label: 'Progress', value: `${meta.percent_complete != null ? meta.percent_complete : '—'}%` },
-    { label: 'Total Running Hours', value: formatReportDuration({
-      ms: (teamProduction && teamProduction.total_running_ms) != null
-        ? teamProduction.total_running_ms
-        : laborHours.total_running_ms,
-      hours: totalRunning,
-      display: (teamProduction && teamProduction.total_running_display) || laborHours.total_running_display,
-    }) },
-    { label: 'Total Labor Hours', value: formatReportDuration({
-      ms: (teamProduction && teamProduction.total_labor_ms) != null
-        ? teamProduction.total_labor_ms
-        : laborHours.total_labor_ms,
-      hours: totalLabor,
-      display: (teamProduction && teamProduction.total_labor_display) || laborHours.total_labor_display,
-    }) },
-    { label: 'Current Phase', value: meta.current_phase || '—' },
-    { label: 'Piece', value: meta.piece_label || `Piece ${tank.current_piece_number || 1}` },
-    { label: 'Started', value: fmtWhen(tank.first_scanned_at || tank.started_at || meta.started_at) },
-    { label: 'Customer', value: tank.customer || '—' },
+    { label: 'Project Name', value: tank.customer || '—' },
     { label: 'Model', value: tank.model || '—' },
+    { label: 'Started', value: fmtWhen(tank.first_scanned_at || tank.started_at || meta.started_at) },
+    { label: 'Configured Pieces', value: String(tank.piece_count != null ? tank.piece_count : pieces.length || 1) },
+    {
+      label: 'Completed Pieces',
+      value: `${
+        meta.completed_pieces != null
+          ? meta.completed_pieces
+          : pieces.filter((p) => String(p.status || '').toLowerCase() === 'completed').length
+      }/${meta.piece_count != null ? meta.piece_count : tank.piece_count != null ? tank.piece_count : pieces.length || 1}`,
+    },
     {
       label: 'Require Test',
       value:
@@ -344,20 +336,81 @@ function buildTankReportPdfBuffer(data) {
           ? 'Yes'
           : 'No',
     },
+    { label: 'Current Phase', value: meta.current_phase || '—' },
+    { label: 'Piece', value: meta.piece_label || `Piece ${tank.current_piece_number || 1}` },
     { label: 'Completed', value: fmtWhen(tank.completed_at) },
     { label: 'Duration', value: tank.duration_display || '—' },
+    {
+      label: 'Total Running Time',
+      value: formatReportDuration({
+        ms: totals.total_production_running_ms,
+        display: totals.total_production_running_display,
+      }),
+    },
+    {
+      label: 'Total Labor Time',
+      value: formatReportDuration({
+        ms: totals.total_labor_ms,
+        display: totals.total_labor_display,
+      }),
+    },
+    {
+      label: 'Testing / QA-QC Time',
+      value: formatReportDuration({
+        ms: totals.testing_elapsed_ms,
+        display: totals.testing_elapsed_display,
+      }),
+    },
     { label: 'Downtime Total', value: data.downtime_total_display || '00:00' },
     { label: 'Description', value: tank.description || '—' },
   ]);
 
-  // —— Page 2: Phase Summary ——
+  // —— FAB SHOP ——
   doc.addPage();
   y = drawTitleBlock(doc, M, w, {
     title: `Tank Report — ${tankNo}`,
-    subtitle: 'Complete phase summary',
+    subtitle: 'FAB SHOP',
     metaLine: `Generated: ${generatedAt}`,
   });
-  y = drawSectionHeading(doc, M, w, y, 'Page 2 — Complete Phase Summary');
+  y = drawSectionHeading(doc, M, w, y, 'FAB SHOP');
+  y = drawInfoGrid(doc, M, w, y, [
+    { label: 'Winding Machine', value: meta.machine_name || '—' },
+    { label: 'FAB Team', value: meta.team_name || '—' },
+    {
+      label: 'FAB Running Time',
+      value: formatReportDuration({
+        ms:
+          totals.fab_running_ms != null
+            ? totals.fab_running_ms
+            : teamProduction && teamProduction.total_running_ms != null
+              ? teamProduction.total_running_ms
+              : laborHours.total_running_ms,
+        hours: totalRunning,
+        display:
+          totals.fab_running_display ||
+          (teamProduction && teamProduction.total_running_display) ||
+          laborHours.total_running_display,
+      }),
+    },
+    {
+      label: 'FAB Labor Time',
+      value: formatReportDuration({
+        ms:
+          totals.fab_labor_ms != null
+            ? totals.fab_labor_ms
+            : teamProduction && teamProduction.total_labor_ms != null
+              ? teamProduction.total_labor_ms
+              : laborHours.total_labor_ms,
+        hours: totalLabor,
+        display:
+          totals.fab_labor_display ||
+          (teamProduction && teamProduction.total_labor_display) ||
+          laborHours.total_labor_display,
+      }),
+    },
+    { label: 'FAB Downtime', value: data.downtime_total_display || '00:00' },
+  ]);
+  y = drawSectionHeading(doc, M, w, y, 'FAB Phase Summary');
 
   const phaseRows = (phaseSummary || []).map((p) => ({
     phase: p.phase_name || p.phase_code || '—',
@@ -386,7 +439,7 @@ function buildTankReportPdfBuffer(data) {
   // Labor breakdown (membership history) — same source as on-screen Tank Report
   const memberBreakdown = (teamProduction && teamProduction.member_breakdown) || [];
   if (memberBreakdown.length) {
-    y = drawSectionHeading(doc, M, w, y, 'Labor Breakdown (membership history)');
+    y = drawSectionHeading(doc, M, w, y, 'FAB Labor Breakdown (membership history)');
     y = drawTable(
       doc,
       M,
@@ -451,14 +504,14 @@ function buildTankReportPdfBuffer(data) {
     );
   }
 
-  // —— Page 3: Piece / Notes / Downtime ——
+  // —— FAB piece / notes / downtime ——
   doc.addPage();
   y = drawTitleBlock(doc, M, w, {
     title: `Tank Report — ${tankNo}`,
-    subtitle: 'Piece history, notes, corrections & downtime',
+    subtitle: 'FAB SHOP — piece history, notes & downtime',
     metaLine: `Generated: ${generatedAt}`,
   });
-  y = drawSectionHeading(doc, M, w, y, 'Page 3 — Piece History');
+  y = drawSectionHeading(doc, M, w, y, 'FAB Piece History');
   const pieceReports = data.piece_reports || [];
   if (pieceReports.length) {
     for (const pr of pieceReports) {
@@ -593,55 +646,64 @@ function buildTankReportPdfBuffer(data) {
     { emptyText: 'No downtime recorded.' }
   );
 
-  // —— Page 4: Assembly / Testing ——
+  // —— ASSEMBLY ——
   const at = data.assembly_testing || null;
-  if (at && (at.fab_completed_at || (at.stage_sessions || []).length || (at.test_attempts || []).length)) {
-    doc.addPage();
-    y = drawTitleBlock(doc, M, w, {
-      title: `Tank Report — ${tankNo}`,
-      subtitle: 'Assembly & Testing',
-      metaLine: `Generated: ${generatedAt}`,
-    });
-    y = drawSectionHeading(doc, M, w, y, 'Page 4 — Assembly / Testing Summary');
-    y = drawSectionHeading(doc, M, w, y, 'Production');
-    y = drawInfoGrid(doc, M, w, y, [
-      { label: 'FAB Completed', value: fmtWhen(at.fab_completed_at) },
-      { label: 'Assembly Started', value: fmtWhen(at.assembly_started_at) },
-      { label: 'Assembly Completed', value: fmtWhen(at.assembly_completed_at) },
-      { label: 'Assembly Duration', value: at.assembly_duration_display || '—' },
-      {
-        label: 'Production Labor Hours',
-        value: at.total_stage_labor_display || '0h 0m',
-      },
-    ]);
-    y = drawSectionHeading(doc, M, w, y, 'Quality (QA/QC) — not production time');
-    y = drawInfoGrid(doc, M, w, y, [
-      {
-        label: 'Requires Test',
-        value: at.requires_test === true || at.requires_test === 1 ? 'Yes' : 'No',
-      },
-      { label: 'Test Started', value: fmtWhen(at.testing_started_at) },
-      { label: 'Test Completed', value: fmtWhen(at.testing_completed_at) },
-      { label: 'Test Result', value: at.latest_test_result || '—' },
-      {
-        label: 'QA/QC Testing Elapsed',
-        value: at.testing_elapsed_display || '0h 0m',
-      },
-    ]);
-    y = drawSectionHeading(doc, M, w, y, 'Production Labor Sessions (Assembly / Correction)');
-    y = drawTable(
-      doc,
-      M,
-      y,
-      [
-        { key: 'stage', label: 'Stage', width: 80 },
-        { key: 'team', label: 'Team', width: 100 },
-        { key: 'start', label: 'Start', width: 110 },
-        { key: 'end', label: 'End', width: 110 },
-        { key: 'duration', label: 'Duration', width: 70, align: 'right' },
-        { key: 'status', label: 'Status', width: 58 },
-      ],
-      (at.stage_sessions || []).map((s) => ({
+  doc.addPage();
+  y = drawTitleBlock(doc, M, w, {
+    title: `Tank Report — ${tankNo}`,
+    subtitle: 'ASSEMBLY',
+    metaLine: `Generated: ${generatedAt}`,
+  });
+  y = drawSectionHeading(doc, M, w, y, 'ASSEMBLY');
+  y = drawInfoGrid(doc, M, w, y, [
+    { label: 'FAB Completed', value: at ? fmtWhen(at.fab_completed_at) : '—' },
+    { label: 'Assembly Started', value: at ? fmtWhen(at.assembly_started_at) : '—' },
+    { label: 'Assembly Finished', value: at ? fmtWhen(at.assembly_completed_at) : '—' },
+    {
+      label: 'Assembly Duration',
+      value: formatReportDuration({
+        ms: totals.assembly_duration_ms != null ? totals.assembly_duration_ms : at && at.assembly_duration_ms,
+        display:
+          totals.assembly_duration_display || (at && at.assembly_duration_display) || '0h 0m',
+      }),
+    },
+    {
+      label: 'Assembly Labor Time',
+      value: formatReportDuration({
+        ms: totals.assembly_labor_ms != null ? totals.assembly_labor_ms : at && at.total_stage_labor_ms,
+        display:
+          totals.assembly_labor_display || (at && at.total_stage_labor_display) || '0h 0m',
+      }),
+    },
+    {
+      label: 'Testing / QA-QC Time (excluded from totals)',
+      value: formatReportDuration({
+        ms: totals.testing_elapsed_ms != null ? totals.testing_elapsed_ms : at && at.testing_elapsed_ms,
+        display:
+          totals.testing_elapsed_display || (at && at.testing_elapsed_display) || '0h 0m',
+      }),
+    },
+    { label: 'Test Result', value: (at && at.latest_test_result) || '—' },
+  ]);
+  y = drawSectionHeading(doc, M, w, y, 'Assembly Labor Sessions');
+  y = drawTable(
+    doc,
+    M,
+    y,
+    [
+      { key: 'stage', label: 'Stage', width: 80 },
+      { key: 'team', label: 'Team', width: 100 },
+      { key: 'start', label: 'Start', width: 110 },
+      { key: 'end', label: 'End', width: 110 },
+      { key: 'duration', label: 'Duration', width: 70, align: 'right' },
+      { key: 'status', label: 'Status', width: 58 },
+    ],
+    ((at && at.stage_sessions) || [])
+      .filter((s) => {
+        const stage = String(s.stage || '').toUpperCase();
+        return stage === 'ASSEMBLY' || stage === 'CORRECTION';
+      })
+      .map((s) => ({
         stage: s.stage || '—',
         team: s.team_name || '—',
         start: fmtWhen(s.started_at),
@@ -649,28 +711,27 @@ function buildTankReportPdfBuffer(data) {
         duration: s.duration_display || '—',
         status: s.status || '—',
       })),
-      { emptyText: 'No stage labor sessions.' }
-    );
-    y = drawSectionHeading(doc, M, w, y, 'Test Attempts');
-    y = drawTable(
-      doc,
-      M,
-      y,
-      [
-        { key: 'result', label: 'Result', width: 60 },
-        { key: 'when', label: 'When', width: 120 },
-        { key: 'who', label: 'Tester / Team', width: 140 },
-        { key: 'note', label: 'Note', width: 208 },
-      ],
-      (at.test_attempts || []).map((a) => ({
-        result: a.result || '—',
-        when: fmtWhen(a.attempted_at),
-        who: a.tester_employee_name || a.team_name || '—',
-        note: a.failure_note || '—',
-      })),
-      { emptyText: 'No test attempts.' }
-    );
-  }
+    { emptyText: 'No Assembly labor sessions.' }
+  );
+  y = drawSectionHeading(doc, M, w, y, 'Test Attempts');
+  y = drawTable(
+    doc,
+    M,
+    y,
+    [
+      { key: 'result', label: 'Result', width: 60 },
+      { key: 'when', label: 'When', width: 120 },
+      { key: 'who', label: 'Tester / Team', width: 140 },
+      { key: 'note', label: 'Note', width: 208 },
+    ],
+    ((at && at.test_attempts) || []).map((a) => ({
+      result: a.result || '—',
+      when: fmtWhen(a.attempted_at),
+      who: a.tester_employee_name || a.team_name || '—',
+      note: a.failure_note || '—',
+    })),
+    { emptyText: 'No test attempts.' }
+  );
 
   return finalizePdf(doc);
 }

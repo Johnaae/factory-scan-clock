@@ -84,6 +84,9 @@ const btnConfirmTankPermanentDelete = document.getElementById('btnConfirmTankPer
 const btnCancelTankPermanentDelete = document.getElementById('btnCancelTankPermanentDelete');
 let currentAuthUser = null;
 let tanksFetchSeq = 0;
+let tanksPollInFlight = false;
+let tanksPollTimer = null;
+const TANK_LIST_POLL_MS = 4000;
 let tankActionInFlight = false;
 let pendingTrashTank = null;
 let pendingTrashRestoreTank = null;
@@ -145,7 +148,8 @@ function tankIsActive(t) {
     st === 'ready_for_testing' ||
     st === 'testing_in_progress' ||
     st === 'ready_for_dome_install' ||
-    st === 'ready_for_final_completion'
+    st === 'ready_for_final_completion' ||
+    st === 'rework_required'
   );
 }
 
@@ -337,10 +341,11 @@ function statusBadgeFor(value, labelOverride) {
 function tankStatusLabel(t) {
   const st = String((t && t.status) || 'active').toLowerCase();
   if (st === 'archived') return 'Completed';
+  if (st === 'rework_required') return 'Rework Required';
   if (st === 'ready_for_assembly') return 'Ready for Assembly';
-  if (st === 'assembly_in_progress') return 'Assembly In Progress';
+  if (st === 'assembly_in_progress') return 'Assembly';
   if (st === 'ready_for_testing') return 'Ready for Testing';
-  if (st === 'testing_in_progress') return 'Testing In Progress';
+  if (st === 'testing_in_progress') return 'Testing';
   if (st === 'ready_for_dome_install' || st === 'ready_for_final_completion') return 'Ready for Dome Install';
   if (t && t.production_status === 'Ready to Complete') return 'Ready to Complete';
   if (st === 'waiting') return 'Waiting';
@@ -351,6 +356,7 @@ function tankStatusLabel(t) {
 function tankStatusBadge(t) {
   const st = String((t && t.status) || 'active').toLowerCase();
   if (st === 'archived') return '<span class="badge badge-muted">Completed</span>';
+  if (st === 'rework_required') return '<span class="badge badge-warn">Rework Required</span>';
   if (st === 'ready_for_assembly') return '<span class="badge badge-warn">Ready for Assembly</span>';
   if (st === 'assembly_in_progress') return '<span class="badge badge-in">Assembly</span>';
   if (st === 'ready_for_testing') return '<span class="badge badge-warn">Ready for Testing</span>';
@@ -382,13 +388,13 @@ function updateTankTableHead(filter) {
   if (!tankTableHead) return;
   if (filter === 'trash') {
     tankTableHead.innerHTML = `<tr>
-      <th>Tank #</th><th>Customer</th><th>Model</th><th>Pieces</th><th>Previous Status</th><th>Deleted At</th><th>Deleted By</th><th>Actions</th>
+      <th>Tank #</th><th>Project Name</th><th>Model</th><th>Pieces</th><th>Previous Status</th><th>Deleted At</th><th>Deleted By</th><th>Actions</th>
     </tr>`;
     return;
   }
   tankTableHead.innerHTML = `<tr>
     <th><input type="checkbox" id="tankSelectAll" aria-label="Select all" /></th>
-    <th>Tank #</th><th>Customer</th><th>Model</th><th>Pieces</th><th>Status</th><th>Created</th><th>Started</th><th>Duration</th><th>Actions</th>
+    <th>Tank #</th><th>Project Name</th><th>Model</th><th>Pieces</th><th>Status</th><th>Created</th><th>Started</th><th>Duration</th><th>Actions</th>
   </tr>`;
   const selectAll = document.getElementById('tankSelectAll');
   if (selectAll) {
@@ -404,6 +410,7 @@ function updateTankTableHead(filter) {
 function previousStatusLabel(status) {
   const st = String(status || '').toLowerCase();
   if (st === 'archived') return 'Completed';
+  if (st === 'rework_required') return 'Rework Required';
   if (st === 'ready_for_assembly') return 'Ready for Assembly';
   if (st === 'assembly_in_progress') return 'Assembly In Progress';
   if (st === 'ready_for_testing') return 'Ready for Testing';
@@ -586,13 +593,58 @@ function clearTankSearch() {
   void loadTanks();
 }
 
-async function loadTanks() {
-  closeTankActionsMenu();
+function managerModalOpen() {
+  const backs = [
+    tankEditBackdrop,
+    tankReportBackdrop,
+    tankTrashConfirmBackdrop,
+    tankTrashRestoreBackdrop,
+    tankPermanentDeleteBackdrop,
+  ];
+  return backs.some((el) => el && (el.classList.contains('show') || el.getAttribute('aria-hidden') === 'false'));
+}
+
+function captureTankTableUiState() {
+  const wrap = tankBody && tankBody.closest('.table-scroll');
+  const checked = [];
+  if (tankBody) {
+    tankBody.querySelectorAll('.tank-select-cb:checked').forEach((cb) => {
+      checked.push(String(cb.value));
+    });
+  }
+  return {
+    scrollTop: wrap ? wrap.scrollTop : 0,
+    checkedIds: checked,
+    selectAll: tankSelectAll ? Boolean(tankSelectAll.checked) : false,
+  };
+}
+
+function restoreTankTableUiState(state) {
+  if (!state || !tankBody) return;
+  const checked = new Set(state.checkedIds || []);
+  tankBody.querySelectorAll('.tank-select-cb').forEach((cb) => {
+    cb.checked = checked.has(String(cb.value));
+  });
+  if (tankSelectAll) {
+    const boxes = tankBody.querySelectorAll('.tank-select-cb');
+    const allChecked = boxes.length > 0 && Array.from(boxes).every((cb) => cb.checked);
+    tankSelectAll.checked = state.selectAll && allChecked ? true : allChecked;
+  }
+  const wrap = tankBody.closest('.table-scroll');
+  if (wrap && Number.isFinite(state.scrollTop)) {
+    wrap.scrollTop = state.scrollTop;
+  }
+}
+
+async function loadTanks(opts = {}) {
+  const silent = opts.silent === true;
+  if (!silent) closeTankActionsMenu();
   const seq = ++tanksFetchSeq;
   const q = String(tankSearch && tankSearch.value ? tankSearch.value : '').trim();
   const statusFilter = getTankStatusFilter();
   updateTankTableHead(statusFilter);
-  renderTankTableMessage(statusFilter, 'Loading…');
+  const uiState = silent ? captureTankTableUiState() : null;
+  if (!silent) renderTankTableMessage(statusFilter, 'Loading…');
   const query = new URLSearchParams({ status: statusFilter });
   if (q) query.set('search', q);
   const { res, data } = await apiJson(`/api/tanks?${query.toString()}`);
@@ -601,8 +653,10 @@ async function loadTanks() {
   if (getTankStatusFilter() !== statusFilter) return;
   if (!res.ok) {
     const msg = apiErrorMessage(data, 'Could not load tanks.');
-    renderTankTableMessage(statusFilter, msg);
-    if (tankHint) tankHint.textContent = msg;
+    if (!silent) {
+      renderTankTableMessage(statusFilter, msg);
+      if (tankHint) tankHint.textContent = msg;
+    }
     return;
   }
   if (tankHint && String(tankHint.textContent || '').startsWith('Could not load tanks')) {
@@ -633,6 +687,7 @@ async function loadTanks() {
     </tr>`;
       })
       .join('');
+    if (silent) restoreTankTableUiState(uiState);
     return;
   }
   tankBody.innerHTML = rows
@@ -641,7 +696,7 @@ async function loadTanks() {
         ? `<span class="tank-lifecycle-muted">${escapeHtml(fmtTankDateTime(t.first_scanned_at || t.started_at))}</span>`
         : '<span class="tank-lifecycle-muted">—</span>';
       const pcs = `${Number(t.current_piece_number) || 1}/${Number(t.piece_count) || 1}`;
-      return `<tr>
+      return `<tr data-tank-id="${Number(t.id)}" data-tank-status="${escapeHtml(String(t.status || '').toLowerCase())}">
       <td><input type="checkbox" class="tank-select-cb" value="${t.id}" /></td>
       <td>${renderTankNumberCell(t)}</td>
       <td>${escapeHtml(t.customer || '—')}</td>
@@ -655,6 +710,28 @@ async function loadTanks() {
     </tr>`;
     })
     .join('');
+  if (silent) restoreTankTableUiState(uiState);
+}
+
+async function pollManagerTankList() {
+  if (tanksPollInFlight) return;
+  if (typeof document !== 'undefined' && document.hidden) return;
+  if (managerModalOpen()) return;
+  if (tankActionInFlight) return;
+  tanksPollInFlight = true;
+  try {
+    await loadTanks({ silent: true });
+  } finally {
+    tanksPollInFlight = false;
+  }
+}
+
+function startManagerTankListPolling() {
+  if (tanksPollTimer != null) return;
+  tanksPollTimer = window.setInterval(() => void pollManagerTankList(), TANK_LIST_POLL_MS);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) void pollManagerTankList();
+  });
 }
 
 async function createTank() {
@@ -987,6 +1064,8 @@ function renderTankReport(data) {
   const laborHours = data.labor_hours || {};
   const teamCompletion = data.team_completion || {};
   const teamProduction = data.team_production || null;
+  const at = data.assembly_testing || null;
+  const overviewTotals = data.overview_totals || {};
   const totalLaborHours =
     laborHours.total_labor_hours != null
       ? laborHours.total_labor_hours
@@ -1012,241 +1091,93 @@ function renderTankReport(data) {
   const phaseTimeSummary =
     (teamProduction && teamProduction.phase_time_summary) || data.phase_time_summary || [];
 
-  const overviewSection = `
-    <section class="tank-report-section tank-report-page" data-report-page="1">
-      <div class="tank-report-page-label">Section 1 · Overview</div>
-      <div class="toolbar" style="margin-bottom:12px">
-        <button type="button" class="btn btn-sm btn-primary" id="btnTankReportEditPhase" data-tank-id="${Number(tank.id)}">Edit Phase Time</button>
-      </div>
-      <h4 class="tank-report-section-title">Tank Information</h4>
-      <div class="tank-lifecycle-grid">
-        <div class="tank-lifecycle-item">
-          <div class="tank-lifecycle-label">Tank #</div>
-          <div class="tank-lifecycle-value">#${escapeHtml(tank.tank_number)}</div>
-        </div>
-        <div class="tank-lifecycle-item">
-          <div class="tank-lifecycle-label">Team</div>
-          <div class="tank-lifecycle-value">${escapeHtml(meta.team_name || teamCompletion.team_name || '—')}</div>
-        </div>
-        <div class="tank-lifecycle-item">
-          <div class="tank-lifecycle-label">Machine</div>
-          <div class="tank-lifecycle-value">${escapeHtml(meta.machine_name || '—')}</div>
-        </div>
-        <div class="tank-lifecycle-item">
-          <div class="tank-lifecycle-label">Status</div>
-          <div class="tank-lifecycle-value"><span class="badge ${isActive ? 'badge-in' : 'badge-muted'}">${escapeHtml(statusText)}</span></div>
-        </div>
-        <div class="tank-lifecycle-item">
-          <div class="tank-lifecycle-label">Require Test</div>
-          <div class="tank-lifecycle-value">${tankRequiresTestFlag(tank) ? 'Yes' : 'No'}</div>
-        </div>
-        <div class="tank-lifecycle-item">
-          <div class="tank-lifecycle-label">Progress</div>
-          <div class="tank-lifecycle-value">${
-            pct == null
-              ? '—'
-              : `<div class="progress-bar" style="min-width:88px;background:#e2e8f0;border-radius:6px;overflow:hidden;height:10px;display:inline-block;vertical-align:middle;margin-right:8px">
-                   <div style="width:${pct}%;height:100%;background:#2563eb"></div>
-                 </div><span>${pct}%</span>`
-          }</div>
-        </div>
-        <div class="tank-lifecycle-item">
-          <div class="tank-lifecycle-label">Total Running Time</div>
-          <div class="tank-lifecycle-value">${escapeHtml(
-            fmtReportDuration({
-              ms:
-                (teamProduction && teamProduction.total_running_ms) != null
-                  ? teamProduction.total_running_ms
-                  : laborHours.total_running_ms,
-              hours: totalRunningHours,
-              display:
-                (teamProduction && teamProduction.total_running_display) ||
-                laborHours.total_running_display,
-            })
-          )}</div>
-        </div>
-        <div class="tank-lifecycle-item">
-          <div class="tank-lifecycle-label">Total Labor Hours</div>
-          <div class="tank-lifecycle-value">${escapeHtml(
-            fmtReportDuration({
-              ms:
-                (teamProduction && teamProduction.total_labor_ms) != null
-                  ? teamProduction.total_labor_ms
-                  : laborHours.total_labor_ms,
-              hours: totalLaborHours,
-              display:
-                (teamProduction && teamProduction.total_labor_display) ||
-                laborHours.total_labor_display,
-            })
-          )}</div>
-        </div>
-        <div class="tank-lifecycle-item">
-          <div class="tank-lifecycle-label">Configured Pieces</div>
-          <div class="tank-lifecycle-value">${Number(tank.piece_count) || (data.pieces || []).length || 1}</div>
-        </div>
-        <div class="tank-lifecycle-item">
-          <div class="tank-lifecycle-label">Completed Pieces</div>
-          <div class="tank-lifecycle-value">${
-            meta.completed_pieces != null
-              ? `${meta.completed_pieces}/${meta.piece_count != null ? meta.piece_count : Number(tank.piece_count) || 1}`
-              : '—'
-          }</div>
-        </div>
-        <div class="tank-lifecycle-item">
-          <div class="tank-lifecycle-label">Current Phase</div>
-          <div class="tank-lifecycle-value">${escapeHtml(meta.current_phase || '—')}</div>
-        </div>
-        <div class="tank-lifecycle-item">
-          <div class="tank-lifecycle-label">Piece</div>
-          <div class="tank-lifecycle-value">${escapeHtml(meta.piece_label || `Piece ${tank.current_piece_number || 1}`)}</div>
-        </div>
-        <div class="tank-lifecycle-item">
-          <div class="tank-lifecycle-label">Started</div>
-          <div class="tank-lifecycle-value">${
-            tank.first_scanned_at || tank.started_at || meta.started_at
-              ? escapeHtml(fmtTankDateTime(tank.first_scanned_at || tank.started_at || meta.started_at))
-              : '—'
-          }</div>
-        </div>
-        <div class="tank-lifecycle-item">
-          <div class="tank-lifecycle-label">Customer / Model</div>
-          <div class="tank-lifecycle-value">${escapeHtml(tank.customer || '—')} / ${escapeHtml(tank.model || '—')}</div>
-        </div>
-        <div class="tank-lifecycle-item">
-          <div class="tank-lifecycle-label">Downtime Total</div>
-          <div class="tank-lifecycle-value">${escapeHtml(data.downtime_total_display || meta.downtime_display || '00:00')}</div>
-        </div>
-        <div class="tank-lifecycle-item">
-          <div class="tank-lifecycle-label">Completed</div>
-          <div class="tank-lifecycle-value">${renderTankCompletedCell(tank)}</div>
-        </div>
-        <div class="tank-lifecycle-item">
-          <div class="tank-lifecycle-label">Duration</div>
-          <div class="tank-lifecycle-value">${escapeHtml(
-            fmtReportDuration({
-              ms: computeTankDurationMsClient(tank),
-              display: tank.duration_display,
-            })
-          )}</div>
-        </div>
-        <div class="tank-lifecycle-item tank-lifecycle-item--wide">
-          <div class="tank-lifecycle-label">Description</div>
-          <div class="tank-lifecycle-value">${escapeHtml(tank.description || 'No description')}</div>
-        </div>
-      </div>
-      ${
-        ((teamProduction && teamProduction.member_breakdown) || []).length
-          ? `<h5 class="tank-report-subsection-title" style="margin-top:16px">Labor breakdown (membership history)</h5>
-             <div class="table-wrap">
-               <table class="tank-report-table">
-                 <thead><tr><th>Employee</th><th>Team(s)</th><th>Time on tank</th></tr></thead>
-                 <tbody>${(teamProduction.member_breakdown || [])
-                   .map(
-                     (m) => `<tr>
-                       <td>${escapeHtml(m.employee_name || '—')}</td>
-                       <td>${escapeHtml(m.team_name || '—')}</td>
-                       <td>${escapeHtml(
-                         fmtReportDuration({
-                           ms: m.total_ms,
-                           hours: m.total_hours,
-                           display: m.total_hours_display,
-                         })
-                       )}</td>
-                     </tr>`
-                   )
-                   .join('')}</tbody>
-               </table>
-             </div>
-             <p class="muted">FAB labor (membership history) — not the same as Total Running Time or Assembly/Testing labor.</p>`
-          : ''
-      }
-      ${(() => {
-        const at = data.assembly_testing;
-        if (!at) return '';
-        const stageEmpRows = ((at.stage_labor && at.stage_labor.by_employee) || [])
-          .flatMap((e) => {
-            const stages = e.by_stage || {};
-            const keys = Object.keys(stages);
-            if (!keys.length) {
-              return [
-                `<tr><td>${escapeHtml(e.employee_name || '—')}</td><td>—</td><td>${escapeHtml(
-                  e.total_display || '0h 0m'
-                )}</td></tr>`,
-              ];
-            }
-            return keys.map(
-              (stage) => `<tr>
-                <td>${escapeHtml(e.employee_name || '—')}</td>
-                <td>${escapeHtml(stage)}</td>
-                <td>${escapeHtml((stages[stage] && stages[stage].total_display) || '0h 0m')}</td>
-              </tr>`
-            );
-          })
-          .join('');
-        const sessionRows = (at.stage_sessions || [])
+  const fabRunningDisplay = fmtReportDuration({
+    ms: overviewTotals.fab_running_ms,
+    display: overviewTotals.fab_running_display,
+    hours:
+      (teamProduction && teamProduction.total_running_hours) != null
+        ? teamProduction.total_running_hours
+        : totalRunningHours,
+  });
+  const assemblyDurationDisplay = fmtReportDuration({
+    ms: overviewTotals.assembly_duration_ms,
+    display: overviewTotals.assembly_duration_display || (at && at.assembly_duration_display),
+  });
+  const totalRunningDisplay = fmtReportDuration({
+    ms: overviewTotals.total_production_running_ms,
+    display: overviewTotals.total_production_running_display,
+  });
+  const fabLaborDisplay = fmtReportDuration({
+    ms: overviewTotals.fab_labor_ms,
+    display: overviewTotals.fab_labor_display,
+    hours: totalLaborHours,
+  });
+  const assemblyLaborDisplay = fmtReportDuration({
+    ms: overviewTotals.assembly_labor_ms,
+    display: overviewTotals.assembly_labor_display || (at && at.total_stage_labor_display),
+  });
+  const totalLaborDisplay = fmtReportDuration({
+    ms: overviewTotals.total_labor_ms,
+    display: overviewTotals.total_labor_display,
+  });
+  const testingElapsedDisplay = fmtReportDuration({
+    ms: overviewTotals.testing_elapsed_ms,
+    display: overviewTotals.testing_elapsed_display || (at && at.testing_elapsed_display),
+  });
+
+  const configuredPieces = Number(tank.piece_count) || pieces.length || 1;
+  const completedPiecesLabel =
+    meta.completed_pieces != null
+      ? `${meta.completed_pieces}/${meta.piece_count != null ? meta.piece_count : configuredPieces}`
+      : '—';
+
+  const notesTable = (rows, emptyText) =>
+    rows.length
+      ? rows
           .map(
-            (s) => `<tr>
-              <td>${escapeHtml(s.stage || '—')}</td>
-              <td>${escapeHtml(s.team_name || '—')}</td>
-              <td>${escapeHtml(s.machine_name || '—')}</td>
-              <td>${s.started_at ? fmtIso(s.started_at) : '—'}</td>
-              <td>${s.ended_at ? fmtIso(s.ended_at) : s.status === 'active' ? 'In progress' : '—'}</td>
-              <td>${escapeHtml(s.duration_display || '—')}</td>
-              <td>${escapeHtml(s.status || '—')}</td>
-            </tr>`
+            (n) => `<tr>
+            <td>${fmtIso(n.created_at)}</td>
+            <td>${escapeHtml(n.note_type || '—')}</td>
+            <td>${n.piece_number != null ? Number(n.piece_number) : '—'}</td>
+            <td>${escapeHtml(n.team_name || '—')}</td>
+            <td>${escapeHtml(n.body || '—')}</td>
+          </tr>`
           )
-          .join('');
-        const attemptRows = (at.test_attempts || [])
-          .map(
-            (a) => `<tr>
-              <td>${escapeHtml(a.result || '—')}</td>
-              <td>${a.attempted_at ? fmtIso(a.attempted_at) : '—'}</td>
-              <td>${escapeHtml(a.tester_employee_name || a.team_name || '—')}</td>
-              <td>${escapeHtml(a.failure_note || '—')}</td>
-            </tr>`
-          )
-          .join('');
-        return `<h5 class="tank-report-subsection-title" style="margin-top:18px">Assembly / Testing</h5>
-          <div class="tank-lifecycle-grid">
-            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">FAB Completed</div><div class="tank-lifecycle-value">${
-              at.fab_completed_at ? escapeHtml(fmtIso(at.fab_completed_at)) : '—'
-            }</div></div>
-            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">Assembly Complete</div><div class="tank-lifecycle-value">${
-              at.assembly_completed_at ? escapeHtml(fmtIso(at.assembly_completed_at)) : '—'
-            }</div></div>
-            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">Testing Complete</div><div class="tank-lifecycle-value">${
-              at.testing_completed_at ? escapeHtml(fmtIso(at.testing_completed_at)) : '—'
-            }</div></div>
-            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">Stage Labor Total</div><div class="tank-lifecycle-value">${escapeHtml(
-              at.total_stage_labor_display || '0h 0m'
-            )}</div></div>
-          </div>
-          ${
-            stageEmpRows
-              ? `<h5 class="tank-report-subsection-title" style="margin-top:12px">Stage labor by employee</h5>
-                 <div class="table-wrap"><table class="tank-report-table">
-                 <thead><tr><th>Employee</th><th>Stage</th><th>Time</th></tr></thead>
-                 <tbody>${stageEmpRows}</tbody></table></div>`
-              : ''
-          }
-          ${
-            sessionRows
-              ? `<h5 class="tank-report-subsection-title" style="margin-top:12px">Stage labor sessions</h5>
-                 <div class="table-wrap"><table class="tank-report-table">
-                 <thead><tr><th>Stage</th><th>Team</th><th>Kiosk</th><th>Start</th><th>End</th><th>Duration</th><th>Status</th></tr></thead>
-                 <tbody>${sessionRows}</tbody></table></div>`
-              : ''
-          }
-          ${
-            attemptRows
-              ? `<h5 class="tank-report-subsection-title" style="margin-top:12px">Test attempts</h5>
-                 <div class="table-wrap"><table class="tank-report-table">
-                 <thead><tr><th>Result</th><th>When</th><th>Tester/Team</th><th>Note</th></tr></thead>
-                 <tbody>${attemptRows}</tbody></table></div>`
-              : '<p class="muted" style="margin-top:8px">No test attempts recorded.</p>'
-          }`;
-      })()}
-    </section>`;
+          .join('')
+      : `<tr><td colspan="5" class="muted">${escapeHtml(emptyText)}</td></tr>`;
+
+  const fabLaborSource =
+    (overviewTotals.fab_labor_members && overviewTotals.fab_labor_members.length
+      ? overviewTotals.fab_labor_members
+      : null) ||
+    (teamProduction && teamProduction.member_breakdown) ||
+    [];
+  const fabLaborTableRows = fabLaborSource
+    .map(
+      (m) => `<tr>
+        <td>${escapeHtml(m.employee_name || '—')}</td>
+        <td>${escapeHtml(m.team_name || '—')}</td>
+        <td>${escapeHtml(
+          m.total_display ||
+            fmtReportDuration({
+              ms: m.total_ms,
+              hours: m.total_hours,
+              display: m.total_hours_display,
+            })
+        )}</td>
+      </tr>`
+    )
+    .join('');
+
+  const fabPieceSummaryRows = (overviewTotals.fab_pieces || [])
+    .map(
+      (p) => `<tr>
+        <td>Piece ${Number(p.piece_number) || 1}</td>
+        <td>${escapeHtml(p.running_display || fmtReportDuration({ ms: p.running_ms }))}</td>
+        <td>${escapeHtml(p.labor_display || fmtReportDuration({ ms: p.labor_ms, hours: p.labor_hours }))}</td>
+      </tr>`
+    )
+    .join('');
 
   const phaseSummaryRows = phaseTimeSummary.length
     ? phaseTimeSummary
@@ -1326,41 +1257,8 @@ function renderTankReport(data) {
           .join('')
       : '';
 
-  const phaseSection = `
-    <section class="tank-report-section tank-report-page" data-report-page="2">
-      <div class="tank-report-page-label">Section 2 · Phase Summary</div>
-      <h4 class="tank-report-section-title">Complete Phase Summary</h4>
-      <div class="table-wrap">
-        <table class="tank-report-table">
-          <thead><tr><th>Phase</th><th>Status</th><th>Time</th><th>Summary</th></tr></thead>
-          <tbody>${phaseSummaryRows}</tbody>
-        </table>
-      </div>
-      ${phaseBlocks}
-    </section>`;
-
-  const notesTable = (rows, emptyText) =>
-    rows.length
-      ? rows
-          .map(
-            (n) => `<tr>
-            <td>${fmtIso(n.created_at)}</td>
-            <td>${escapeHtml(n.note_type || '—')}</td>
-            <td>${n.piece_number != null ? Number(n.piece_number) : '—'}</td>
-            <td>${escapeHtml(n.team_name || '—')}</td>
-            <td>${escapeHtml(n.body || '—')}</td>
-          </tr>`
-          )
-          .join('')
-      : `<tr><td colspan="5" class="muted">${escapeHtml(emptyText)}</td></tr>`;
-
-  const detailSection = `
-    <section class="tank-report-section tank-report-page" data-report-page="3">
-      <div class="tank-report-page-label">Section 3 · Detail History</div>
-      <h4 class="tank-report-section-title">Piece History</h4>
-      ${
-        (data.piece_reports || []).length
-          ? `<div class="piece-history-accordion" id="pieceHistoryAccordion">
+  const pieceHistoryHtml = (data.piece_reports || []).length
+    ? `<div class="piece-history-accordion" id="pieceHistoryAccordion">
               ${(data.piece_reports || [])
                 .map((pr) => {
                   const statusLabel = String(pr.status || 'pending')
@@ -1413,7 +1311,7 @@ function renderTankReport(data) {
                 })
                 .join('')}
             </div>`
-          : `<div class="table-wrap">
+    : `<div class="table-wrap">
         <table class="tank-report-table">
           <thead><tr><th>Piece #</th><th>Status</th><th>Started</th><th>Completed</th><th>Operator</th></tr></thead>
           <tbody>${
@@ -1432,100 +1330,405 @@ function renderTankReport(data) {
               : '<tr><td colspan="5" class="muted">No piece tracking records.</td></tr>'
           }</tbody>
         </table>
-      </div>`
+      </div>`;
+
+  const assemblyStatus = (() => {
+    const st = String(tank.status || '').toLowerCase();
+    if (st === 'assembly_in_progress') return 'Assembly In Progress';
+    if (st === 'ready_for_assembly') return 'Ready for Assembly';
+    if (st === 'ready_for_testing' || st === 'testing_in_progress') return 'Assembly Complete';
+    if (st === 'rework_required') return 'Rework Required (returned from Testing)';
+    if (at && at.assembly_completed_at) return 'Assembly Complete';
+    if (at && at.assembly_started_at) return 'Assembly Started';
+    return '—';
+  })();
+
+  const assemblyEmpRows = ((at && at.stage_labor && at.stage_labor.by_employee) || [])
+    .flatMap((e) => {
+      const stages = e.by_stage || {};
+      const keys = Object.keys(stages).filter((k) => {
+        const up = String(k).toUpperCase();
+        return up === 'ASSEMBLY' || up === 'CORRECTION';
+      });
+      if (!keys.length) {
+        return [
+          `<tr><td>${escapeHtml(e.employee_name || '—')}</td><td>ASSEMBLY</td><td>${escapeHtml(
+            e.total_display || '0h 0m'
+          )}</td></tr>`,
+        ];
       }
+      return keys.map(
+        (stage) => `<tr>
+          <td>${escapeHtml(e.employee_name || '—')}</td>
+          <td>${escapeHtml(stage)}</td>
+          <td>${escapeHtml((stages[stage] && stages[stage].total_display) || '0h 0m')}</td>
+        </tr>`
+      );
+    })
+    .join('');
 
-      <h4 class="tank-report-section-title" style="margin-top:18px">Notes</h4>
-      <div class="table-wrap">
-        <table class="tank-report-table">
-          <thead><tr><th>When</th><th>Type</th><th>Piece</th><th>Team</th><th>Note</th></tr></thead>
-          <tbody>${notesTable(generalNotes, 'No notes recorded.')}</tbody>
-        </table>
+  const assemblySessionRows = ((at && at.stage_sessions) || [])
+    .filter((s) => {
+      const stage = String(s.stage || '').toUpperCase();
+      return stage === 'ASSEMBLY' || stage === 'CORRECTION';
+    })
+    .map(
+      (s) => `<tr>
+        <td>${escapeHtml(s.stage || '—')}</td>
+        <td>${escapeHtml(s.team_name || '—')}</td>
+        <td>${escapeHtml(s.machine_name || '—')}</td>
+        <td>${s.started_at ? fmtIso(s.started_at) : '—'}</td>
+        <td>${s.ended_at ? fmtIso(s.ended_at) : s.status === 'active' ? 'In progress' : '—'}</td>
+        <td>${escapeHtml(s.duration_display || '—')}</td>
+        <td>${escapeHtml(s.status || '—')}</td>
+      </tr>`
+    )
+    .join('');
+
+  const testAttemptRows = ((at && at.test_attempts) || [])
+    .map(
+      (a) => `<tr>
+        <td>${escapeHtml(a.result || '—')}</td>
+        <td>${a.attempted_at ? fmtIso(a.attempted_at) : '—'}</td>
+        <td>${escapeHtml(a.tester_employee_name || a.team_name || '—')}</td>
+        <td>${escapeHtml(a.failure_note || '—')}</td>
+      </tr>`
+    )
+    .join('');
+
+  const overviewSection = `
+    <section class="tank-report-section tank-report-page" data-report-page="1">
+      <div class="tank-report-page-label">Section 1 · Overview</div>
+      <div class="toolbar" style="margin-bottom:12px">
+        <button type="button" class="btn btn-sm btn-primary" id="btnTankReportEditPhase" data-tank-id="${Number(tank.id)}">Edit Phase Time</button>
       </div>
-
-      <h4 class="tank-report-section-title" style="margin-top:18px">Corrections</h4>
-      <div class="table-wrap">
-        <table class="tank-report-table">
-          <thead><tr><th>When</th><th>Type</th><th>Piece</th><th>Team</th><th>Note</th></tr></thead>
-          <tbody>${notesTable(corrections, 'No corrections recorded.')}</tbody>
-        </table>
+      <h4 class="tank-report-section-title">Tank Information</h4>
+      <div class="tank-lifecycle-grid">
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Tank #</div>
+          <div class="tank-lifecycle-value">#${escapeHtml(tank.tank_number)}</div>
+        </div>
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Status</div>
+          <div class="tank-lifecycle-value"><span class="badge ${isActive ? 'badge-in' : 'badge-muted'}">${escapeHtml(statusText)}</span></div>
+        </div>
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Project Name / Model</div>
+          <div class="tank-lifecycle-value">${escapeHtml(tank.customer || '—')} / ${escapeHtml(tank.model || '—')}</div>
+        </div>
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Started</div>
+          <div class="tank-lifecycle-value">${
+            tank.first_scanned_at || tank.started_at || meta.started_at
+              ? escapeHtml(fmtTankDateTime(tank.first_scanned_at || tank.started_at || meta.started_at))
+              : '—'
+          }</div>
+        </div>
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Progress</div>
+          <div class="tank-lifecycle-value">${
+            pct == null
+              ? '—'
+              : `<div class="progress-bar" style="min-width:88px;background:#e2e8f0;border-radius:6px;overflow:hidden;height:10px;display:inline-block;vertical-align:middle;margin-right:8px">
+                   <div style="width:${pct}%;height:100%;background:#2563eb"></div>
+                 </div><span>${pct}%</span>`
+          }</div>
+        </div>
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Configured Pieces</div>
+          <div class="tank-lifecycle-value">${configuredPieces}</div>
+        </div>
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Completed Pieces</div>
+          <div class="tank-lifecycle-value">${completedPiecesLabel}</div>
+        </div>
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Require Test</div>
+          <div class="tank-lifecycle-value">${tankRequiresTestFlag(tank) ? 'Yes' : 'No'}</div>
+        </div>
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Current Phase</div>
+          <div class="tank-lifecycle-value">${escapeHtml(meta.current_phase || '—')}</div>
+        </div>
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Piece</div>
+          <div class="tank-lifecycle-value">${escapeHtml(meta.piece_label || `Piece ${tank.current_piece_number || 1}`)}</div>
+        </div>
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Completed</div>
+          <div class="tank-lifecycle-value">${renderTankCompletedCell(tank)}</div>
+        </div>
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Duration</div>
+          <div class="tank-lifecycle-value">${escapeHtml(
+            fmtReportDuration({
+              ms: computeTankDurationMsClient(tank),
+              display: tank.duration_display,
+            })
+          )}</div>
+        </div>
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Total Running Time</div>
+          <div class="tank-lifecycle-value">${escapeHtml(totalRunningDisplay)}</div>
+        </div>
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Total Labor Time</div>
+          <div class="tank-lifecycle-value">${escapeHtml(totalLaborDisplay)}</div>
+        </div>
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Testing / QA-QC Time</div>
+          <div class="tank-lifecycle-value">${escapeHtml(testingElapsedDisplay)}</div>
+        </div>
+        <div class="tank-lifecycle-item">
+          <div class="tank-lifecycle-label">Downtime Total</div>
+          <div class="tank-lifecycle-value">${escapeHtml(data.downtime_total_display || meta.downtime_display || '00:00')}</div>
+        </div>
+        <div class="tank-lifecycle-item tank-lifecycle-item--wide">
+          <div class="tank-lifecycle-label">Description</div>
+          <div class="tank-lifecycle-value">${escapeHtml(tank.description || 'No description')}</div>
+        </div>
       </div>
+      <p class="muted" style="margin:10px 0 0;font-size:12px">
+        Total Running Time = FAB Running + Assembly Duration.
+        Total Labor Time = FAB Labor + Assembly Labor.
+        Testing / QA-QC Time is reported separately and is not included in either total.
+      </p>
 
-      <h4 class="tank-report-section-title" style="margin-top:18px">Downtime History</h4>
-      <p class="muted">Total downtime: <strong>${escapeHtml(data.downtime_total_display || '00:00')}</strong> (excluded from productive phase hours)</p>
-      <div class="table-wrap">
-        <table class="tank-report-table">
-          <thead><tr><th>Start</th><th>End</th><th>Duration</th><th>Reason</th><th>Note</th><th>Phase</th></tr></thead>
-          <tbody>${
-            downtimeRows.length
-              ? downtimeRows
-                  .map(
-                    (d) => `<tr>
-            <td>${d.started_at ? fmtIso(d.started_at) : '—'}</td>
-            <td>${d.ended_at ? fmtIso(d.ended_at) : d.open ? 'Open' : '—'}</td>
-            <td>${escapeHtml(d.duration_display || '—')}</td>
-            <td>${escapeHtml(d.reason_label || d.reason_code || '—')}</td>
-            <td>${escapeHtml(d.reason_note || '—')}</td>
-            <td>${escapeHtml(d.phase_name || '—')}</td>
-          </tr>`
-                  )
-                  .join('')
-              : '<tr><td colspan="6" class="muted">No downtime recorded.</td></tr>'
-          }</tbody>
-        </table>
-      </div>
+      <h4 class="tank-report-section-title" style="margin-top:18px">Department Breakdown</h4>
+      <div class="tank-report-dept-list">
+        <details class="tank-report-dept-card">
+          <summary class="tank-report-dept-summary">
+            <span class="tank-report-dept-title">FAB SHOP</span>
+            <span class="tank-report-dept-meta">Running: ${escapeHtml(fabRunningDisplay)} | Labor: ${escapeHtml(fabLaborDisplay)}</span>
+          </summary>
+          <div class="tank-report-dept-body">
+            <div class="tank-lifecycle-grid">
+              <div class="tank-lifecycle-item">
+                <div class="tank-lifecycle-label">Winding Machine</div>
+                <div class="tank-lifecycle-value">${escapeHtml(meta.machine_name || '—')}</div>
+              </div>
+              <div class="tank-lifecycle-item">
+                <div class="tank-lifecycle-label">FAB Team</div>
+                <div class="tank-lifecycle-value">${escapeHtml(meta.team_name || teamCompletion.team_name || '—')}</div>
+              </div>
+              <div class="tank-lifecycle-item">
+                <div class="tank-lifecycle-label">FAB Running Time</div>
+                <div class="tank-lifecycle-value">${escapeHtml(fabRunningDisplay)}</div>
+              </div>
+              <div class="tank-lifecycle-item">
+                <div class="tank-lifecycle-label">FAB Labor Time</div>
+                <div class="tank-lifecycle-value">${escapeHtml(fabLaborDisplay)}</div>
+              </div>
+              <div class="tank-lifecycle-item">
+                <div class="tank-lifecycle-label">FAB Downtime</div>
+                <div class="tank-lifecycle-value">${escapeHtml(data.downtime_total_display || meta.downtime_display || '00:00')}</div>
+              </div>
+              <div class="tank-lifecycle-item">
+                <div class="tank-lifecycle-label">Configured / Completed Pieces</div>
+                <div class="tank-lifecycle-value">${configuredPieces} / ${
+                  meta.completed_pieces != null ? meta.completed_pieces : '—'
+                }</div>
+              </div>
+            </div>
 
-      <h4 class="tank-report-section-title" style="margin-top:18px">QA/QC History</h4>
-      <p class="muted">QA/QC duration is tracked separately and excluded from productive phase time.</p>
-      <div class="table-wrap">
-        <table class="tank-report-table">
-          <thead>
-            <tr>
-              <th>Piece</th>
-              <th>Phase</th>
-              <th>Opened At</th>
-              <th>Resolved At</th>
-              <th>Duration</th>
-              <th>Team</th>
-              <th>Machine</th>
-              <th>Issue Note</th>
-              <th>Resolution Note</th>
-              <th>Resolved By</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody>${
-            qaQcRows.length
-              ? qaQcRows
-                  .map(
-                    (q) => `<tr>
-            <td>${q.piece_number != null ? `Piece ${Number(q.piece_number)}` : '—'}</td>
-            <td>${escapeHtml(q.phase_name || q.phase_code || '—')}</td>
-            <td>${q.reported_at ? fmtIso(q.reported_at) : '—'}</td>
-            <td>${q.resolved_at ? fmtIso(q.resolved_at) : q.status === 'open' ? 'Open' : '—'}</td>
-            <td>${escapeHtml(q.duration_display || '—')}</td>
-            <td>${escapeHtml(q.team_name || '—')}</td>
-            <td>${escapeHtml(q.machine_name || '—')}</td>
-            <td>${escapeHtml(q.issue_note || q.notes || '—')}</td>
-            <td>${escapeHtml(q.resolution_note || '—')}</td>
-            <td>${escapeHtml(q.resolved_by || '—')}</td>
-            <td><span class="badge ${q.status === 'open' ? 'badge-warn' : 'badge-muted'}">${
-              q.status === 'open' ? 'Open' : 'Resolved'
-            }</span></td>
-          </tr>`
-                  )
-                  .join('')
-              : '<tr><td colspan="11" class="muted">No QA/QC issues recorded.</td></tr>'
-          }</tbody>
-        </table>
+            <h5 class="tank-report-subsection-title" style="margin-top:14px">FAB Labor by Employee</h5>
+            <div class="table-wrap">
+              <table class="tank-report-table">
+                <thead><tr><th>Employee</th><th>Team(s)</th><th>Time on tank</th></tr></thead>
+                <tbody>${
+                  fabLaborTableRows ||
+                  '<tr><td colspan="3" class="muted">No FAB membership labor recorded.</td></tr>'
+                }</tbody>
+              </table>
+            </div>
+
+            ${
+              fabPieceSummaryRows
+                ? `<h5 class="tank-report-subsection-title" style="margin-top:14px">FAB Piece Running Summary</h5>
+                   <div class="table-wrap">
+                     <table class="tank-report-table">
+                       <thead><tr><th>Piece</th><th>Running</th><th>Labor</th></tr></thead>
+                       <tbody>${fabPieceSummaryRows}</tbody>
+                     </table>
+                   </div>`
+                : ''
+            }
+
+            <h5 class="tank-report-subsection-title" style="margin-top:14px">Phase Summary</h5>
+            <div class="table-wrap">
+              <table class="tank-report-table">
+                <thead><tr><th>Phase</th><th>Status</th><th>Time</th><th>Summary</th></tr></thead>
+                <tbody>${phaseSummaryRows}</tbody>
+              </table>
+            </div>
+            ${phaseBlocks}
+
+            <h5 class="tank-report-subsection-title" style="margin-top:14px">Piece History</h5>
+            ${pieceHistoryHtml}
+
+            <h5 class="tank-report-subsection-title" style="margin-top:14px">Notes</h5>
+            <div class="table-wrap">
+              <table class="tank-report-table">
+                <thead><tr><th>When</th><th>Type</th><th>Piece</th><th>Team</th><th>Note</th></tr></thead>
+                <tbody>${notesTable(generalNotes, 'No notes recorded.')}</tbody>
+              </table>
+            </div>
+
+            <h5 class="tank-report-subsection-title" style="margin-top:14px">Corrections / Rework Notes</h5>
+            <div class="table-wrap">
+              <table class="tank-report-table">
+                <thead><tr><th>When</th><th>Type</th><th>Piece</th><th>Team</th><th>Note</th></tr></thead>
+                <tbody>${notesTable(corrections, 'No corrections recorded.')}</tbody>
+              </table>
+            </div>
+
+            <h5 class="tank-report-subsection-title" style="margin-top:14px">Downtime History</h5>
+            <p class="muted">Total downtime: <strong>${escapeHtml(
+              data.downtime_total_display || '00:00'
+            )}</strong> (excluded from productive phase hours)</p>
+            <div class="table-wrap">
+              <table class="tank-report-table">
+                <thead><tr><th>Start</th><th>End</th><th>Duration</th><th>Reason</th><th>Note</th><th>Phase</th></tr></thead>
+                <tbody>${
+                  downtimeRows.length
+                    ? downtimeRows
+                        .map(
+                          (d) => `<tr>
+                  <td>${d.started_at ? fmtIso(d.started_at) : '—'}</td>
+                  <td>${d.ended_at ? fmtIso(d.ended_at) : d.open ? 'Open' : '—'}</td>
+                  <td>${escapeHtml(d.duration_display || '—')}</td>
+                  <td>${escapeHtml(d.reason_label || d.reason_code || '—')}</td>
+                  <td>${escapeHtml(d.reason_note || '—')}</td>
+                  <td>${escapeHtml(d.phase_name || '—')}</td>
+                </tr>`
+                        )
+                        .join('')
+                    : '<tr><td colspan="6" class="muted">No downtime recorded.</td></tr>'
+                }</tbody>
+              </table>
+            </div>
+
+            <h5 class="tank-report-subsection-title" style="margin-top:14px">FAB QA/QC History</h5>
+            <p class="muted">QA/QC pause duration is tracked separately and excluded from productive FAB phase time.</p>
+            <div class="table-wrap">
+              <table class="tank-report-table">
+                <thead>
+                  <tr>
+                    <th>Piece</th><th>Phase</th><th>Opened At</th><th>Resolved At</th><th>Duration</th>
+                    <th>Team</th><th>Machine</th><th>Issue Note</th><th>Resolution Note</th><th>Resolved By</th><th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>${
+                  qaQcRows.length
+                    ? qaQcRows
+                        .map(
+                          (q) => `<tr>
+                  <td>${q.piece_number != null ? `Piece ${Number(q.piece_number)}` : '—'}</td>
+                  <td>${escapeHtml(q.phase_name || q.phase_code || '—')}</td>
+                  <td>${q.reported_at ? fmtIso(q.reported_at) : '—'}</td>
+                  <td>${q.resolved_at ? fmtIso(q.resolved_at) : q.status === 'open' ? 'Open' : '—'}</td>
+                  <td>${escapeHtml(q.duration_display || '—')}</td>
+                  <td>${escapeHtml(q.team_name || '—')}</td>
+                  <td>${escapeHtml(q.machine_name || '—')}</td>
+                  <td>${escapeHtml(q.issue_note || q.notes || '—')}</td>
+                  <td>${escapeHtml(q.resolution_note || '—')}</td>
+                  <td>${escapeHtml(q.resolved_by || '—')}</td>
+                  <td><span class="badge ${q.status === 'open' ? 'badge-warn' : 'badge-muted'}">${
+                    q.status === 'open' ? 'Open' : 'Resolved'
+                  }</span></td>
+                </tr>`
+                        )
+                        .join('')
+                    : '<tr><td colspan="11" class="muted">No QA/QC issues recorded.</td></tr>'
+                }</tbody>
+              </table>
+            </div>
+          </div>
+        </details>
+
+        <details class="tank-report-dept-card">
+          <summary class="tank-report-dept-summary">
+            <span class="tank-report-dept-title">ASSEMBLY</span>
+            <span class="tank-report-dept-meta">Duration: ${escapeHtml(assemblyDurationDisplay)} | Labor: ${escapeHtml(assemblyLaborDisplay)}</span>
+          </summary>
+          <div class="tank-report-dept-body">
+            <div class="tank-lifecycle-grid">
+              <div class="tank-lifecycle-item">
+                <div class="tank-lifecycle-label">Assembly Status</div>
+                <div class="tank-lifecycle-value">${escapeHtml(assemblyStatus)}</div>
+              </div>
+              <div class="tank-lifecycle-item">
+                <div class="tank-lifecycle-label">Assembly Duration</div>
+                <div class="tank-lifecycle-value">${escapeHtml(assemblyDurationDisplay)}</div>
+              </div>
+              <div class="tank-lifecycle-item">
+                <div class="tank-lifecycle-label">Assembly Labor Time</div>
+                <div class="tank-lifecycle-value">${escapeHtml(assemblyLaborDisplay)}</div>
+              </div>
+              <div class="tank-lifecycle-item">
+                <div class="tank-lifecycle-label">Assembly Started</div>
+                <div class="tank-lifecycle-value">${
+                  at && at.assembly_started_at ? escapeHtml(fmtIso(at.assembly_started_at)) : '—'
+                }</div>
+              </div>
+              <div class="tank-lifecycle-item">
+                <div class="tank-lifecycle-label">Assembly Finished</div>
+                <div class="tank-lifecycle-value">${
+                  at && at.assembly_completed_at ? escapeHtml(fmtIso(at.assembly_completed_at)) : '—'
+                }</div>
+              </div>
+              <div class="tank-lifecycle-item">
+                <div class="tank-lifecycle-label">FAB Completed</div>
+                <div class="tank-lifecycle-value">${
+                  at && at.fab_completed_at ? escapeHtml(fmtIso(at.fab_completed_at)) : '—'
+                }</div>
+              </div>
+              <div class="tank-lifecycle-item">
+                <div class="tank-lifecycle-label">Testing / QA-QC Elapsed</div>
+                <div class="tank-lifecycle-value">${escapeHtml(testingElapsedDisplay)}</div>
+              </div>
+            </div>
+
+            <h5 class="tank-report-subsection-title" style="margin-top:14px">Assembly Labor by Employee</h5>
+            <div class="table-wrap">
+              <table class="tank-report-table">
+                <thead><tr><th>Employee</th><th>Stage</th><th>Time</th></tr></thead>
+                <tbody>${
+                  assemblyEmpRows ||
+                  '<tr><td colspan="3" class="muted">No Assembly labor recorded.</td></tr>'
+                }</tbody>
+              </table>
+            </div>
+
+            <h5 class="tank-report-subsection-title" style="margin-top:14px">Assembly Labor Sessions</h5>
+            <div class="table-wrap">
+              <table class="tank-report-table">
+                <thead><tr><th>Stage</th><th>Team</th><th>Kiosk</th><th>Start</th><th>End</th><th>Duration</th><th>Status</th></tr></thead>
+                <tbody>${
+                  assemblySessionRows ||
+                  '<tr><td colspan="7" class="muted">No Assembly labor sessions.</td></tr>'
+                }</tbody>
+              </table>
+            </div>
+
+            <h5 class="tank-report-subsection-title" style="margin-top:14px">Test Attempts</h5>
+            <div class="table-wrap">
+              <table class="tank-report-table">
+                <thead><tr><th>Result</th><th>When</th><th>Tester/Team</th><th>Note</th></tr></thead>
+                <tbody>${
+                  testAttemptRows ||
+                  '<tr><td colspan="4" class="muted">No test attempts recorded.</td></tr>'
+                }</tbody>
+              </table>
+            </div>
+          </div>
+        </details>
       </div>
     </section>`;
 
   return `
     <div id="tankReportPrintArea" class="tank-report-print-area">
       ${overviewSection}
-      ${phaseSection}
-      ${detailSection}
     </div>`;
 }
 
@@ -1852,6 +2055,7 @@ window.addEventListener('load', () => {
   void refreshAll();
   void refreshAuthUi();
   setInterval(() => void loadProductionNotes(), 30000);
+  startManagerTankListPolling();
   try {
     const params = new URLSearchParams(window.location.search || '');
     const reportId = Number(params.get('tankReport'));

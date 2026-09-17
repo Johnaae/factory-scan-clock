@@ -62,8 +62,8 @@
               <input id="tankNumber" type="text" placeholder="e.g. 1023 or FGT-2201" autocomplete="off" />
             </div>
             <div class="field">
-              <label for="tankCustomer" data-i18n="tank.customer">Customer</label>
-              <input id="tankCustomer" type="text" placeholder="Customer" autocomplete="off" />
+              <label for="tankCustomer" data-i18n="tank.customer">Project Name</label>
+              <input id="tankCustomer" type="text" placeholder="Project Name" autocomplete="off" />
             </div>
             <div class="field">
               <label for="tankModel" data-i18n="tank.model">Model</label>
@@ -90,6 +90,10 @@
                 <option value="2">2</option>
                 <option value="3">3</option>
                 <option value="4">4</option>
+                <option value="5">5</option>
+                <option value="6">6</option>
+                <option value="7">7</option>
+                <option value="8">8</option>
               </select>
             </div>
             <div class="field manager-checkbox-field">
@@ -140,7 +144,7 @@
               <thead id="tankTableHead">
                 <tr>
                   <th><input type="checkbox" id="tankSelectAll" aria-label="Select all" /></th>
-                  <th>Tank #</th><th>Customer</th><th>Model</th><th>Pieces</th><th>Status</th><th>Created</th><th>Started</th><th>Duration</th><th>Actions</th>
+                  <th>Tank #</th><th>Project Name</th><th>Model</th><th>Pieces</th><th>Status</th><th>Created</th><th>Started</th><th>Duration</th><th>Actions</th>
                 </tr>
               </thead>
               <tbody id="tankBody"></tbody>
@@ -387,7 +391,7 @@
                 <option value="archived">Completed</option>
               </select>
             </div>
-            <div class="field"><label for="editTankCustomer">Customer</label><input id="editTankCustomer" type="text" /></div>
+            <div class="field"><label for="editTankCustomer">Project Name</label><input id="editTankCustomer" type="text" /></div>
             <div class="field"><label for="editTankModel">Model</label><input id="editTankModel" type="text" /></div>
             <div class="field"><label for="editTankPriority">Priority</label>
               <select id="editTankPriority">
@@ -406,6 +410,10 @@
                 <option value="2">2</option>
                 <option value="3">3</option>
                 <option value="4">4</option>
+                <option value="5">5</option>
+                <option value="6">6</option>
+                <option value="7">7</option>
+                <option value="8">8</option>
               </select>
               <p class="muted" id="editTankPieceCountHint" style="margin:6px 0 0;font-size:12px"></p>
             </div>

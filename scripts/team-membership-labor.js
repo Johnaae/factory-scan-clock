@@ -679,8 +679,12 @@ function createTeamMembershipAndLabor(pool, helpers = {}) {
       member_breakdown,
       hours_per_piece: [...byPiece.values()].map((p) => ({
         piece_number: p.piece_number,
+        running_ms: p.running_ms,
         running_hours: roundHours2(p.running_ms / 3600000),
+        running_display: formatXhYmFromMs(p.running_ms),
+        labor_ms: p.labor_ms,
         labor_hours: roundHours2(p.labor_ms / 3600000),
+        labor_display: formatXhYmFromMs(p.labor_ms),
       })),
     };
   }
