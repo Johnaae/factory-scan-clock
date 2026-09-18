@@ -72,6 +72,11 @@ function createTeamMembershipAndLabor(pool, helpers = {}) {
     return { startMs, endMs };
   }
 
+  /**
+   * One-time style backfill only.
+   * Never reopen Employee-Out / End Shift closed intervals merely because the
+   * employee remains on the permanent team_members roster.
+   */
   async function backfillOpenMembershipsIfNeeded() {
     await pool.query(
       `INSERT INTO employee_team_memberships (employee_id, team_id, joined_at, left_at, source, reason)
@@ -80,7 +85,7 @@ function createTeamMembershipAndLabor(pool, helpers = {}) {
        WHERE tm.active = 1 AND tm.employee_id IS NOT NULL
          AND NOT EXISTS (
            SELECT 1 FROM employee_team_memberships m
-           WHERE m.employee_id = tm.employee_id AND m.left_at IS NULL
+           WHERE m.employee_id = tm.employee_id AND m.team_id = tm.team_id
          )`
     );
   }

@@ -796,6 +796,12 @@ UPDATE machines SET workflow = 'winding' WHERE workflow = 'winding' OR name ILIK
     ) sub
     WHERE t.id = sub.tank_id AND t.first_scanned_at IS NULL
   `);
+  // Do NOT reopen shift labor for Employee-Out workers.
+  // Permanent team_members roster is not the same as active shift labor
+  // (employee_team_memberships with left_at IS NULL). This additive pass runs on
+  // every boot, so a "missing open membership" backfill would undo Employee Out.
+  // One-time migrate only: create history only when this employee/team pair has
+  // never had any membership row at all.
   try {
     await client.query(`
       INSERT INTO employee_team_memberships (employee_id, team_id, joined_at, left_at, source, reason)
@@ -804,7 +810,7 @@ UPDATE machines SET workflow = 'winding' WHERE workflow = 'winding' OR name ILIK
       WHERE tm.active = 1 AND tm.employee_id IS NOT NULL
         AND NOT EXISTS (
           SELECT 1 FROM employee_team_memberships m
-          WHERE m.employee_id = tm.employee_id AND m.left_at IS NULL
+          WHERE m.employee_id = tm.employee_id AND m.team_id = tm.team_id
         )
     `);
   } catch (err) {
