@@ -172,15 +172,55 @@ function displayMachineName(name) {
   return normalizeWindingMachineAreaName(n) || n;
 }
 
+const MACHINE_WORKFLOWS = Object.freeze({
+  WINDING: 'winding',
+  ASSEMBLY_TESTING: 'assembly_testing',
+  QA_TESTING: 'qa_testing',
+});
+
+const MACHINE_WORKFLOW_LABELS = Object.freeze({
+  winding: 'Winding (FAB)',
+  assembly_testing: 'Assembly + Testing',
+  qa_testing: 'QA/QC',
+});
+
+/**
+ * Canonical workflow tokens accepted from API / DB.
+ * Unknown non-empty values return null (callers should 400 on create).
+ * Empty/missing returns winding only when allowDefault is true.
+ */
+function parseMachineWorkflow(raw, opts = {}) {
+  const allowDefault = opts.allowDefault !== false;
+  if (raw == null || String(raw).trim() === '') {
+    return allowDefault ? MACHINE_WORKFLOWS.WINDING : null;
+  }
+  const w = String(raw)
+    .trim()
+    .toLowerCase()
+    .replace(/[\s/-]+/g, '_');
+  if (w === 'winding' || w === 'fab' || w === 'winding_fab') return MACHINE_WORKFLOWS.WINDING;
+  if (w === 'assembly_testing' || w === 'assembly') return MACHINE_WORKFLOWS.ASSEMBLY_TESTING;
+  if (w === 'qa_testing' || w === 'qa_qc' || w === 'qaqc' || w === 'qa') {
+    return MACHINE_WORKFLOWS.QA_TESTING;
+  }
+  return null;
+}
+
+function normalizeMachineWorkflow(raw) {
+  return parseMachineWorkflow(raw, { allowDefault: true }) || MACHINE_WORKFLOWS.WINDING;
+}
+
+function machineWorkflowLabel(workflow) {
+  const w = normalizeMachineWorkflow(workflow);
+  return MACHINE_WORKFLOW_LABELS[w] || MACHINE_WORKFLOW_LABELS.winding;
+}
+
 function mapMachineForClient(row) {
   if (!row) return null;
   const slug = String(row.kiosk_slug || slugFromMachineName(row.name))
     .trim()
     .toLowerCase();
-  const workflowRaw = String(row.workflow || 'winding')
-    .trim()
-    .toLowerCase();
-  const workflow = workflowRaw === 'assembly_testing' ? 'assembly_testing' : 'winding';
+  const workflow = normalizeMachineWorkflow(row.workflow);
   return {
     id: Number(row.id),
     name: displayMachineName(row.name),
@@ -189,7 +229,7 @@ function mapMachineForClient(row) {
     sort_order: Number(row.sort_order) || 0,
     active: Number(row.active) !== 0,
     workflow,
-    workflow_label: workflow === 'assembly_testing' ? 'Assembly + Testing' : 'Winding (FAB)',
+    workflow_label: machineWorkflowLabel(workflow),
   };
 }
 
@@ -1452,13 +1492,8 @@ function createPhase1ProductionLogic(deps) {
         name: displayMachineName(m.name),
         slug: String(m.kiosk_slug || slugFromMachineName(m.name)).toLowerCase(),
         kiosk_url: kioskUrlForSlug(m.kiosk_slug || slugFromMachineName(m.name)),
-        workflow: String(m.workflow || 'winding').toLowerCase() === 'assembly_testing'
-          ? 'assembly_testing'
-          : 'winding',
-        workflow_label:
-          String(m.workflow || 'winding').toLowerCase() === 'assembly_testing'
-            ? 'Assembly + Testing'
-            : 'Winding (FAB)',
+        workflow: normalizeMachineWorkflow(m.workflow),
+        workflow_label: machineWorkflowLabel(m.workflow),
         current_team: currentTeam,
         assigned_team: assignedTeam,
         // Selected tank = kiosk focus only (optional highlight), not the sole display.
@@ -4210,6 +4245,11 @@ module.exports = {
   slugFromMachineName,
   kioskUrlForSlug,
   mapMachineForClient,
+  normalizeMachineWorkflow,
+  parseMachineWorkflow,
+  machineWorkflowLabel,
+  MACHINE_WORKFLOWS,
+  MACHINE_WORKFLOW_LABELS,
   displayMachineName,
   countActiveProduction,
 };

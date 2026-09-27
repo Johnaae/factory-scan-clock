@@ -56,9 +56,15 @@ function openRemoveModal(machine) {
 
 function workflowBadgeHtml(m) {
   const wf = String(m.workflow || 'winding').toLowerCase();
-  const isAsm = wf === 'assembly_testing';
-  const label = m.workflow_label || (isAsm ? 'Assembly + Testing' : 'Winding (FAB)');
-  const cls = isAsm ? 'ma-workflow-badge ma-workflow-badge--assembly' : 'ma-workflow-badge ma-workflow-badge--winding';
+  let label = m.workflow_label || 'Winding (FAB)';
+  let cls = 'ma-workflow-badge ma-workflow-badge--winding';
+  if (wf === 'assembly_testing') {
+    label = m.workflow_label || 'Assembly + Testing';
+    cls = 'ma-workflow-badge ma-workflow-badge--assembly';
+  } else if (wf === 'qa_testing') {
+    label = m.workflow_label || 'QA/QC';
+    cls = 'ma-workflow-badge ma-workflow-badge--qa';
+  }
   return `<span class="${cls}">${escapeHtml(label)}</span>`;
 }
 

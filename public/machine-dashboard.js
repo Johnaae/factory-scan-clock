@@ -16,8 +16,36 @@
       .replace(/"/g, '&quot;');
   }
 
+  function requestError(result, fallback) {
+    const MS = root.ManagerSession;
+    const r = result || {};
+    const err = new Error(MS ? MS.describe(r, fallback) : (r.data && r.data.message) || fallback);
+    err.kind = r.kind || 'client';
+    return err;
+  }
+
+  function isExpired() {
+    return Boolean(root.ManagerSession && root.ManagerSession.isExpired());
+  }
+
+  /** Keep already-rendered data on transient failures; the shared banner flags it as stale. */
+  function keepStaleOnError(err, hasData) {
+    return Boolean(root.ManagerSession && hasData && root.ManagerSession.isTransient(err));
+  }
+
+  function onSessionEvents(refresh) {
+    if (!root.ManagerSession) return;
+    root.ManagerSession.on('restored', () => void refresh());
+    root.ManagerSession.on('retry', () => void refresh());
+  }
+
   async function fetchJson(url, opts) {
     const options = opts || {};
+    if (root.ManagerSession) {
+      const r = await root.ManagerSession.request(url, { cache: 'no-store', ...options });
+      if (!r.res) throw requestError(r, 'Network error');
+      return { res: r.res, data: r.data, result: r };
+    }
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
     const timer = controller
       ? setTimeout(() => controller.abort(), options.timeoutMs || FETCH_TIMEOUT_MS)
@@ -524,14 +552,14 @@
   }
 
   async function fetchMachines() {
-    const { res, data } = await fetchJson('/api/manager/machines');
-    if (!res.ok || !data.ok) throw new Error((data && data.message) || 'Could not load machines');
+    const { res, data, result } = await fetchJson('/api/manager/machines');
+    if (!res.ok || !data.ok) throw requestError(result || { data }, 'Could not load machines');
     return data.machines || [];
   }
 
   async function fetchAssemblyMachines() {
-    const { res, data } = await fetchJson('/api/manager/assembly-machines');
-    if (!res.ok || !data.ok) throw new Error((data && data.message) || 'Could not load assembly machines');
+    const { res, data, result } = await fetchJson('/api/manager/assembly-machines');
+    if (!res.ok || !data.ok) throw requestError(result || { data }, 'Could not load assembly machines');
     return data.machines || [];
   }
 
@@ -580,14 +608,14 @@
   }
 
   async function fetchOpenAlerts() {
-    const { res, data } = await fetchJson('/api/manager/alerts?status=open');
-    if (!res.ok || !data.ok) throw new Error((data && data.message) || 'Could not load alerts');
+    const { res, data, result } = await fetchJson('/api/manager/alerts?status=open');
+    if (!res.ok || !data.ok) throw requestError(result || { data }, 'Could not load alerts');
     return data.alerts || [];
   }
 
   async function resolveAlert(id) {
-    const { res, data } = await fetchJson(`/api/manager/alerts/${Number(id)}/resolve`, { method: 'PATCH' });
-    if (!res.ok || !data.ok) throw new Error((data && data.message) || 'Could not resolve alert');
+    const { res, data, result } = await fetchJson(`/api/manager/alerts/${Number(id)}/resolve`, { method: 'PATCH' });
+    if (!res.ok || !data.ok) throw requestError(result || { data }, 'Could not resolve alert');
   }
 
   function wireResolveButtons(container, onResolved) {
@@ -622,6 +650,7 @@
 
     async function refreshAlerts() {
       if (!alertStripEl && !options.showAlertsOnCards) return;
+      if (isExpired()) return;
       try {
         const alerts = await fetchOpenAlerts();
         if (alertStripEl) {
@@ -655,6 +684,7 @@
     }
 
     async function refresh() {
+      if (isExpired()) return;
       try {
         const machines = await fetchMachines();
         if (!machines.length) {
@@ -665,6 +695,7 @@
         syncCards(machines);
         if (options.showAlertsOnCards !== false) await refreshAlerts();
       } catch (err) {
+        if (keepStaleOnError(err, Boolean(el.dataset.machineSignature))) return;
         el.dataset.machineSignature = '';
         el.innerHTML = renderLoadError(err.message || 'Could not load machines', 'machines');
         const btn = el.querySelector('[data-retry]');
@@ -682,6 +713,7 @@
       void refresh();
     };
     root.addEventListener('factory:phase-time-edited', onPhaseEdited);
+    onSessionEvents(refresh);
     const timer = setInterval(() => void refresh(), POLL_MS);
     let alertTimer = null;
     if (alertStripEl) {
@@ -736,6 +768,7 @@
     }
 
     async function refresh() {
+      if (isExpired()) return;
       try {
         const machines = await fetchAssemblyMachines();
         if (!machines.length) {
@@ -745,6 +778,7 @@
         }
         syncCards(machines);
       } catch (err) {
+        if (keepStaleOnError(err, Boolean(el.dataset.machineSignature))) return;
         el.dataset.machineSignature = '';
         el.innerHTML = renderLoadError(err.message || 'Could not load assembly machines', 'assembly');
         const retry = el.querySelector('[data-retry]');
@@ -753,6 +787,7 @@
     }
 
     void refresh();
+    onSessionEvents(refresh);
     const timer = setInterval(() => void refresh(), options.pollMs || POLL_MS);
     return {
       refresh,

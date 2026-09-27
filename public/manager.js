@@ -106,6 +106,13 @@ function setAlert(el, message, type) {
 }
 
 async function apiJson(url, opts) {
+  const MS = window.ManagerSession;
+  if (MS) {
+    const r = await MS.request(url, opts);
+    let data = r.data || {};
+    if (r.kind !== 'ok' && r.kind !== 'client') data = { ...data, ok: false, message: MS.describe(r, data.message) };
+    return { res: r.res || { ok: false, status: 0 }, data, kind: r.kind };
+  }
   const res = await fetch(url, opts);
   const text = await res.text();
   let data = {};
@@ -117,6 +124,14 @@ async function apiJson(url, opts) {
     }
   }
   return { res, data };
+}
+
+function managerSessionExpired() {
+  return Boolean(window.ManagerSession && window.ManagerSession.isExpired());
+}
+
+function isTransientKind(kind) {
+  return Boolean(window.ManagerSession && window.ManagerSession.isTransient(kind));
 }
 
 function apiErrorMessage(data, fallback) {
@@ -145,6 +160,10 @@ function tankIsActive(t) {
     st === '' ||
     st === 'ready_for_assembly' ||
     st === 'assembly_in_progress' ||
+    st === 'ready_for_qa' ||
+    st === 'qa_in_progress' ||
+    st === 'qa_failed' ||
+    st === 'testing_failed' ||
     st === 'ready_for_testing' ||
     st === 'testing_in_progress' ||
     st === 'ready_for_dome_install' ||
@@ -179,9 +198,13 @@ function computeTankDurationMsClient(t) {
   const start = new Date(startIso).getTime();
   if (Number.isNaN(start)) return 0;
   // Production Total Running Time freezes at Assembly FINISH.
-  if (t.assembly_completed_at) {
+  if (t.assembly_completed_at && st !== 'removed_from_assembly') {
     const asmEnd = new Date(t.assembly_completed_at).getTime();
     if (!Number.isNaN(asmEnd)) return Math.max(0, asmEnd - start);
+  }
+  if (st === 'removed_from_assembly' && t.assembly_removed_at) {
+    const removed = new Date(t.assembly_removed_at).getTime();
+    if (!Number.isNaN(removed)) return Math.max(0, removed - start);
   }
   let end = Date.now();
   if (!tankIsActive(t) && t.completed_at) {
@@ -215,6 +238,9 @@ function renderTankCompletedCell(t) {
   const st = String((t && t.status) || '').toLowerCase();
   if (st === 'waiting') {
     return '<span class="tank-lifecycle-in-progress">Waiting</span>';
+  }
+  if (st === 'removed_from_assembly') {
+    return '<span class="tank-lifecycle-muted">Removed from Assembly</span>';
   }
   if (tankIsActive(t)) {
     return '<span class="tank-lifecycle-in-progress">In Progress</span>';
@@ -340,12 +366,23 @@ function statusBadgeFor(value, labelOverride) {
 
 function tankStatusLabel(t) {
   const st = String((t && t.status) || 'active').toLowerCase();
+  if (t && t.testing_status_label && (st === 'testing_in_progress' || st === 'testing_failed')) {
+    return t.testing_status_label;
+  }
   if (st === 'archived') return 'Completed';
   if (st === 'rework_required') return 'Rework Required';
-  if (st === 'ready_for_assembly') return 'Ready for Assembly';
-  if (st === 'assembly_in_progress') return 'Assembly';
-  if (st === 'ready_for_testing') return 'Ready for Testing';
-  if (st === 'testing_in_progress') return 'Testing';
+  if (st === 'ready_for_assembly') return 'FAB Complete / Ready for Assembly';
+  if (st === 'assembly_in_progress') return 'Assembly Working';
+  if (st === 'removed_from_assembly') return 'Removed from Assembly';
+  if (st === 'ready_for_qa') return 'Ready for QA';
+  if (st === 'qa_in_progress') return 'QA In Progress';
+  if (st === 'qa_failed') return 'QA Failed / Hold';
+  if (st === 'testing_failed') return 'Testing Failed — Hold';
+  if (st === 'ready_for_testing') return 'QA Complete / Ready for Testing';
+  if (st === 'testing_in_progress') {
+    if (t && t.is_testing_retest) return 'Testing — Retest';
+    return 'Testing';
+  }
   if (st === 'ready_for_dome_install' || st === 'ready_for_final_completion') return 'Ready for Dome Install';
   if (t && t.production_status === 'Ready to Complete') return 'Ready to Complete';
   if (st === 'waiting') return 'Waiting';
@@ -358,9 +395,19 @@ function tankStatusBadge(t) {
   if (st === 'archived') return '<span class="badge badge-muted">Completed</span>';
   if (st === 'rework_required') return '<span class="badge badge-warn">Rework Required</span>';
   if (st === 'ready_for_assembly') return '<span class="badge badge-warn">Ready for Assembly</span>';
-  if (st === 'assembly_in_progress') return '<span class="badge badge-in">Assembly</span>';
+  if (st === 'assembly_in_progress') return '<span class="badge badge-in">Assembly Working</span>';
+  if (st === 'removed_from_assembly') {
+    return '<span class="badge badge-removed">Removed from Assembly</span>';
+  }
+  if (st === 'ready_for_qa') return '<span class="badge badge-warn">Ready for QA</span>';
+  if (st === 'qa_in_progress') return '<span class="badge badge-in">QA In Progress</span>';
+  if (st === 'qa_failed') return '<span class="badge badge-warn">QA Failed / Hold</span>';
+  if (st === 'testing_failed') return '<span class="badge badge-warn">Testing Failed — Hold</span>';
   if (st === 'ready_for_testing') return '<span class="badge badge-warn">Ready for Testing</span>';
-  if (st === 'testing_in_progress') return '<span class="badge badge-in">Testing</span>';
+  if (st === 'testing_in_progress') {
+    const label = t && t.is_testing_retest ? 'Testing — Retest' : 'Testing';
+    return `<span class="badge badge-in">${escapeHtml(label)}</span>`;
+  }
   if (st === 'ready_for_dome_install' || st === 'ready_for_final_completion') {
     return '<span class="badge badge-warn">Ready for Dome Install</span>';
   }
@@ -413,6 +460,7 @@ function previousStatusLabel(status) {
   if (st === 'rework_required') return 'Rework Required';
   if (st === 'ready_for_assembly') return 'Ready for Assembly';
   if (st === 'assembly_in_progress') return 'Assembly In Progress';
+  if (st === 'removed_from_assembly') return 'Removed from Assembly';
   if (st === 'ready_for_testing') return 'Ready for Testing';
   if (st === 'testing_in_progress') return 'Testing In Progress';
   if (st === 'ready_for_dome_install' || st === 'ready_for_final_completion') return 'Ready for Dome Install';
@@ -508,10 +556,20 @@ function buildTankMoreMenuHtml(btn) {
   } else if (statusRaw === 'archived') {
     statusAction = `<button type="button" role="menuitem" class="tank-actions-menu-item" data-act="restore" data-id="${id}">Restore</button>`;
   }
+  let phase2Actions = '';
+  if (
+    statusRaw === 'ready_for_qa'
+  ) {
+    phase2Actions += `<button type="button" role="menuitem" class="tank-actions-menu-item" data-act="restore-to-assembly" data-id="${id}" data-tank="${tank}">Restore to Assembly</button>`;
+  }
+  if (statusRaw === 'assembly_in_progress') {
+    phase2Actions += `<button type="button" role="menuitem" class="tank-actions-menu-item" data-act="remove-from-assembly" data-id="${id}" data-tank="${tank}">Remove from Assembly</button>`;
+  }
   return `
     <button type="button" role="menuitem" class="tank-actions-menu-item" data-act="edit-phase" data-id="${id}">Edit Phase Time</button>
     <button type="button" role="menuitem" class="tank-actions-menu-item" data-act="print" data-tank="${tank}">Print</button>
     ${statusAction}
+    ${phase2Actions}
     <button type="button" role="menuitem" class="tank-actions-menu-item is-danger" data-act="delete" data-id="${id}" data-tank="${tank}" data-status="${status}">Delete</button>
   `;
 }
@@ -573,6 +631,46 @@ function handleTankActionButton(btn) {
   }
   if (act === 'archive') void setTankStatus(id, 'archived');
   if (act === 'restore') void setTankStatus(id, 'active');
+  if (act === 'restore-to-assembly') {
+    const reason = window.prompt('Restore to Assembly reason (required):', '');
+    if (reason == null) return;
+    if (!String(reason).trim()) {
+      if (tankHint) tankHint.textContent = 'A restore reason is required.';
+      return;
+    }
+    void (async () => {
+      const { res, data } = await apiJson(`/api/manager/tanks/${id}/restore-to-assembly`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: String(reason).trim() }),
+      });
+      if (!res.ok || !data.ok) {
+        if (tankHint) tankHint.textContent = (data && data.message) || 'Could not restore to Assembly.';
+        return;
+      }
+      if (tankHint) tankHint.textContent = data.message || 'Tank restored to Assembly.';
+      await loadTanks();
+    })();
+  }
+  if (act === 'remove-from-assembly') {
+    const reason = window.prompt('Remove from Assembly reason (required):', '');
+    if (reason == null) return;
+    if (!String(reason).trim()) {
+      if (tankHint) tankHint.textContent = 'A remove reason is required.';
+      return;
+    }
+    void (async () => {
+      const { res, data } = await apiJson(`/api/manager/tanks/${id}/remove-from-assembly`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: String(reason).trim() }),
+      });
+      if (!res.ok || !data.ok) {
+        if (tankHint) tankHint.textContent = (data && data.message) || 'Could not remove from Assembly.';
+        return;
+      }
+      if (tankHint) tankHint.textContent = data.message || 'Tank removed from Assembly.';
+      await loadTanks();
+    })();
+  }
   if (act === 'delete') {
     openTankTrashConfirm({
       id,
@@ -715,6 +813,7 @@ async function loadTanks(opts = {}) {
 
 async function pollManagerTankList() {
   if (tanksPollInFlight) return;
+  if (managerSessionExpired()) return;
   if (typeof document !== 'undefined' && document.hidden) return;
   if (managerModalOpen()) return;
   if (tankActionInFlight) return;
@@ -1334,13 +1433,24 @@ function renderTankReport(data) {
 
   const assemblyStatus = (() => {
     const st = String(tank.status || '').toLowerCase();
-    if (st === 'assembly_in_progress') return 'Assembly In Progress';
+    if (st === 'removed_from_assembly') return 'Removed from Assembly';
+    if (st === 'assembly_in_progress') return 'Assembly Working';
     if (st === 'ready_for_assembly') return 'Ready for Assembly';
-    if (st === 'ready_for_testing' || st === 'testing_in_progress') return 'Assembly Complete';
+    if (st === 'ready_for_qa') return 'Ready for QA';
+    if (st === 'qa_in_progress') return 'QA In Progress';
+    if (st === 'qa_failed') return 'QA Failed / Hold';
+    if (st === 'testing_failed') return 'Testing Failed — Hold';
+    if (st === 'ready_for_testing') return 'QA Complete / Ready for Testing';
+    if (st === 'testing_in_progress') {
+      if (tank.is_testing_retest) return 'Testing — Retest';
+      return 'Testing';
+    }
     if (st === 'rework_required') return 'Rework Required (returned from Testing)';
+    if (st === 'ready_for_dome_install' || st === 'ready_for_final_completion') return 'Ready for Dome Install';
+    if (st === 'archived') return 'Complete';
     if (at && at.assembly_completed_at) return 'Assembly Complete';
     if (at && at.assembly_started_at) return 'Assembly Started';
-    return '—';
+    return tankStatusLabel(tank);
   })();
 
   const assemblyEmpRows = ((at && at.stage_labor && at.stage_labor.by_employee) || [])
@@ -1386,14 +1496,34 @@ function renderTankReport(data) {
     .join('');
 
   const testAttemptRows = ((at && at.test_attempts) || [])
-    .map(
-      (a) => `<tr>
-        <td>${escapeHtml(a.result || '—')}</td>
-        <td>${a.attempted_at ? fmtIso(a.attempted_at) : '—'}</td>
-        <td>${escapeHtml(a.tester_employee_name || a.team_name || '—')}</td>
+    .map((a) => {
+      const type = String(a.test_type || 'LEGACY').toUpperCase();
+      const notes = Array.isArray(a.notes)
+        ? a.notes
+            .map((n) => `${n.author_user_name || '—'} @ ${n.created_at ? fmtIso(n.created_at) : '—'}: ${n.body || ''}`)
+            .join(' | ')
+        : '';
+      let detail = '—';
+      if (type === 'VACUUM') {
+        detail = `Start ${a.vacuum_start_inhg ?? '—'} → End ${a.vacuum_end_inhg ?? '—'} (Δ ${
+          a.vacuum_delta_inhg ?? '—'
+        }) · ${a.elapsed_display || '—'}`;
+      } else if (type === 'BRINE') {
+        detail = `Expected ${a.brine_expected_amount ?? '—'} / Actual ${a.brine_actual_amount ?? '—'} (var ${
+          a.brine_variance ?? '—'
+        }) · ${a.elapsed_display || '—'}`;
+      }
+      return `<tr>
+        <td>${escapeHtml(type)}</td>
+        <td>${escapeHtml(a.result || a.attempt_status || '—')}</td>
+        <td>${a.started_at || a.attempted_at ? fmtIso(a.started_at || a.attempted_at) : '—'}</td>
+        <td>${a.completed_at ? fmtIso(a.completed_at) : '—'}</td>
+        <td>${escapeHtml(a.tester_user_name || a.tester_employee_name || a.team_name || '—')}</td>
+        <td>${escapeHtml(detail)}</td>
         <td>${escapeHtml(a.failure_note || '—')}</td>
-      </tr>`
-    )
+        <td>${escapeHtml(notes || '—')}</td>
+      </tr>`;
+    })
     .join('');
 
   const overviewSection = `
@@ -1684,7 +1814,25 @@ function renderTankReport(data) {
                 }</div>
               </div>
               <div class="tank-lifecycle-item">
-                <div class="tank-lifecycle-label">Testing / QA-QC Elapsed</div>
+                <div class="tank-lifecycle-label">QA Result</div>
+                <div class="tank-lifecycle-value">${escapeHtml((at && at.qa_result) || '—')}</div>
+              </div>
+              <div class="tank-lifecycle-item">
+                <div class="tank-lifecycle-label">QA User</div>
+                <div class="tank-lifecycle-value">${escapeHtml((at && at.qa_user_name) || '—')}</div>
+              </div>
+              <div class="tank-lifecycle-item">
+                <div class="tank-lifecycle-label">QA Completed</div>
+                <div class="tank-lifecycle-value">${
+                  at && at.qa_completed_at ? escapeHtml(fmtIso(at.qa_completed_at)) : '—'
+                }</div>
+              </div>
+              <div class="tank-lifecycle-item">
+                <div class="tank-lifecycle-label">QA Failure Note</div>
+                <div class="tank-lifecycle-value">${escapeHtml((at && at.qa_failure_note) || '—')}</div>
+              </div>
+              <div class="tank-lifecycle-item">
+                <div class="tank-lifecycle-label">Testing Elapsed (non-labor)</div>
                 <div class="tank-lifecycle-value">${escapeHtml(testingElapsedDisplay)}</div>
               </div>
             </div>
@@ -1711,13 +1859,13 @@ function renderTankReport(data) {
               </table>
             </div>
 
-            <h5 class="tank-report-subsection-title" style="margin-top:14px">Test Attempts</h5>
+            <h5 class="tank-report-subsection-title" style="margin-top:14px">QA / Vacuum / Brine Attempts</h5>
             <div class="table-wrap">
               <table class="tank-report-table">
-                <thead><tr><th>Result</th><th>When</th><th>Tester/Team</th><th>Note</th></tr></thead>
+                <thead><tr><th>Type</th><th>Result</th><th>Start</th><th>Complete</th><th>QA/QC User</th><th>Readings</th><th>Failure Reason</th><th>Notes</th></tr></thead>
                 <tbody>${
                   testAttemptRows ||
-                  '<tr><td colspan="4" class="muted">No test attempts recorded.</td></tr>'
+                  '<tr><td colspan="8" class="muted">No QA/test attempts recorded.</td></tr>'
                 }</tbody>
               </table>
             </div>
@@ -1863,8 +2011,10 @@ async function loadDailySummary() {
   if (!dailySummaryBody) return;
   if (dailySummaryDate && !dailySummaryDate.value) dailySummaryDate.value = todayLocalDateInput();
   const date = dailySummaryDate ? dailySummaryDate.value : todayLocalDateInput();
-  const { res, data } = await apiJson(`/api/manager/daily-summary?date=${encodeURIComponent(date)}`);
+  const { res, data, kind } = await apiJson(`/api/manager/daily-summary?date=${encodeURIComponent(date)}`);
   if (!res.ok) {
+    if (isTransientKind(kind) && dailySummaryRows.length) return;
+    dailySummaryRows = [];
     dailySummaryBody.innerHTML = `<tr><td colspan="10" class="muted">${escapeHtml((data && data.message) || 'Could not load daily summary.')}</td></tr>`;
     return;
   }
@@ -1884,12 +2034,16 @@ function exportDailySummaryPdf() {
 
 async function loadProductionNotes() {
   if (!productionNotesBody) return;
-  const { res, data } = await apiJson('/api/manager/production-notes?limit=150');
+  if (managerSessionExpired()) return;
+  const { res, data, kind } = await apiJson('/api/manager/production-notes?limit=150');
   if (!res.ok) {
+    if (isTransientKind(kind) && productionNotesBody.dataset.loaded === '1') return;
+    productionNotesBody.dataset.loaded = '';
     productionNotesBody.innerHTML = `<tr><td colspan="7" class="muted">${escapeHtml((data && data.message) || 'Could not load notes.')}</td></tr>`;
     return;
   }
   const notes = data.notes || [];
+  productionNotesBody.dataset.loaded = '1';
   if (!notes.length) {
     productionNotesBody.innerHTML = '<tr><td colspan="7" class="muted">No production notes yet.</td></tr>';
     return;
@@ -2056,6 +2210,17 @@ window.addEventListener('load', () => {
   void refreshAuthUi();
   setInterval(() => void loadProductionNotes(), 30000);
   startManagerTankListPolling();
+  if (window.ManagerSession) {
+    window.ManagerSession.on('restored', () => {
+      void refreshAll();
+      void refreshAuthUi();
+    });
+    window.ManagerSession.on('retry', () => {
+      void loadTanks({ silent: true });
+      void loadDailySummary();
+      void loadProductionNotes();
+    });
+  }
   try {
     const params = new URLSearchParams(window.location.search || '');
     const reportId = Number(params.get('tankReport'));
@@ -2131,7 +2296,7 @@ async function loadKioskPinMachines() {
 }
 
 async function refreshAuthUi() {
-  const { res, data } = await apiJson('/api/auth/me');
+  const { res, data } = await apiJson('/api/auth/manager-session');
   currentAuthUser = res.ok && data && data.user ? data.user : null;
   const isOwner = !!currentAuthUser && String(currentAuthUser.role || '').toUpperCase() === 'MANAGER' && String(currentAuthUser.username || '').toLowerCase() === 'owner';
   if (ownerSecuritySection) ownerSecuritySection.style.display = isOwner ? '' : 'none';

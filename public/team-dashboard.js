@@ -13,8 +13,21 @@
       .replace(/"/g, '&quot;');
   }
 
+  function requestError(result, fallback) {
+    const MS = root.ManagerSession;
+    const r = result || {};
+    const err = new Error(MS ? MS.describe(r, fallback) : (r.data && r.data.message) || fallback);
+    err.kind = r.kind || 'client';
+    return err;
+  }
+
   async function fetchJson(url, opts) {
     const options = opts || {};
+    if (root.ManagerSession) {
+      const r = await root.ManagerSession.request(url, { cache: 'no-store', ...options });
+      if (!r.res) throw requestError(r, 'Network error');
+      return { res: r.res, data: r.data, result: r };
+    }
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
     const timer = controller
       ? setTimeout(() => controller.abort(), options.timeoutMs || FETCH_TIMEOUT_MS)
@@ -365,8 +378,8 @@
   }
 
   async function fetchTeams() {
-    const { res, data } = await fetchJson('/api/manager/teams/dashboard');
-    if (!res.ok || !data.ok) throw new Error((data && data.message) || 'Could not load teams');
+    const { res, data, result } = await fetchJson('/api/manager/teams/dashboard');
+    if (!res.ok || !data.ok) throw requestError(result || { data }, 'Could not load teams');
     return data.teams || [];
   }
 
@@ -485,6 +498,8 @@
     }
 
     async function refresh() {
+      const MS = root.ManagerSession;
+      if (MS && MS.isExpired()) return;
       try {
         const teams = await fetchTeams();
         const includeInactive = !!(showInactiveControl && showInactiveControl.checked);
@@ -496,6 +511,7 @@
         }
         syncTeams(visibleTeams);
       } catch (err) {
+        if (MS && el.dataset.teamSignature && MS.isTransient(err)) return;
         el.dataset.teamSignature = '';
         el.innerHTML = renderLoadError(err.message || 'Could not load teams');
         const btn = el.querySelector('[data-retry]');
@@ -512,6 +528,10 @@
         el.dataset.teamSignature = '';
         void refresh();
       });
+    if (root.ManagerSession) {
+      root.ManagerSession.on('restored', () => void refresh());
+      root.ManagerSession.on('retry', () => void refresh());
+    }
     const timer = setInterval(() => void refresh(), POLL_MS);
     return { refresh, stop: () => clearInterval(timer) };
   }

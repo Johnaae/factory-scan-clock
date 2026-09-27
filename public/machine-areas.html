@@ -23,6 +23,7 @@
       }
       .ma-workflow-badge--winding { background: #e0f2fe; color: #075985; border: 1px solid #7dd3fc; }
       .ma-workflow-badge--assembly { background: #ecfdf5; color: #065f46; border: 1px solid #6ee7b7; }
+      .ma-workflow-badge--qa { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
       .ma-modal { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: none; align-items: center; justify-content: center; z-index: 80; padding: 16px; }
       .ma-modal.show { display: flex; }
       .ma-modal-card { background: #fff; border-radius: 14px; padding: 18px; width: min(480px, 100%); display: grid; gap: 12px; }
@@ -35,7 +36,7 @@
       <div class="topbar-inner">
         <div class="brand-text">
           <div class="brand-title">Manage Machines</div>
-          <div class="brand-sub">Winding (FAB) and Assembly + Testing kiosks — permanent URLs</div>
+          <div class="brand-sub">Winding (FAB), Assembly + Testing, and QA/QC kiosks — permanent URLs</div>
         </div>
         <nav class="nav">
           <a href="/manager-dashboard">Manager</a>
@@ -62,6 +63,7 @@
             <select id="newMachineWorkflow">
               <option value="winding" selected>Winding (FAB)</option>
               <option value="assembly_testing">Assembly + Testing</option>
+              <option value="qa_testing">QA/QC</option>
             </select>
           </div>
           <button id="btnAddMachine" class="btn btn-primary manager-form-action-btn" type="button">Add machine</button>

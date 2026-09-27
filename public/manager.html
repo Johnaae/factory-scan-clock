@@ -13,7 +13,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800;900&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=session-1" />
     <link rel="stylesheet" href="/status-styles.css" />
   </head>
   <body>
@@ -487,6 +487,7 @@
       </div>
     </div>
 
+    <script src="/manager-session.js?v=1"></script>
     <script src="/i18n.js"></script>
     <script src="/status-styles.js"></script>
     <script src="/tank-activity.js?v=2"></script>
@@ -494,10 +495,10 @@
     <script src="/phase-time-editor.js?v=3"></script>
     <script src="/team-member-picker.js?v=6"></script>
     <script src="/team-member-details.js?v=2"></script>
-    <script src="/machine-dashboard.js?v=12"></script>
-    <script src="/team-dashboard.js?v=5"></script>
-    <script src="/alert-sound.js"></script>
-    <script src="/manager.js?v=22"></script>
+    <script src="/machine-dashboard.js?v=13"></script>
+    <script src="/team-dashboard.js?v=6"></script>
+    <script src="/alert-sound.js?v=session-1"></script>
+    <script src="/manager.js?v=23"></script>
     <script>
       document.addEventListener('DOMContentLoaded', () => {
         if (window.FactoryI18n) {
@@ -521,17 +522,25 @@
         async function loadAlertHistory() {
           const el = document.getElementById('alertHistoryBody');
           if (!el || !window.MachineDashboard) return;
+          const MS = window.ManagerSession;
+          if (MS && MS.isExpired()) return;
           if (lastAlertHistoryHtml === null) el.innerHTML = '<p class="muted">Loading…</p>';
           const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
           const timer = controller ? setTimeout(() => controller.abort(), 20000) : null;
           try {
             const alerts = await window.MachineDashboard.fetchOpenAlerts();
-            const allRes = await fetch('/api/manager/alerts?limit=100', {
-              cache: 'no-store',
-              signal: controller ? controller.signal : undefined,
-            });
-            const allData = await allRes.json().catch(() => ({}));
-            const history = allData.ok ? allData.alerts || [] : [];
+            let history = [];
+            if (MS) {
+              const allData = await MS.fetchJson('/api/manager/alerts?limit=100', { cache: 'no-store' }, 'Could not load alert history.');
+              history = allData.alerts || [];
+            } else {
+              const allRes = await fetch('/api/manager/alerts?limit=100', {
+                cache: 'no-store',
+                signal: controller ? controller.signal : undefined,
+              });
+              const allData = await allRes.json().catch(() => ({}));
+              history = allData.ok ? allData.alerts || [] : [];
+            }
             const openHtml = alerts.length
               ? window.MachineDashboard.renderGlobalAlerts(alerts, { allowResolve: true })
               : '<p class="muted">No open alerts.</p>';
@@ -577,6 +586,7 @@
               });
             }
           } catch (err) {
+            if (MS && lastAlertHistoryHtml !== null && MS.isTransient(err)) return;
             const msg =
               err && err.name === 'AbortError'
                 ? 'Request timed out. The server may still be starting — please retry.'
@@ -596,6 +606,10 @@
         if (alertRefresh) alertRefresh.addEventListener('click', () => void loadAlertHistory());
         void loadAlertHistory();
         setInterval(() => void loadAlertHistory(), 10000);
+        if (window.ManagerSession) {
+          window.ManagerSession.on('restored', () => void loadAlertHistory());
+          window.ManagerSession.on('retry', () => void loadAlertHistory());
+        }
       });
     </script>
     <script src="/admin-footer.js"></script>

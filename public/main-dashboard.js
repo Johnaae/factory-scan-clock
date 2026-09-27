@@ -30,6 +30,7 @@
   }
 
   async function fetchJson(url, opts) {
+    if (root.ManagerSession) return root.ManagerSession.fetchJson(url, opts, 'Request failed.');
     const res = await fetch(url, opts);
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.ok === false) {
@@ -61,16 +62,27 @@
     const refreshBtn = document.getElementById('teamActivityRefresh');
     if (!body) return null;
 
+    const MS = root.ManagerSession;
+    let loaded = false;
+
     async function refresh() {
+      if (MS && MS.isExpired()) return;
       try {
         const data = await fetchJson('/api/dashboard/team-activity?limit=60', { cache: 'no-store' });
         body.innerHTML = renderActivityRows(data.logs || []);
+        loaded = true;
       } catch (err) {
+        if (MS && loaded && MS.isTransient(err)) return;
+        loaded = false;
         body.innerHTML = `<tr><td colspan="6" class="muted">${escapeHtml(err.message || 'Could not load scan activity.')}</td></tr>`;
       }
     }
 
     if (refreshBtn) refreshBtn.addEventListener('click', () => void refresh());
+    if (MS) {
+      MS.on('restored', () => void refresh());
+      MS.on('retry', () => void refresh());
+    }
     void refresh();
     const timer = setInterval(() => void refresh(), ACTIVITY_POLL_MS);
     return { refresh, stop: () => clearInterval(timer) };

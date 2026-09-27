@@ -508,6 +508,8 @@ const REQUIRED_TABLES = [
   'stage_labor_sessions',
   'stage_labor_participants',
   'test_attempts',
+  'test_attempt_notes',
+  'assembly_kiosk_teams',
 ];
 
 async function ensureForeignKey(client, tableName, columnName, refTable, refColumn, onDelete) {
@@ -815,6 +817,16 @@ UPDATE machines SET workflow = 'winding' WHERE workflow = 'winding' OR name ILIK
     `);
   } catch (err) {
     log.warn('[migration] employee_team_memberships backfill (noncritical):', err.message);
+  }
+
+  // Additive role expansion for QA/QC personnel (idempotent).
+  try {
+    await client.query(`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`);
+    await client.query(
+      `ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('MANAGER','KIOSK','QA_QC'))`
+    );
+  } catch (err) {
+    log.warn('[migration] users.role QA_QC check (noncritical):', err.message);
   }
 }
 

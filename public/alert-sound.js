@@ -247,6 +247,7 @@
   }
 
   async function pollOpenAlerts(statusEl) {
+    if (root.ManagerSession && root.ManagerSession.isExpired()) return;
     try {
       const alerts = await fetchOpenProductionAlerts();
       const nextIds = new Set(alerts.map((a) => Number(a.id)).filter((id) => Number.isFinite(id)));

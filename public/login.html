@@ -224,14 +224,14 @@
 
       <form id="panelKiosk" class="hidden" autocomplete="off">
         <div class="field">
-          <label for="kioskArea">Area</label>
+          <label for="kioskArea">Kiosk</label>
           <div class="input-wrap">
             <svg class="field-icon" viewBox="0 0 24 24" fill="none">
               <path d="M12 20.5s7-6.3 7-11.2A7 7 0 1 0 5 9.3c0 4.9 7 11.2 7 11.2Z" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
               <path d="M12 12a2.4 2.4 0 1 0 0-4.8 2.4 2.4 0 0 0 0 4.8Z" stroke-width="1.8"></path>
             </svg>
             <select id="kioskArea" name="area" required>
-              <option value="">Loading machines...</option>
+              <option value="">Loading kiosks...</option>
             </select>
           </div>
         </div>
@@ -299,15 +299,20 @@
         }
         if (!kioskAreaSelect) return;
         if (!loginMachines.length) {
-          kioskAreaSelect.innerHTML = '<option value="">No active machines found</option>';
+          kioskAreaSelect.innerHTML = '<option value="">No active kiosks found</option>';
           return;
         }
-        kioskAreaSelect.innerHTML = ['<option value="">Select machine...</option>']
+        function workflowLoginSuffix(m) {
+          const wf = String((m && m.workflow) || 'winding').toLowerCase();
+          if (wf === 'qa_testing') return ' (QA/QC)';
+          if (wf === 'assembly_testing') return ' (Assembly / Testing)';
+          return ' (Winding)';
+        }
+        kioskAreaSelect.innerHTML = ['<option value="">Select kiosk...</option>']
           .concat(
             loginMachines.map((m) => {
-              const wf = String(m.workflow || 'winding').toLowerCase();
-              const labelSuffix = wf === 'assembly_testing' ? ' (Assembly / Testing)' : ' (Winding)';
-              return `<option value="${String(m.id)}">${String(m.name || '')
+              const labelSuffix = workflowLoginSuffix(m);
+              return `<option value="${String(m.id)}" data-workflow="${String(m.workflow || 'winding').replace(/"/g, '&quot;')}">${String(m.name || '')
                 .replace(/&/g, '&amp;')
                 .replace(/</g, '&lt;')
                 .replace(/>/g, '&gt;')}${labelSuffix}</option>`;
@@ -341,7 +346,7 @@
         const selected = loginMachines.find((m) => Number(m.id) === machineId) || null;
         const pin = kioskPinInput.value.trim();
         if (!selected) {
-          hintKiosk.textContent = 'Select a winding machine.';
+          hintKiosk.textContent = 'Select a kiosk.';
           return;
         }
         const res = await fetch('/api/auth/login-kiosk-pin', {

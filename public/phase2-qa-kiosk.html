@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Factory Scan Clock — QA/QC</title>
+    <meta name="theme-color" content="#0f2a44" />
+    <link rel="stylesheet" href="/scan.css" />
+    <link rel="stylesheet" href="/status-styles.css" />
+    <style>
+      .qa2-brand { margin: 0; font-size: 1.05rem; font-weight: 800; letter-spacing: 0.04em; color: #64748b; }
+      .qa2-sub { margin: 0.15rem 0 0; font-weight: 700; color: #1e3a5f; }
+      .qa2-grid { display: grid; gap: 16px; margin-top: 14px; }
+      .qa2-section { border: 2px solid #cbd5e1; border-radius: 14px; padding: 14px; background: #fff; }
+      .qa2-section h2 { margin: 0 0 10px; font-size: 1.05rem; letter-spacing: 0.06em; text-transform: uppercase; }
+      .qa2-section--qa { border-color: #a7f3d0; }
+      .qa2-section--test { border-color: #7dd3fc; }
+      .qa2-section--fail { border-color: #fca5a5; }
+      .qa2-card { border: 2px solid #e2e8f0; border-radius: 12px; padding: 12px; display: grid; gap: 10px; margin-top: 10px; }
+      .qa2-title { margin: 0; font-size: 1.25rem; font-weight: 900; }
+      .qa2-meta { margin: 0; font-weight: 700; color: #475569; }
+      .qa2-actions { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; }
+      .qa2-actions .btn-touch { min-height: 52px; font-weight: 800; border-radius: 12px; }
+      #resultChoice[hidden] { display: none !important; }
+      .btn-pass { background: #ecfdf5; border-color: #6ee7b7; color: #065f46; }
+      .btn-fail { background: #fef2f2; border-color: #fca5a5; color: #991b1b; }
+      .btn-vac { background: #eff6ff; border-color: #93c5fd; color: #1e40af; }
+      .btn-brine { background: #f0f9ff; border-color: #7dd3fc; color: #075985; }
+      .qa2-empty { margin: 0; padding: 12px; border: 1px dashed #cbd5e1; border-radius: 10px; font-weight: 700; color: #64748b; }
+      .modal-note { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: none; align-items: center; justify-content: center; z-index: 80; padding: 16px; }
+      .modal-note.show { display: flex; }
+      .modal-note-card { background: #fff; border-radius: 14px; padding: 18px; width: min(480px, 100%); display: grid; gap: 10px; }
+      .modal-note-card input, .modal-note-card textarea {
+        min-height: 48px; font-size: 1.1rem; font-weight: 700; border: 2px solid #94a3b8; border-radius: 10px; padding: 10px;
+      }
+      .modal-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }
+      .modal-actions button { min-height: 48px; font-weight: 800; }
+    </style>
+  </head>
+  <body class="scan-kiosk">
+    <main class="kiosk-page">
+      <header class="kiosk-header">
+        <div class="kiosk-header-row">
+          <div>
+            <p class="qa2-brand">Factory Scan Clock</p>
+            <h1>QA/QC</h1>
+            <p id="userLabel" class="qa2-sub">Authorized QA/QC only — no labor tracking</p>
+          </div>
+          <button id="logoutBtn" type="button" class="btn-secondary">Exit</button>
+        </div>
+      </header>
+      <section class="kiosk-card">
+        <p id="scanWarning" class="scan-warning" role="alert" hidden></p>
+        <div class="qa2-grid">
+          <section class="qa2-section qa2-section--qa">
+            <h2>Ready for QA</h2>
+            <div id="readyQaList"></div>
+          </section>
+          <section class="qa2-section qa2-section--qa">
+            <h2>QA In Progress</h2>
+            <div id="qaProgressList"></div>
+          </section>
+          <section class="qa2-section qa2-section--fail">
+            <h2>Failed / Hold</h2>
+            <div id="qaFailedList"></div>
+          </section>
+          <section class="qa2-section qa2-section--test">
+            <h2>Ready for Testing</h2>
+            <div id="readyTestList"></div>
+          </section>
+          <section class="qa2-section qa2-section--test">
+            <h2>Testing</h2>
+            <div id="testingList"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <div id="inputModal" class="modal-note" hidden>
+      <div class="modal-note-card">
+        <h3 id="inputTitle">Input</h3>
+        <p id="inputHint"></p>
+        <div id="resultChoice" class="qa2-actions" hidden>
+          <button id="resultPass" type="button" class="btn-touch btn-pass">PASS</button>
+          <button id="resultFail" type="button" class="btn-touch btn-fail">FAIL</button>
+        </div>
+        <input id="inputField" type="text" inputmode="decimal" />
+        <textarea id="inputNote" rows="3" placeholder="Reason / notes" hidden></textarea>
+        <div class="modal-actions">
+          <button id="inputCancel" type="button" class="btn-secondary">Cancel</button>
+          <button id="inputOk" type="button" class="btn-primary">Confirm</button>
+        </div>
+      </div>
+    </div>
+    <script src="/phase2-qa-kiosk.js?v=kiosk-logout-1"></script>
+  </body>
+</html>

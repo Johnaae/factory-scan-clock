@@ -395,17 +395,25 @@
         hintManager.textContent = '';
         const username = document.getElementById('username').value.trim();
         const password = passwordInput.value;
-        const res = await fetch('/api/auth/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, password }),
-        });
+        let res;
+        try {
+          res = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password }),
+          });
+        } catch (_err) {
+          hintManager.textContent = 'Cannot reach the server. Check the network connection and try again.';
+          return;
+        }
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data.ok) {
           hintManager.textContent = (data && data.message) || 'Login failed. Please check username and password.';
           return;
         }
-        window.location.href = data.redirect || '/manager-dashboard';
+        const next = new URLSearchParams(window.location.search).get('next') || '';
+        const safeNext = /^\/(?![/\\])/.test(next) && !next.includes('\\') && !next.startsWith('/api/') ? next : '';
+        window.location.href = (data.role === 'MANAGER' && safeNext) || data.redirect || '/manager-dashboard';
       });
     </script>
     <script src="/pwa.js"></script>
