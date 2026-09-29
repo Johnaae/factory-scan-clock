@@ -188,12 +188,21 @@ function noteAttemptId(t) {
   );
 }
 
+function restoreButton(t) {
+  return `<button type="button" class="btn-secondary btn-touch" data-qa="restore_to_assembly" data-tank-id="${Number(t.id)}" data-tank-number="${escapeHtml(t.tank_number || '')}">RESTORE TO ASSEMBLY</button>`;
+}
+
 function readyTestingCard(t) {
+  let meta = `<p class="qa2-meta">Assembly Complete — Ready for Testing</p>
+     <p class="qa2-meta">Assembly completed: ${escapeHtml(formatTs(t.assembly_completed_at))}</p>`;
+  if (String(t.qa_result || '').toUpperCase() === 'PASS') {
+    meta += `<p class="qa2-meta">QA completed: ${escapeHtml(formatTs(t.qa_completed_at))}</p>`;
+  }
   return tankCard(
     t,
-    `<p class="qa2-meta">QA Complete — Ready for Testing</p>
-     <p class="qa2-meta">QA completed: ${escapeHtml(formatTs(t.qa_completed_at))}</p>`,
-    `<button type="button" class="btn-primary btn-touch" data-qa="begin_testing" data-tank-id="${Number(t.id)}">START TESTING</button>`
+    meta,
+    `<button type="button" class="btn-primary btn-touch" data-qa="begin_testing" data-tank-id="${Number(t.id)}">START TESTING</button>
+     ${restoreButton(t)}`
   );
 }
 
@@ -218,8 +227,13 @@ function testingCard(t) {
   const o = openByTank[Number(t.id)] || {};
   const heading = t.is_testing_retest ? 'TESTING — RETEST' : 'TESTING';
   const vacuumPassed = Boolean(t.vacuum_passed);
-  const pending = t.pending_vacuum_result || null;
+  const brinePassed = Boolean(t.brine_passed);
+  const selected = t.selected_test || null;
+  const pendingVac = t.pending_vacuum_result || null;
+  const pendingBrine = !vacuumPassed ? t.pending_brine_result || null : null;
   const openVac = o.vacuum;
+  const openBrine = o.brine;
+  const tid = Number(t.id);
   const noteId = noteAttemptId(t) || o.testing || '';
   let meta = `<p class="qa2-meta"><strong>${escapeHtml(heading)}</strong></p>
     <p class="qa2-meta">Started: ${escapeHtml(formatTs(t.testing_started_at))}</p>`;
@@ -229,49 +243,73 @@ function testingCard(t) {
 
   const actions = [];
 
-  if (pending) {
-    // Decision point #1 — Vacuum Test Complete (PASS/FAIL only here, not in measurement modals)
-    meta += `<p class="qa2-meta"><strong>Vacuum Test Complete</strong></p>${vacuumSummaryHtml(pending)}`;
-    actions.push(
-      `<button type="button" class="btn-touch btn-pass" data-qa="vacuum_result" data-tank-id="${Number(t.id)}" data-attempt-id="${Number(pending.id)}" data-result="PASS">PASS</button>`
-    );
-    actions.push(
-      `<button type="button" class="btn-touch btn-fail" data-qa="vacuum_result" data-tank-id="${Number(t.id)}" data-attempt-id="${Number(pending.id)}" data-result="FAIL">FAIL</button>`
-    );
-  } else if (!vacuumPassed) {
-    meta += `<p class="qa2-meta"><strong>VACUUM TEST REQUIRED</strong></p>`;
-    if (openVac) {
-      actions.push(
-        `<button type="button" class="btn-touch btn-vac" data-qa="vacuum_complete" data-tank-id="${Number(t.id)}" data-attempt-id="${openVac}">RECORD END VACUUM</button>`
-      );
-    } else {
-      actions.push(
-        `<button type="button" class="btn-touch btn-vac" data-qa="vacuum" data-tank-id="${Number(t.id)}">START VACUUM</button>`
-      );
+  // Card state follows what is actually open / awaiting a result first, so an active test
+  // can always be finished (never offer START while a test is already running).
+  if (openVac) {
+    meta += `<p class="qa2-meta"><strong>VACUUM TEST</strong> — in progress</p>`;
+    if (t.current_vacuum) {
+      meta += `<p class="qa2-meta">Start: ${escapeHtml(formatNum(t.current_vacuum.vacuum_start_inhg))} inHg</p>`;
     }
+    actions.push(
+      `<button type="button" class="btn-touch btn-vac" data-qa="vacuum_complete" data-tank-id="${tid}" data-attempt-id="${openVac}">RECORD END VACUUM</button>`
+    );
+  } else if (openBrine) {
+    meta += `<p class="qa2-meta"><strong>BRINE TEST</strong> — filling</p>`;
+    if (t.current_brine) {
+      meta += `<p class="qa2-meta">Expected: ${escapeHtml(formatNum(t.current_brine.brine_expected_amount))}</p>`;
+    }
+    actions.push(
+      `<button type="button" class="btn-touch btn-brine" data-qa="brine_stop" data-tank-id="${tid}" data-attempt-id="${openBrine}">STOP FILL</button>`
+    );
+  } else if (pendingVac) {
+    meta += `<p class="qa2-meta"><strong>Vacuum Test Complete</strong></p>${vacuumSummaryHtml(pendingVac)}`;
+    actions.push(
+      `<button type="button" class="btn-touch btn-pass" data-qa="vacuum_result" data-tank-id="${tid}" data-attempt-id="${Number(pendingVac.id)}" data-result="PASS">PASS</button>`
+    );
+    actions.push(
+      `<button type="button" class="btn-touch btn-fail" data-qa="vacuum_result" data-tank-id="${tid}" data-attempt-id="${Number(pendingVac.id)}" data-result="FAIL">FAIL</button>`
+    );
+  } else if (pendingBrine) {
+    meta += `<p class="qa2-meta"><strong>Brine Test Complete</strong></p>${brineSummaryHtml(pendingBrine)}`;
+    actions.push(
+      `<button type="button" class="btn-touch btn-pass" data-qa="brine_result" data-tank-id="${tid}" data-attempt-id="${Number(pendingBrine.id)}" data-result="PASS">PASS</button>`
+    );
+    actions.push(
+      `<button type="button" class="btn-touch btn-fail" data-qa="brine_result" data-tank-id="${tid}" data-attempt-id="${Number(pendingBrine.id)}" data-result="FAIL">FAIL</button>`
+    );
+  } else if (t.can_ready_for_qa) {
+    if (vacuumPassed) {
+      meta += `<p class="qa2-meta"><strong>VACUUM</strong> ✓ PASS</p>${vacuumSummaryHtml(t.current_vacuum)}`;
+    } else if (brinePassed) {
+      meta += `<p class="qa2-meta"><strong>BRINE</strong> ✓ PASS</p>${brineSummaryHtml(t.current_brine)}`;
+    }
+    actions.push(
+      `<button type="button" class="btn-primary btn-touch" data-qa="ready_for_qa" data-tank-id="${tid}">READY FOR QA/QC</button>`
+    );
+  } else if (selected === 'VACUUM') {
+    meta += `<p class="qa2-meta"><strong>VACUUM TEST</strong> (selected)</p>`;
+    actions.push(
+      `<button type="button" class="btn-touch btn-vac" data-qa="vacuum" data-tank-id="${tid}">START VACUUM</button>`
+    );
+  } else if (selected === 'BRINE') {
+    meta += `<p class="qa2-meta"><strong>BRINE TEST</strong> (selected)</p>`;
+    actions.push(
+      `<button type="button" class="btn-touch btn-brine" data-qa="brine" data-tank-id="${tid}">START FILL</button>`
+    );
   } else {
-    const vac = t.current_vacuum || {};
-    meta += `<p class="qa2-meta"><strong>VACUUM</strong> ✓ PASS</p>${vacuumSummaryHtml(vac)}`;
-    meta += `<p class="qa2-meta"><strong>BRINE TEST</strong></p>`;
-    if (o.brine) {
-      actions.push(
-        `<button type="button" class="btn-touch btn-brine" data-qa="brine_stop" data-tank-id="${Number(t.id)}" data-attempt-id="${o.brine}">STOP FILL</button>`
-      );
-    } else if (!t.brine_completed) {
-      actions.push(
-        `<button type="button" class="btn-touch btn-brine" data-qa="brine" data-tank-id="${Number(t.id)}">START FILL</button>`
-      );
-    } else {
-      meta += brineSummaryHtml(t.current_brine);
-      actions.push(
-        `<button type="button" class="btn-primary btn-touch" data-qa="testing_complete" data-tank-id="${Number(t.id)}" data-attempt-id="${o.testing || ''}">TEST COMPLETE</button>`
-      );
-    }
+    meta += `<p class="qa2-meta"><strong>SELECT TEST</strong> — Vacuum OR Brine (only one is required)</p>`;
+    actions.push(
+      `<button type="button" class="btn-touch btn-vac" data-qa="vacuum" data-tank-id="${Number(t.id)}">START VACUUM</button>`
+    );
+    actions.push(
+      `<button type="button" class="btn-touch btn-brine" data-qa="brine" data-tank-id="${Number(t.id)}">START BRINE FILL</button>`
+    );
   }
 
   actions.push(
     `<button type="button" class="btn-secondary btn-touch" data-qa="add_note" data-tank-id="${Number(t.id)}" data-attempt-id="${noteId}">ADD NOTE</button>`
   );
+  actions.push(restoreButton(t));
 
   return tankCard(t, meta, actions.join('\n'));
 }
@@ -284,14 +322,18 @@ function failedHoldCard(t) {
       `<p class="qa2-meta"><strong>QA FAILED</strong></p>
        <p class="qa2-meta">Reason: ${escapeHtml(t.qa_failure_note || '—')}</p>
        <p class="qa2-meta">Failed: ${escapeHtml(formatTs(t.qa_completed_at))}</p>`,
-      `<button type="button" class="btn-primary btn-touch" data-qa="start_qa" data-tank-id="${Number(t.id)}">RESTART QA</button>`
+      `<button type="button" class="btn-primary btn-touch" data-qa="start_qa" data-tank-id="${Number(t.id)}">RESTART QA</button>
+       <button type="button" class="btn-touch btn-fail" data-qa="send_to_fab_rework" data-tank-id="${Number(t.id)}">SEND BACK TO FAB REWORK</button>
+       ${restoreButton(t)}`
     );
   }
-  const vacFail = t.latest_failed_vacuum || null;
-  const fail = vacFail || t.latest_failed_testing || {};
+  const vacFail = t.failure_source === 'vacuum' ? t.latest_failed_vacuum || null : null;
+  const brineFail = t.failure_source === 'brine' ? t.latest_failed_brine || null : null;
+  const fail = vacFail || brineFail || t.latest_failed_testing || {};
   const attemptNo = t.testing_attempt_number || (fail.parent_attempt_id ? null : null);
   const noteId = (t.latest_failed_testing && t.latest_failed_testing.id) || fail.parent_attempt_id || '';
-  let meta = `<p class="qa2-meta"><strong>${vacFail ? 'VACUUM FAILED' : 'TESTING FAILED'}</strong></p>`;
+  const failHeading = vacFail ? 'VACUUM FAILED' : brineFail ? 'BRINE FAILED' : 'TESTING FAILED';
+  let meta = `<p class="qa2-meta"><strong>${failHeading}</strong></p>`;
   if (t.testing_attempt_number) {
     meta += `<p class="qa2-meta">Attempt #${Number(t.testing_attempt_number)}</p>`;
   } else if (attemptNo) {
@@ -300,38 +342,48 @@ function failedHoldCard(t) {
   meta += `<p class="qa2-meta">Reason: ${escapeHtml(fail.failure_note || '—')}</p>
     <p class="qa2-meta">Failed: ${escapeHtml(formatTs(fail.completed_at))}</p>`;
   if (vacFail) meta += vacuumSummaryHtml(vacFail);
+  if (brineFail) meta += brineSummaryHtml(brineFail);
   return tankCard(
     t,
     meta,
     `<button type="button" class="btn-primary btn-touch" data-qa="testing_retest" data-tank-id="${Number(t.id)}">RETEST</button>
      <button type="button" class="btn-touch btn-fail" data-qa="send_to_fab_rework" data-tank-id="${Number(t.id)}">SEND BACK TO FAB REWORK</button>
-     <button type="button" class="btn-secondary btn-touch" data-qa="add_note" data-tank-id="${Number(t.id)}" data-attempt-id="${noteId}">ADD NOTE</button>`
+     <button type="button" class="btn-secondary btn-touch" data-qa="add_note" data-tank-id="${Number(t.id)}" data-attempt-id="${noteId}">ADD NOTE</button>
+     ${restoreButton(t)}`
+  );
+}
+
+function readyQaCard(t) {
+  const meta = t.testing_completed_at
+    ? `<p class="qa2-meta">Testing Complete — Ready for QA/QC</p>
+       <p class="qa2-meta">Testing completed: ${escapeHtml(formatTs(t.testing_completed_at))}</p>`
+    : `<p class="qa2-meta">Assembly completed: ${escapeHtml(formatTs(t.assembly_completed_at))}</p>`;
+  return tankCard(
+    t,
+    meta,
+    `<button type="button" class="btn-primary btn-touch" data-qa="start_qa" data-tank-id="${Number(t.id)}">START QA</button>
+     ${restoreButton(t)}`
   );
 }
 
 function renderAll() {
   if (!board) return;
-  renderList(els.readyQaList, board.ready_for_qa, (t) =>
-    tankCard(
-      t,
-      `<p class="qa2-meta">Assembly completed: ${escapeHtml(formatTs(t.assembly_completed_at))}</p>`,
-      `<button type="button" class="btn-primary btn-touch" data-qa="start_qa" data-tank-id="${Number(t.id)}">START QA</button>`
-    )
-  );
+  renderList(els.readyTestList, board.ready_for_testing, readyTestingCard);
+  renderList(els.testingList, board.testing, testingCard);
+  (board.testing || []).forEach(syncOpenFromTank);
+  renderList(els.readyQaList, board.ready_for_qa, readyQaCard);
   renderList(els.qaProgressList, board.qa_in_progress, (t) =>
     tankCard(
       t,
       `<p class="qa2-meta">QA/QC</p>
        <p class="qa2-meta">Started: ${escapeHtml(formatTs(t.qa_started_at))}</p>`,
       `<button type="button" class="btn-touch btn-pass" data-qa="qa_pass" data-tank-id="${Number(t.id)}">PASS</button>
-       <button type="button" class="btn-touch btn-fail" data-qa="qa_fail" data-tank-id="${Number(t.id)}">FAIL</button>`
+       <button type="button" class="btn-touch btn-fail" data-qa="qa_fail" data-tank-id="${Number(t.id)}">FAIL</button>
+       ${restoreButton(t)}`
     )
   );
   const failed = board.failed_hold || board.qa_failed || [];
   renderList(els.qaFailedList, failed, failedHoldCard);
-  renderList(els.readyTestList, board.ready_for_testing, readyTestingCard);
-  renderList(els.testingList, board.testing, testingCard);
-  (board.testing || []).forEach(syncOpenFromTank);
 }
 
 async function loadBoard() {
@@ -376,7 +428,10 @@ async function runAction(payload, okMessage) {
       return null;
     }
     if (!res.ok || !data.ok) {
-      showWarning((data && data.message) || 'Action failed.');
+      const msg = (data && data.message) || 'Action failed.';
+      // Refresh so the card reflects the server state (e.g. an already-open test shows RECORD END).
+      await loadBoard();
+      showWarning(msg);
       return null;
     }
     if (okMessage || data.message) showWarning(okMessage || data.message);
@@ -406,6 +461,59 @@ async function promptVacuumResult(vacSummary) {
   });
 }
 
+async function promptBrineResult(brineSummary) {
+  const hint = [
+    'Brine Test Complete',
+    `Expected: ${formatNum(brineSummary.brine_expected_amount)}`,
+    `Actual: ${formatNum(brineSummary.brine_actual_amount)}`,
+    `Difference: ${formatNum(brineSummary.brine_variance)}`,
+    `Fill Duration: ${brineSummary.elapsed_display || '—'}`,
+    '',
+    'Select PASS or FAIL. FAIL requires a reason.',
+  ].join('\n');
+  return openInput({
+    title: 'Brine Test Complete',
+    hint,
+    needNote: true,
+    resultChoice: true,
+    hideField: true,
+  });
+}
+
+async function submitBrineResult(tankId, attemptId, presetResult) {
+  let result = presetResult === 'FAIL' || presetResult === 'PASS' ? presetResult : null;
+  let note = null;
+  if (!result) {
+    const tank = ((board && board.testing) || []).find((x) => Number(x.id) === tankId);
+    const passFail = await promptBrineResult((tank && tank.pending_brine_result) || {});
+    if (!passFail || !passFail.value) {
+      showWarning('Brine data saved. Choose PASS or FAIL on the card.');
+      return;
+    }
+    result = String(passFail.value).trim().toUpperCase() === 'FAIL' ? 'FAIL' : 'PASS';
+    note = passFail.note || null;
+  } else if (result === 'FAIL') {
+    const failNote = await openInput({
+      title: 'Brine Test Failed',
+      hint: 'Reason is required.',
+      needNote: true,
+      hideField: true,
+      confirmLabel: 'Confirm Fail',
+      resultChoice: false,
+    });
+    if (!failNote || !failNote.note) return;
+    note = failNote.note;
+  }
+  if (result === 'FAIL' && !note) {
+    showWarning('Failure reason required for Brine FAIL.');
+    return;
+  }
+  await runAction(
+    { action: 'brine_result', attempt_id: attemptId, result, note },
+    result === 'PASS' ? null : 'Brine FAIL — Failed / Hold.'
+  );
+}
+
 async function handleClick(ev) {
   const btn = ev.target.closest('[data-qa]');
   if (!btn || busy) return;
@@ -420,7 +528,7 @@ async function handleClick(ev) {
     return;
   }
   if (action === 'qa_pass') {
-    await runAction({ action: 'qa_pass', tank_id: tankId }, 'QA PASS — Ready for Testing.');
+    await runAction({ action: 'qa_pass', tank_id: tankId }, null);
     return;
   }
   if (action === 'qa_fail') {
@@ -436,7 +544,10 @@ async function handleClick(ev) {
     return;
   }
   if (action === 'begin_testing') {
-    const data = await runAction({ action: 'begin_testing', tank_id: tankId }, 'Testing started — Vacuum required.');
+    const data = await runAction(
+      { action: 'begin_testing', tank_id: tankId },
+      'Testing started — select Vacuum OR Brine.'
+    );
     if (data && data.attempt_id) openByTank[tankId].testing = Number(data.attempt_id);
     return;
   }
@@ -502,7 +613,7 @@ async function handleClick(ev) {
         result,
         note: passFail.note || null,
       },
-      result === 'PASS' ? 'Vacuum PASS — Brine unlocked.' : 'Vacuum FAIL — Failed / Hold.'
+      result === 'PASS' ? null : 'Vacuum FAIL — Failed / Hold.'
     );
     return;
   }
@@ -539,7 +650,7 @@ async function handleClick(ev) {
     }
     await runAction(
       { action: 'vacuum_result', attempt_id: attemptId, result, note },
-      result === 'PASS' ? 'Vacuum PASS — Brine unlocked.' : 'Vacuum FAIL — Failed / Hold.'
+      result === 'PASS' ? null : 'Vacuum FAIL — Failed / Hold.'
     );
     return;
   }
@@ -581,37 +692,72 @@ async function handleClick(ev) {
       resultChoice: false,
     });
     if (!actual || actual.value == null || actual.value === '') return;
-    await runAction(
+    const data = await runAction(
       {
         action: 'brine_stop',
         attempt_id: attemptId,
         brine_actual_amount: Number(actual.value),
       },
-      'Brine recorded — ready for TEST COMPLETE.'
+      'Brine readings saved.'
     );
     openByTank[tankId].brine = null;
+    if (!data || !data.needs_result) return;
+    // Brine decision point — only after the actual amount is confirmed.
+    const passFail = await promptBrineResult(data);
+    if (!passFail || !passFail.value) {
+      showWarning('Brine data saved. Choose PASS or FAIL on the card.');
+      return;
+    }
+    const result = String(passFail.value).trim().toUpperCase() === 'FAIL' ? 'FAIL' : 'PASS';
+    if (result === 'FAIL' && !passFail.note) {
+      showWarning('Failure reason required for Brine FAIL.');
+      return;
+    }
+    await runAction(
+      { action: 'brine_result', attempt_id: attemptId, result, note: passFail.note || null },
+      result === 'PASS' ? null : 'Brine FAIL — Failed / Hold.'
+    );
+    return;
+  }
+  if (action === 'brine_result') {
+    if (!attemptId) {
+      showWarning('Missing Brine attempt.');
+      return;
+    }
+    await submitBrineResult(tankId, attemptId, String(btn.getAttribute('data-result') || '').toUpperCase());
+    return;
+  }
+  if (action === 'ready_for_qa') {
+    const data = await runAction({ action: 'ready_for_qa', tank_id: tankId }, null);
+    if (data) openByTank[tankId] = { testing: null, vacuum: null, brine: null };
     return;
   }
   if (action === 'testing_complete') {
     const testingId = attemptId || openByTank[tankId].testing || null;
     const tank = (board && board.testing || []).find((x) => Number(x.id) === tankId) || {};
-    const vac = tank.current_vacuum || {};
-    const brine = tank.current_brine || {};
-    const summary = [
-      'Final Testing Result',
-      '',
-      'Vacuum:',
-      `  Start: ${formatNum(vac.vacuum_start_inhg)} inHg`,
-      `  End: ${formatNum(vac.vacuum_end_inhg)} inHg`,
-      `  Difference: ${formatNum(vac.vacuum_delta_inhg)} inHg`,
-      '',
-      'Brine:',
-      `  Expected: ${formatNum(brine.brine_expected_amount)}`,
-      `  Actual: ${formatNum(brine.brine_actual_amount)}`,
-      `  Difference: ${formatNum(brine.brine_variance)}`,
-      '',
-      'Select PASS or FAIL. FAIL requires a reason.',
-    ].join('\n');
+    const vac = tank.current_vacuum || null;
+    const brine = tank.current_brine || null;
+    const lines = ['Final Testing Result', ''];
+    if (brine && brine.brine_actual_amount != null) {
+      lines.push(
+        'Brine:',
+        `  Expected: ${formatNum(brine.brine_expected_amount)}`,
+        `  Actual: ${formatNum(brine.brine_actual_amount)}`,
+        `  Difference: ${formatNum(brine.brine_variance)}`,
+        ''
+      );
+    }
+    if (vac && vac.vacuum_end_inhg != null) {
+      lines.push(
+        'Vacuum:',
+        `  Start: ${formatNum(vac.vacuum_start_inhg)} inHg`,
+        `  End: ${formatNum(vac.vacuum_end_inhg)} inHg`,
+        `  Difference: ${formatNum(vac.vacuum_delta_inhg)} inHg`,
+        ''
+      );
+    }
+    lines.push('PASS moves the tank to QA/QC. FAIL requires a reason.');
+    const summary = lines.join('\n');
     const passFail = await openInput({
       title: 'TEST COMPLETE',
       hint: summary,
@@ -632,15 +778,15 @@ async function handleClick(ev) {
       note: passFail.note || null,
     };
     if (testingId) payload.attempt_id = testingId;
-    await runAction(
-      payload,
-      result === 'PASS' ? 'Testing PASS — ready for Dome Install.' : 'Testing FAIL — Failed / Hold.'
-    );
+    await runAction(payload, result === 'PASS' ? null : 'Testing FAIL — Failed / Hold.');
     openByTank[tankId] = { testing: null, vacuum: null, brine: null };
     return;
   }
   if (action === 'testing_retest') {
-    const data = await runAction({ action: 'testing_retest', tank_id: tankId }, 'Retest started — Vacuum required.');
+    const data = await runAction(
+      { action: 'testing_retest', tank_id: tankId },
+      'Retest started — select Vacuum OR Brine.'
+    );
     if (data && data.attempt_id) {
       openByTank[tankId] = { testing: Number(data.attempt_id), vacuum: null, brine: null };
     }
@@ -663,6 +809,29 @@ async function handleClick(ev) {
       },
       'Sent to FAB Rework Required.'
     );
+    return;
+  }
+  if (action === 'restore_to_assembly') {
+    const tankNumber = btn.getAttribute('data-tank-number') || '';
+    const confirmRestore = await openInput({
+      title: `Restore Tank ${tankNumber} to Assembly?`,
+      hint: [
+        'This tank will leave Testing / QA/QC and return to the Assembly kiosk.',
+        'An Assembly team must CONFIRM TANK again to continue.',
+        'Any open Testing or QA/QC step is cancelled. Recorded test history and labor are kept.',
+        '',
+        'Optional reason below.',
+      ].join('\n'),
+      needNote: true,
+      hideField: true,
+      confirmLabel: 'Restore to Assembly',
+    });
+    if (!confirmRestore) return;
+    await runAction(
+      { action: 'restore_to_assembly', tank_id: tankId, reason: confirmRestore.note || null },
+      null
+    );
+    openByTank[tankId] = { testing: null, vacuum: null, brine: null };
     return;
   }
   if (action === 'add_note') {

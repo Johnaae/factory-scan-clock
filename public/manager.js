@@ -378,7 +378,7 @@ function tankStatusLabel(t) {
   if (st === 'qa_in_progress') return 'QA In Progress';
   if (st === 'qa_failed') return 'QA Failed / Hold';
   if (st === 'testing_failed') return 'Testing Failed — Hold';
-  if (st === 'ready_for_testing') return 'QA Complete / Ready for Testing';
+  if (st === 'ready_for_testing') return 'Assembly Complete / Ready for Testing';
   if (st === 'testing_in_progress') {
     if (t && t.is_testing_retest) return 'Testing — Retest';
     return 'Testing';
@@ -558,7 +558,12 @@ function buildTankMoreMenuHtml(btn) {
   }
   let phase2Actions = '';
   if (
-    statusRaw === 'ready_for_qa'
+    statusRaw === 'ready_for_testing' ||
+    statusRaw === 'testing_in_progress' ||
+    statusRaw === 'testing_failed' ||
+    statusRaw === 'ready_for_qa' ||
+    statusRaw === 'qa_in_progress' ||
+    statusRaw === 'qa_failed'
   ) {
     phase2Actions += `<button type="button" role="menuitem" class="tank-actions-menu-item" data-act="restore-to-assembly" data-id="${id}" data-tank="${tank}">Restore to Assembly</button>`;
   }
@@ -1440,12 +1445,12 @@ function renderTankReport(data) {
     if (st === 'qa_in_progress') return 'QA In Progress';
     if (st === 'qa_failed') return 'QA Failed / Hold';
     if (st === 'testing_failed') return 'Testing Failed — Hold';
-    if (st === 'ready_for_testing') return 'QA Complete / Ready for Testing';
+    if (st === 'ready_for_testing') return 'Assembly Complete / Ready for Testing';
     if (st === 'testing_in_progress') {
       if (tank.is_testing_retest) return 'Testing — Retest';
       return 'Testing';
     }
-    if (st === 'rework_required') return 'Rework Required (returned from Testing)';
+    if (st === 'rework_required') return 'Rework Required (returned from Testing / QA)';
     if (st === 'ready_for_dome_install' || st === 'ready_for_final_completion') return 'Ready for Dome Install';
     if (st === 'archived') return 'Complete';
     if (at && at.assembly_completed_at) return 'Assembly Complete';

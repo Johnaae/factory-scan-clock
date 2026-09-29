@@ -364,7 +364,7 @@ function renderRecentlyFinished() {
       return `<article class="ak-recent-card" data-tank-id="${tid}">
         <h3>Tank ${escapeHtml(t.tank_number || '—')}</h3>
         <p>Finished: ${escapeHtml(formatTs(t.assembly_completed_at))}</p>
-        <p>Status: Ready for QA</p>
+        <p>Status: ${escapeHtml(statusLabel(t.status))}</p>
         <button type="button" class="btn-primary btn-touch" data-ak-action="restore_to_assembly" data-tank-id="${tid}">RESTORE TO ASSEMBLY</button>
       </article>`;
     })
@@ -643,11 +643,11 @@ async function handleTeamCardsClick(ev) {
       : 'this tank';
     const ok = await askConfirm(
       'Finish Assembly?',
-      `This ends Assembly for ${tankNo} and sends the tank to Ready for QA.`,
+      `This ends Assembly for ${tankNo} and sends the tank to Ready for Testing.`,
       'Finish'
     );
     if (!ok) return;
-    await runTeamAction({ action: 'finish', tank_id: tankId, team_id: teamId }, 'Assembly finished — Ready for QA.');
+    await runTeamAction({ action: 'finish', tank_id: tankId, team_id: teamId }, null);
     return;
   }
   if (action === 'remove_from_assembly') {
@@ -820,7 +820,7 @@ async function handleRecentlyFinishedClick(ev) {
   const title = card && card.querySelector('h3') ? card.querySelector('h3').textContent : `Tank ${tankId}`;
   const ok = await askConfirm(
     'Restore Tank to Assembly?',
-    `${title} was marked Finish and is currently Ready for QA.\n\nRestore it to Assembly?`,
+    `${title} was marked Finish and is waiting for Testing (not started yet).\n\nRestore it to Assembly?`,
     'Restore'
   );
   if (!ok) return;

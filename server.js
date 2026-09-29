@@ -6818,6 +6818,19 @@ app.post('/api/qa/action', async (req, res) => {
           body.brine_actual_amount != null ? body.brine_actual_amount : body.actual_amount,
         user,
       });
+    } else if (action === 'brine_result' || action === 'brine_pass_fail') {
+      result = await phase2.recordBrineResult(machine, {
+        attempt_id: body.attempt_id,
+        result: body.result,
+        note: body.note || body.failure_note,
+        user,
+      });
+    } else if (
+      action === 'ready_for_qa' ||
+      action === 'ready_for_qaqc' ||
+      action === 'testing_ready_for_qa'
+    ) {
+      result = await phase2.markTestingReadyForQa(machine, { tank_id: body.tank_id, user });
     } else if (action === 'testing_complete' || action === 'test_complete') {
       result = await phase2.completeTesting(machine, {
         tank_id: body.tank_id,
@@ -6844,6 +6857,13 @@ app.post('/api/qa/action', async (req, res) => {
         body: body.note || body.body,
         user,
       });
+    } else if (action === 'restore_to_assembly') {
+      result = await phase2.restoreTankToAssemblyFromDownstream(body.tank_id, {
+        reason: body.reason || body.note,
+        performed_by: user.name || user.username || 'qa_kiosk',
+        machine_id: machine.id,
+        source: 'qa_kiosk',
+      });
     } else {
       return res.status(400).json({ ok: false, error: 'unknown_action', message: `Unknown QA action: ${action}` });
     }
@@ -6863,9 +6883,10 @@ app.post('/api/manager/tanks/:id/restore-to-assembly', async (req, res) => {
   try {
     const id = Number(req.params.id);
     const reason = String((req.body && req.body.reason) || '').trim();
-    const result = await phase2.restoreTankToAssembly(id, {
+    const result = await phase2.restoreTankToAssemblyFromDownstream(id, {
       reason,
       performed_by: auth.username,
+      source: 'manager',
     });
     if (!result.ok) return res.status(result.status).json(result.body);
     return res.json(result.body);

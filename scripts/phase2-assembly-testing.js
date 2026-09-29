@@ -17,16 +17,21 @@
  *     requires_test=true  → ready_for_testing (eligible for Testing dropdown only — NOT auto-confirmed)
  *     requires_test=false → ready_for_dome_install (skip Testing)
  *   CONFIRM TEST → testing_machine_id (QA selects tank); status stays ready_for_testing until START TESTING
- *   START TESTING → testing_in_progress + open TESTING attempt (Vacuum required first)
- *   Vacuum START/END → measurement; then Vacuum PASS/FAIL
- *   Vacuum PASS → unlock Brine (still in TESTING)
- *   Vacuum FAIL → testing_failed (FAILED/HOLD); RETEST or existing FAB rework
- *   Brine locked until Vacuum PASS on the current TESTING attempt
- *   TEST COMPLETE → final PASS/FAIL after Vacuum PASS + Brine complete
- *     PASS → ready_for_dome_install
- *     FAIL → testing_failed (FAILED/HOLD)
- *   RETEST from testing_failed → new TESTING attempt starting at Vacuum
- *   SEND BACK TO FAB REWORK from testing_failed → existing rework_required FAB workflow
+ *   Workflow order: Assembly → Testing → Ready for QA/QC → QA → Completed
+ *     (Completed = ready_for_dome_install → Manager Complete Tank archives)
+ *   START TESTING → testing_in_progress + open TESTING attempt; operator selects Vacuum OR Brine
+ *   One test per TESTING attempt (the other is locked once a test is started on that attempt)
+ *   Vacuum START → RECORD END → Vacuum PASS/FAIL
+ *   Brine START FILL → STOP FILL → Brine PASS/FAIL
+ *     PASS (either) → stays testing_in_progress; READY FOR QA/QC button unlocks
+ *     FAIL (either) → testing_failed (FAILED/HOLD); RETEST or existing FAB rework
+ *   READY FOR QA/QC → TESTING attempt passed + testing_completed_at → ready_for_qa (QA NOT started)
+ *   START QA → qa_in_progress; QA PASS → ready_for_dome_install (Completed); QA FAIL → qa_failed
+ *   Legacy: tanks the old order parked in ready_for_qa (untested, QA not started) list under
+ *     Ready for Testing and may START TESTING; legacy qa_in_progress tanks → QA PASS → ready_for_testing
+ *   RETEST from testing_failed → new TESTING attempt (select Vacuum or Brine again)
+ *   SEND BACK TO FAB REWORK from testing_failed or qa_failed → existing rework_required FAB workflow
+ *   RESTORE TO ASSEMBLY from any Testing / QA/QC status → ready_for_assembly (open attempts cancelled)
  *   FAB Tank Complete after rework_required → ready_for_testing (skip re-Assembly; requires_test stays true)
  *   Manager Complete Tank → archived + completed_at (final factory completion / ready to ship)
  *   START/STOP WORK manage stage labor only; Tank Duration freezes at Assembly FINISH
@@ -635,19 +640,25 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       open_vacuum_attempt_id: null,
       open_brine_attempt_id: null,
       pending_vacuum_result: null,
+      pending_brine_result: null,
       current_vacuum: null,
       latest_failed_testing: null,
       latest_failed_vacuum: null,
       latest_failed_brine: null,
+      failure_source: null,
       testing_attempt_number: 0,
       is_testing_retest: false,
       testing_status_detail: null,
       testing_status_label: null,
+      selected_test: null,
+      vacuum_unlocked: false,
       vacuum_passed: false,
       brine_unlocked: false,
       brine_started: false,
       brine_completed: false,
+      brine_passed: false,
       current_brine: null,
+      can_ready_for_qa: false,
       can_test_complete: false,
       vacuum_retest_required: false,
       brine_retest_required: false,
@@ -700,7 +711,19 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       .toLowerCase();
     return (
       st === 'in_progress' ||
-      (r[endField] == null && st !== 'recorded' && st !== 'passed' && st !== 'failed')
+      (r[endField] == null &&
+        st !== 'recorded' &&
+        st !== 'passed' &&
+        st !== 'failed' &&
+        st !== 'cancelled')
+    );
+  }
+
+  function isCancelledAttemptRow(r) {
+    return (
+      String(r.attempt_status || '')
+        .trim()
+        .toLowerCase() === 'cancelled'
     );
   }
 
@@ -719,25 +742,26 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
          ORDER BY id ASC`,
         [tid]
       );
-      rows = res.rows || [];
+      rows = (res.rows || []).filter((r) => !isCancelledAttemptRow(r));
     } catch (_err) {
       return emptyTestingSessionContext();
     }
     const testingRows = rows.filter((r) => String(r.test_type || '').toUpperCase() === 'TESTING');
-    const openTesting = [...testingRows].reverse().find((r) => {
-      const st = String(r.attempt_status || '')
+    const attemptStatusOf = (r) =>
+      String(r.attempt_status || '')
         .trim()
         .toLowerCase();
-      return st === 'in_progress' || (!r.result && st !== 'passed' && st !== 'failed');
-    });
+    // Same parent the start actions attach to (ensureOpenTestingAttempt): latest in_progress TESTING row.
+    // Legacy rows without a status are only used when no in_progress parent exists.
+    const openTesting =
+      [...testingRows].reverse().find((r) => attemptStatusOf(r) === 'in_progress') ||
+      [...testingRows].reverse().find((r) => {
+        const st = attemptStatusOf(r);
+        return !r.result && st !== 'passed' && st !== 'failed' && st !== 'recorded';
+      });
     const failedTesting = [...testingRows]
       .reverse()
-      .find(
-        (r) =>
-          normalizeTestResult(r.result) === 'FAIL' ||
-          String(r.attempt_status || '')
-            .toLowerCase() === 'failed'
-      );
+      .find((r) => normalizeTestResult(r.result) === 'FAIL' || attemptStatusOf(r) === 'failed');
     const parentId = openTesting ? Number(openTesting.id) : null;
     const children = parentId
       ? rows.filter(
@@ -771,55 +795,98 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       return normalizeTestResult(r.result) === 'PASS' || st === 'passed';
     });
     const completedBrine = [...brineRows].reverse().find((r) => {
-      const st = String(r.attempt_status || '')
-        .trim()
-        .toLowerCase();
+      const st = attemptStatusOf(r);
       return (
         r.brine_actual_amount != null &&
         (st === 'recorded' || st === 'passed' || st === 'failed' || normalizeTestResult(r.result))
       );
     });
+    const pendingBrine = [...brineRows].reverse().find((r) => {
+      return (
+        attemptStatusOf(r) === 'recorded' && r.brine_actual_amount != null && !normalizeTestResult(r.result)
+      );
+    });
+    const passedBrine = [...brineRows].reverse().find((r) => {
+      return normalizeTestResult(r.result) === 'PASS' || attemptStatusOf(r) === 'passed';
+    });
+    const isFailedRow = (r) => normalizeTestResult(r.result) === 'FAIL' || attemptStatusOf(r) === 'failed';
     const failedVacuumGlobal = [...rows]
       .reverse()
-      .find(
-        (r) =>
-          String(r.test_type || '').toUpperCase() === 'VACUUM' &&
-          (normalizeTestResult(r.result) === 'FAIL' ||
-            String(r.attempt_status || '')
-              .toLowerCase() === 'failed')
-      );
-    const failedCount = testingRows.filter(
-      (r) =>
-        normalizeTestResult(r.result) === 'FAIL' ||
-        String(r.attempt_status || '')
-          .toLowerCase() === 'failed'
-    ).length;
+      .find((r) => String(r.test_type || '').toUpperCase() === 'VACUUM' && isFailedRow(r));
+    const failedBrineGlobal = [...rows]
+      .reverse()
+      .find((r) => String(r.test_type || '').toUpperCase() === 'BRINE' && isFailedRow(r));
+    const failedCount = testingRows.filter(isFailedRow).length;
     const isRetest = Boolean(openTesting && failedCount > 0);
     const vacuumPassed = Boolean(passedVacuum);
+    const brinePassed = Boolean(passedBrine);
     const brineStarted = brineRows.length > 0;
     const brineCompleted = Boolean(completedBrine);
-    // Final TEST COMPLETE only after Vacuum PASS and Brine fill completed.
-    const canTestComplete = vacuumPassed && brineCompleted;
+    // One test per Testing attempt: the operator selects Vacuum OR Brine.
+    const selectedTest = vacuumRows.length > 0 ? 'VACUUM' : brineStarted ? 'BRINE' : null;
+    // READY FOR QA/QC: the selected test PASSED and nothing is still open or awaiting PASS/FAIL.
+    const canReadyForQa =
+      Boolean(openTesting) &&
+      (vacuumPassed || brinePassed) &&
+      !openVacuum &&
+      !openBrine &&
+      !pendingVacuum &&
+      !(pendingBrine && !vacuumPassed);
+    // The failed measurement under the latest failed TESTING attempt decides what Failed / Hold shows.
+    let failureSource = null;
+    if (failedTesting) {
+      const pid = Number(failedTesting.id);
+      const child = [...rows]
+        .reverse()
+        .find(
+          (r) =>
+            Number(r.parent_attempt_id) === pid &&
+            isFailedRow(r) &&
+            /VACUUM|BRINE/.test(String(r.test_type || '').toUpperCase())
+        );
+      failureSource = child
+        ? String(child.test_type).toUpperCase() === 'BRINE'
+          ? 'brine'
+          : 'vacuum'
+        : 'testing';
+    } else if (failedVacuumGlobal || failedBrineGlobal) {
+      failureSource =
+        Number((failedBrineGlobal || {}).id || 0) > Number((failedVacuumGlobal || {}).id || 0)
+          ? 'brine'
+          : 'vacuum';
+    }
     let testing_status_detail = null;
     let testing_status_label = null;
-    if (openTesting && isRetest) {
+    if (openTesting && canReadyForQa) {
+      testing_status_detail = 'test_passed_ready_for_qa';
+      testing_status_label = `Testing — ${vacuumPassed ? 'Vacuum' : 'Brine'} PASS`;
+    } else if (openTesting && isRetest) {
       testing_status_detail = 'testing_retest_in_progress';
       testing_status_label = 'Testing — Retest';
-    } else if (openTesting && vacuumPassed) {
-      testing_status_detail = 'vacuum_passed_brine';
+    } else if (openTesting && selectedTest === 'VACUUM') {
+      testing_status_detail = 'vacuum_selected';
+      testing_status_label = 'Testing — Vacuum';
+    } else if (openTesting && selectedTest === 'BRINE') {
+      testing_status_detail = 'brine_selected';
       testing_status_label = 'Testing — Brine';
     } else if (openTesting) {
-      testing_status_detail = 'vacuum_required';
-      testing_status_label = 'Testing — Vacuum Required';
-    } else if (failedVacuumGlobal || failedTesting) {
+      testing_status_detail = 'select_test';
+      testing_status_label = 'Testing — Select Vacuum or Brine';
+    } else if (failureSource) {
       testing_status_detail = 'testing_failed_hold';
-      testing_status_label = failedVacuumGlobal ? 'Vacuum Failed — Hold' : 'Testing Failed — Hold';
+      testing_status_label =
+        failureSource === 'vacuum'
+          ? 'Vacuum Failed — Hold'
+          : failureSource === 'brine'
+            ? 'Brine Failed — Hold'
+            : 'Testing Failed — Hold';
     }
     return {
       open_testing_attempt_id: openTesting ? Number(openTesting.id) : null,
       open_vacuum_attempt_id: openVacuum ? Number(openVacuum.id) : null,
       open_brine_attempt_id: openBrine ? Number(openBrine.id) : null,
       pending_vacuum_result: pendingVacuum ? mapAttemptBrief(pendingVacuum) : null,
+      pending_brine_result: pendingBrine ? mapAttemptBrief(pendingBrine) : null,
       current_vacuum: passedVacuum
         ? mapAttemptBrief(passedVacuum)
         : pendingVacuum
@@ -827,23 +894,30 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
           : openVacuum
             ? mapAttemptBrief(openVacuum)
             : null,
-      current_brine: completedBrine
-        ? mapAttemptBrief(completedBrine)
-        : openBrine
-          ? mapAttemptBrief(openBrine)
-          : null,
+      current_brine: passedBrine
+        ? mapAttemptBrief(passedBrine)
+        : completedBrine
+          ? mapAttemptBrief(completedBrine)
+          : openBrine
+            ? mapAttemptBrief(openBrine)
+            : null,
       latest_failed_testing: failedTesting ? mapAttemptBrief(failedTesting) : null,
       latest_failed_vacuum: failedVacuumGlobal ? mapAttemptBrief(failedVacuumGlobal) : null,
-      latest_failed_brine: null,
+      latest_failed_brine: failedBrineGlobal ? mapAttemptBrief(failedBrineGlobal) : null,
+      failure_source: openTesting ? null : failureSource,
       testing_attempt_number: testingRows.length,
       is_testing_retest: isRetest,
       testing_status_detail,
       testing_status_label,
+      selected_test: selectedTest,
+      vacuum_unlocked: Boolean(openTesting) && selectedTest !== 'BRINE',
       vacuum_passed: vacuumPassed,
-      brine_unlocked: vacuumPassed,
+      brine_unlocked: Boolean(openTesting) && selectedTest !== 'VACUUM',
       brine_started: brineStarted,
       brine_completed: brineCompleted,
-      can_test_complete: canTestComplete,
+      brine_passed: brinePassed,
+      can_ready_for_qa: canReadyForQa,
+      can_test_complete: canReadyForQa,
       vacuum_retest_required: false,
       brine_retest_required: false,
       vacuum_retest_in_progress: false,
@@ -865,9 +939,26 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
     return { ...summary, ...ctx };
   }
 
+  /**
+   * Tank finished Assembly under the old QA-before-Testing order and is waiting in Ready for QA
+   * without any Testing or QA started. It belongs in Ready for Testing under the current order.
+   */
+  function isUntestedLegacyQaTank(tank) {
+    return (
+      Boolean(tank) &&
+      normalizeAssemblyTankStatus(tank.status) === ASSEMBLY_STATUSES.READY_FOR_QA &&
+      tankRequiresTest(tank) &&
+      !tank.testing_completed_at &&
+      !tank.testing_started_at &&
+      !tank.qa_started_at
+    );
+  }
+
   async function ensureOpenTestingAttempt(tankId, machine, user, client, previousStatus) {
     const midRaw = Number(machine && machine.id);
     const mid = Number.isInteger(midRaw) && midRaw > 0 ? midRaw : null;
+    // Serialize Testing actions per tank so double taps / two kiosks cannot open duplicate tests.
+    await client.query(`SELECT id FROM tanks WHERE id = $1 FOR UPDATE`, [tankId]);
     const existing = await client.query(
       `SELECT id FROM test_attempts
        WHERE tank_id = $1
@@ -1591,8 +1682,9 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
   }
 
   /**
-   * Tanks finished on this Assembly kiosk that are Ready for QA and QA has not started.
-   * Shown so an accidental FINISH can be restored before inspection begins.
+   * Tanks finished on this Assembly kiosk that are waiting downstream and nothing has started
+   * (Ready for Testing, or legacy Ready for QA from before the Testing → QA/QC order).
+   * Shown so an accidental FINISH can be restored before Testing / inspection begins.
    */
   async function listRecentlyFinishedAssembly(machineId) {
     const mid = Number(machineId);
@@ -1602,11 +1694,13 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
        FROM tanks
        WHERE deleted_at IS NULL
          AND assembly_machine_id = $1
-         AND LOWER(TRIM(status)) = $2
-         AND qa_started_at IS NULL
          AND assembly_completed_at IS NOT NULL
+         AND testing_started_at IS NULL
+         AND testing_machine_id IS NULL
+         AND qa_started_at IS NULL
+         AND LOWER(TRIM(status)) IN ($2, $3)
        ORDER BY assembly_completed_at DESC, tank_number ASC`,
-      [mid, ASSEMBLY_STATUSES.READY_FOR_QA]
+      [mid, ASSEMBLY_STATUSES.READY_FOR_TESTING, ASSEMBLY_STATUSES.READY_FOR_QA]
     );
     const out = [];
     for (const row of rows) {
@@ -2130,10 +2224,10 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       }
 
       // End Assembly Duration at assembly_completed_at. Never reset assembly_started_at.
-      // Route by requires_test: Ready for QA (then Testing) vs Ready for Dome Install.
+      // Route by requires_test: Ready for Testing (then QA/QC) vs Ready for Dome Install.
       const requiresTest = tankRequiresTest(tank);
       const nextStatus = requiresTest
-        ? ASSEMBLY_STATUSES.READY_FOR_QA
+        ? ASSEMBLY_STATUSES.READY_FOR_TESTING
         : ASSEMBLY_STATUSES.READY_FOR_DOME_INSTALL;
       await client.query(
         `UPDATE tanks
@@ -2150,7 +2244,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         tank: mapTankSummary(updated),
         requires_test: requiresTest,
         message: requiresTest
-          ? 'Assembly complete — Ready for QA. QA/QC personnel must review before Testing.'
+          ? 'Assembly complete — Ready for Testing. QA/QC reviews the tank after Testing.'
           : 'Assembly complete — ready for Dome Install (no testing required). Removed from Assembly kiosk. Production time frozen.',
       });
     });
@@ -2271,7 +2365,8 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       const status = normalizeAssemblyTankStatus(tank.status);
       if (
         status !== ASSEMBLY_STATUSES.READY_FOR_TESTING &&
-        status !== ASSEMBLY_STATUSES.TESTING_IN_PROGRESS
+        status !== ASSEMBLY_STATUSES.TESTING_IN_PROGRESS &&
+        !isUntestedLegacyQaTank(tank)
       ) {
         return errResult(409, 'tank_status', `Cannot start Testing from "${status}".`);
       }
@@ -2294,7 +2389,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
           mapTankSummary(await getTankById(tankId, client)),
           client
         ),
-        message: 'Testing in progress. Record Vacuum/Brine as needed, then TEST COMPLETE.',
+        message: 'Testing started — select Vacuum OR Brine.',
       });
     });
   }
@@ -2428,9 +2523,11 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         attempt = attemptRes.rows[0];
       }
 
+      let passNextStatus = null;
       if (result === 'PASS') {
-        // Testing PASS → Ready for Dome Install (NOT final factory completion).
+        // Testing PASS → Ready for QA/QC.
         // Clear Testing kiosk confirmation so tank leaves Testing section + dropdown.
+        passNextStatus = ASSEMBLY_STATUSES.READY_FOR_QA;
         await client.query(
           `UPDATE tanks
            SET status = $1,
@@ -2441,7 +2538,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
                completed_at = NULL,
                updated_at = $2::timestamptz
            WHERE id = $3`,
-          [ASSEMBLY_STATUSES.READY_FOR_DOME_INSTALL, ts, tankId]
+          [passNextStatus, ts, tankId]
         );
         try {
           await client.query(
@@ -2499,7 +2596,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         tank: mapTankSummary(updated),
         message:
           result === 'PASS'
-            ? 'Testing PASS — ready for Dome Install. Manager Complete Tank is still required for final completion.'
+            ? testingPassMessage()
             : 'Testing FAIL recorded (legacy API) — FAILED / HOLD. Prefer TEST COMPLETE on QA/QC kiosk; use Send Back to FAB Rework explicitly.',
       });
     });
@@ -3105,51 +3202,157 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
     return cards;
   }
 
-  async function restoreTankToAssembly(tankId, opts = {}) {
+  const DOWNSTREAM_RESTORE_STATUSES = new Set([
+    ASSEMBLY_STATUSES.READY_FOR_TESTING,
+    ASSEMBLY_STATUSES.TESTING_IN_PROGRESS,
+    ASSEMBLY_STATUSES.TESTING_FAILED,
+    ASSEMBLY_STATUSES.READY_FOR_QA,
+    ASSEMBLY_STATUSES.QA_IN_PROGRESS,
+    ASSEMBLY_STATUSES.QA_FAILED,
+  ]);
+
+  /**
+   * mode 'assembly_finish': Assembly kiosk undo of an accidental FINISH — only before Testing / QA started.
+   * mode 'downstream': Testing / QA/QC kiosk (or Manager) — any Testing or QA/QC status.
+   * Both return the tank to ready_for_assembly (unassigned) so any Assembly team can CONFIRM it again.
+   * Test attempts history and labor are kept; open Testing attempts are marked cancelled.
+   */
+  async function restoreTankToAssemblyCore(tankId, opts, mode) {
     const tid = Number(tankId);
     if (!Number.isInteger(tid) || tid <= 0) {
       return errResult(400, 'validation', 'tankId is required.');
     }
+    const downstream = mode === 'downstream';
     const reason =
-      String(opts.reason || '').trim() || 'Accidental Assembly Finish reversed before QA started.';
+      String(opts.reason || '').trim() ||
+      (downstream
+        ? 'Restored to Assembly from Testing / QA/QC.'
+        : 'Accidental Assembly Finish reversed before Testing started.');
     return withTransaction(async (client) => {
       const tank = await getTankById(tid, client);
       if (!tank || tank.deleted_at) {
         return errResult(404, 'tank_not_found', 'Tank not found.');
       }
       const status = normalizeAssemblyTankStatus(tank.status);
-      if (status !== ASSEMBLY_STATUSES.READY_FOR_QA || tank.qa_started_at) {
-        return errResult(
-          409,
-          'qa_already_started',
-          'Restore to Assembly is only allowed while the tank is Ready for QA and QA has not started.',
-          { tank_status: status, qa_started_at: tank.qa_started_at || null }
-        );
-      }
-      const machineId =
-        opts.machine_id != null
-          ? Number(opts.machine_id)
-          : opts.machineId != null
-            ? Number(opts.machineId)
-            : null;
-      if (Number.isInteger(machineId) && machineId > 0) {
-        const owned = tank.assembly_machine_id != null ? Number(tank.assembly_machine_id) : null;
-        if (owned != null && owned !== machineId) {
-          return errResult(409, 'tank_on_other_kiosk', 'Tank was finished on another Assembly kiosk.');
+      if (downstream) {
+        if (!DOWNSTREAM_RESTORE_STATUSES.has(status)) {
+          return errResult(
+            409,
+            'tank_status',
+            `Restore to Assembly is only available while the tank is in Testing or QA/QC (got "${status}").`,
+            { tank_status: status }
+          );
+        }
+      } else {
+        const untouchedTesting =
+          status === ASSEMBLY_STATUSES.READY_FOR_TESTING &&
+          !tank.testing_started_at &&
+          tank.testing_machine_id == null &&
+          !tank.qa_started_at;
+        const untouchedLegacyQa =
+          status === ASSEMBLY_STATUSES.READY_FOR_QA && !tank.qa_started_at && !tank.testing_started_at;
+        if (!untouchedTesting && !untouchedLegacyQa) {
+          return errResult(
+            409,
+            'downstream_started',
+            'Restore from the Assembly kiosk is only allowed before Testing starts. Use RESTORE TO ASSEMBLY on the Testing / QA/QC kiosk.',
+            {
+              tank_status: status,
+              testing_started_at: tank.testing_started_at || null,
+              qa_started_at: tank.qa_started_at || null,
+            }
+          );
+        }
+        const machineId =
+          opts.machine_id != null
+            ? Number(opts.machine_id)
+            : opts.machineId != null
+              ? Number(opts.machineId)
+              : null;
+        if (Number.isInteger(machineId) && machineId > 0) {
+          const owned = tank.assembly_machine_id != null ? Number(tank.assembly_machine_id) : null;
+          if (owned != null && owned !== machineId) {
+            return errResult(409, 'tank_on_other_kiosk', 'Tank was finished on another Assembly kiosk.');
+          }
         }
       }
       const ts = opts.at || nowIso();
       const priorFinishedAt = tank.assembly_completed_at || null;
-      await client.query(
-        `UPDATE tanks
-         SET status = $1,
-             assembly_machine_id = NULL,
-             assembly_team_id = NULL,
-             assembly_restored_at = $2::timestamptz,
-             updated_at = $2::timestamptz
-         WHERE id = $3`,
-        [ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY, ts, tid]
-      );
+
+      // Status-guarded so a double tap / second kiosk cannot restore twice.
+      const upd = downstream
+        ? await client.query(
+            `UPDATE tanks
+             SET status = $1,
+                 assembly_machine_id = NULL,
+                 assembly_team_id = NULL,
+                 assembly_restored_at = $2::timestamptz,
+                 testing_machine_id = NULL,
+                 testing_confirmed_at = NULL,
+                 testing_started_at = NULL,
+                 testing_completed_at = NULL,
+                 qa_started_at = NULL,
+                 qa_completed_at = NULL,
+                 qa_machine_id = NULL,
+                 qa_result = NULL,
+                 qa_failure_note = NULL,
+                 qa_user_id = NULL,
+                 qa_user_name = NULL,
+                 completed_at = NULL,
+                 updated_at = $2::timestamptz
+             WHERE id = $3 AND LOWER(TRIM(status)) = $4`,
+            [ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY, ts, tid, status]
+          )
+        : await client.query(
+            `UPDATE tanks
+             SET status = $1,
+                 assembly_machine_id = NULL,
+                 assembly_team_id = NULL,
+                 assembly_restored_at = $2::timestamptz,
+                 updated_at = $2::timestamptz
+             WHERE id = $3 AND LOWER(TRIM(status)) = $4`,
+            [ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY, ts, tid, status]
+          );
+      if (!upd.rowCount) {
+        return errResult(409, 'tank_status_changed', 'Tank status changed — refresh and try again.');
+      }
+
+      let cancelledAttemptIds = [];
+      if (downstream) {
+        const openParents = await client.query(
+          `SELECT id FROM test_attempts
+           WHERE tank_id = $1
+             AND UPPER(TRIM(COALESCE(test_type, ''))) = 'TESTING'
+             AND LOWER(TRIM(COALESCE(attempt_status, ''))) = 'in_progress'`,
+          [tid]
+        );
+        const parentIds = openParents.rows.map((r) => Number(r.id));
+        if (parentIds.length) {
+          const cancelled = await client.query(
+            `UPDATE test_attempts
+             SET attempt_status = 'cancelled',
+                 completed_at = COALESCE(completed_at, $2::timestamptz),
+                 failure_note = COALESCE(failure_note, $3)
+             WHERE tank_id = $1
+               AND result IS NULL
+               AND LOWER(TRIM(COALESCE(attempt_status, ''))) IN ('in_progress', 'recorded')
+               AND (id = ANY($4::bigint[]) OR parent_attempt_id = ANY($4::bigint[]))
+             RETURNING id`,
+            [tid, ts, 'Cancelled — tank restored to Assembly', parentIds]
+          );
+          cancelledAttemptIds = cancelled.rows.map((r) => Number(r.id));
+        }
+        const activeSession = await getActiveSessionForTank(tid, null, client);
+        if (activeSession) {
+          await closeStageSession(
+            activeSession,
+            ts,
+            { statusTarget: 'stopped', notes: 'Restored to Assembly' },
+            client
+          );
+        }
+      }
+
       try {
         await client.query(
           `UPDATE machines SET active_tank_id = NULL, updated_at = $1::timestamptz WHERE active_tank_id = $2`,
@@ -3165,26 +3368,54 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         [
           tid,
           tank.tank_number,
-          String(opts.performed_by || 'assembly_kiosk').slice(0, 200),
+          String(opts.performed_by || (downstream ? 'qa_kiosk' : 'assembly_kiosk')).slice(0, 200),
           ts,
           reason.slice(0, 2000),
           status,
           ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY,
-          JSON.stringify({
-            source: 'assembly_finish_reversed',
-            prior_assembly_completed_at: priorFinishedAt,
-            assembly_started_at: tank.assembly_started_at || null,
-          }),
+          JSON.stringify(
+            downstream
+              ? {
+                  source: String(opts.source || 'downstream_restore'),
+                  machine_id: opts.machine_id != null ? Number(opts.machine_id) : null,
+                  prior_assembly_completed_at: priorFinishedAt,
+                  assembly_started_at: tank.assembly_started_at || null,
+                  prior_testing_machine_id: tank.testing_machine_id != null ? Number(tank.testing_machine_id) : null,
+                  prior_testing_started_at: tank.testing_started_at || null,
+                  prior_testing_completed_at: tank.testing_completed_at || null,
+                  prior_qa_started_at: tank.qa_started_at || null,
+                  prior_qa_completed_at: tank.qa_completed_at || null,
+                  prior_qa_result: tank.qa_result || null,
+                  prior_qa_failure_note: tank.qa_failure_note || null,
+                  prior_qa_user_name: tank.qa_user_name || null,
+                  cancelled_test_attempt_ids: cancelledAttemptIds,
+                }
+              : {
+                  source: 'assembly_finish_reversed',
+                  prior_assembly_completed_at: priorFinishedAt,
+                  assembly_started_at: tank.assembly_started_at || null,
+                }
+          ),
         ]
       );
       const updated = await getTankById(tid, client);
       return okResult({
         action: 'restore_to_assembly',
         tank: mapTankSummary(updated),
-        message:
-          'Tank restored to the Assembly selection list. Confirm the tank again. Prior labor and the original Finish are preserved.',
+        previous_status: status,
+        message: downstream
+          ? `Tank ${tank.tank_number} restored to Assembly. It is available again on the Assembly kiosk — CONFIRM TANK to resume. Prior labor and test history are preserved.`
+          : 'Tank restored to the Assembly selection list. Confirm the tank again. Prior labor and the original Finish are preserved.',
       });
     });
+  }
+
+  async function restoreTankToAssembly(tankId, opts = {}) {
+    return restoreTankToAssemblyCore(tankId, opts, 'assembly_finish');
+  }
+
+  async function restoreTankToAssemblyFromDownstream(tankId, opts = {}) {
+    return restoreTankToAssemblyCore(tankId, opts, 'downstream');
   }
 
   async function removeTankFromAssembly(tankId, opts = {}) {
@@ -3415,8 +3646,14 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       }
       const ts = opts.at || nowIso();
       const user = opts.user || {};
+      // Legacy tanks that reached QA before Testing (old order) still need Testing after QA PASS.
+      const legacyNeedsTesting = tankRequiresTest(tank) && !tank.testing_completed_at;
       const nextStatus =
-        result === 'PASS' ? ASSEMBLY_STATUSES.READY_FOR_TESTING : ASSEMBLY_STATUSES.QA_FAILED;
+        result === 'PASS'
+          ? legacyNeedsTesting
+            ? ASSEMBLY_STATUSES.READY_FOR_TESTING
+            : ASSEMBLY_STATUSES.READY_FOR_DOME_INSTALL
+          : ASSEMBLY_STATUSES.QA_FAILED;
       await client.query(
         `INSERT INTO test_attempts
            (tank_id, machine_id, result, attempted_at, failure_note, previous_status,
@@ -3462,10 +3699,13 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       return okResult({
         action: 'qa_result',
         result,
+        next_status: nextStatus,
         tank: mapTankSummary(updated),
         message:
           result === 'PASS'
-            ? 'QA PASS — tank is Ready for Testing.'
+            ? nextStatus === ASSEMBLY_STATUSES.READY_FOR_TESTING
+              ? 'QA PASS — tank is Ready for Testing.'
+              : 'QA PASS — tank is Completed (Ready for Dome Install).'
             : 'QA FAIL recorded. Tank marked QA Failed with reason preserved.',
       });
     });
@@ -3501,7 +3741,18 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       const parentId = await ensureOpenTestingAttempt(tankId, machine, user, client, status);
       const ctx = await getTestingFailureContext(tankId, client);
       if (ctx.vacuum_passed) {
-        return errResult(409, 'vacuum_already_passed', 'Vacuum already PASSED for this Testing attempt.');
+        return errResult(
+          409,
+          'vacuum_already_passed',
+          'Vacuum already PASSED for this Testing attempt. Press READY FOR QA/QC.'
+        );
+      }
+      if (ctx.selected_test === 'BRINE') {
+        return errResult(
+          409,
+          'brine_selected',
+          'Brine was selected for this Testing attempt. Vacuum is not required — finish Brine and press TEST COMPLETE.'
+        );
       }
       if (ctx.pending_vacuum_result) {
         return errResult(
@@ -3514,7 +3765,8 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         return errResult(
           409,
           'vacuum_open',
-          'A Vacuum test is already in progress. Record the ending reading first.'
+          'A Vacuum test is already in progress. Press RECORD END VACUUM and enter the ending reading.',
+          { open_vacuum_attempt_id: ctx.open_vacuum_attempt_id }
         );
       }
       const ts = opts.at || nowIso();
@@ -3632,7 +3884,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
     });
   }
 
-  /** Vacuum PASS → unlock Brine. Vacuum FAIL → FAILED / HOLD (testing_failed). */
+  /** Vacuum PASS → stays in Testing; READY FOR QA/QC unlocks. Vacuum FAIL → FAILED / HOLD (testing_failed). */
   async function recordVacuumResult(machine, opts = {}) {
     const attemptId = Number(opts.attempt_id != null ? opts.attempt_id : opts.attemptId);
     const result = normalizeTestResult(opts.result);
@@ -3696,7 +3948,10 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
 
       const parentId =
         attempt.parent_attempt_id != null ? Number(attempt.parent_attempt_id) : null;
+      // PASS keeps the tank in Testing; the operator presses READY FOR QA/QC to move it on.
+      let nextStatus = ASSEMBLY_STATUSES.TESTING_IN_PROGRESS;
       if (result === 'FAIL') {
+        nextStatus = ASSEMBLY_STATUSES.TESTING_FAILED;
         if (parentId) {
           await client.query(
             `UPDATE test_attempts
@@ -3729,6 +3984,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         attempt_id: attemptId,
         testing_attempt_id: parentId,
         result,
+        next_status: nextStatus,
         vacuum_start_inhg: startInHg,
         vacuum_end_inhg: endInHg,
         vacuum_delta_inhg:
@@ -3741,7 +3997,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         ),
         message:
           result === 'PASS'
-            ? 'Vacuum PASS — Brine is now unlocked.'
+            ? 'Vacuum PASS — press READY FOR QA/QC to send the tank to QA/QC.'
             : 'Vacuum FAIL — tank moved to FAILED / HOLD.',
       });
     });
@@ -3771,22 +4027,36 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
           409,
           'tank_status',
           status === ASSEMBLY_STATUSES.READY_FOR_TESTING
-            ? 'Press START TESTING, then complete Vacuum PASS before Brine.'
+            ? 'Press START TESTING before Brine.'
             : `Brine requires Testing in progress (got "${status}").`
         );
       }
       const user = opts.user || {};
       const parentId = await ensureOpenTestingAttempt(tankId, machine, user, client, status);
       const ctx = await getTestingFailureContext(tankId, client);
-      if (!ctx.vacuum_passed) {
+      if (ctx.selected_test === 'VACUUM') {
         return errResult(
           409,
-          'vacuum_required',
-          'Brine is locked until Vacuum PASS for the current Testing attempt.'
+          'vacuum_selected',
+          'Vacuum was selected for this Testing attempt. Brine is not required — finish the Vacuum test.'
         );
       }
       if (ctx.open_brine_attempt_id) {
-        return errResult(409, 'brine_open', 'A Brine fill is already in progress. Press STOP FILL first.');
+        return errResult(
+          409,
+          'brine_open',
+          'A Brine fill is already in progress. Press STOP FILL and enter the actual amount.',
+          { open_brine_attempt_id: ctx.open_brine_attempt_id }
+        );
+      }
+      if (ctx.brine_completed) {
+        return errResult(
+          409,
+          'brine_already_recorded',
+          ctx.brine_passed
+            ? 'Brine already PASSED for this Testing attempt. Press READY FOR QA/QC.'
+            : 'Brine is already recorded for this Testing attempt. Choose Brine PASS or FAIL.'
+        );
       }
       const ts = opts.at || nowIso();
       const insert = await client.query(
@@ -3881,18 +4151,198 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         brine_variance: variance,
         elapsed_ms: elapsedMs,
         elapsed_display: formatDurationXhYm(elapsedMs),
+        needs_result: true,
         tank: await enrichTankSummaryWithTestingFailure(
           mapTankSummary(await getTankById(tankId, client)),
           client
         ),
-        message: 'Brine data recorded. Press TEST COMPLETE when ready.',
+        message: 'Brine data recorded. Choose PASS or FAIL.',
+      });
+    });
+  }
+
+  /** Brine PASS → stays in Testing; READY FOR QA/QC unlocks. Brine FAIL → FAILED / HOLD (testing_failed). */
+  async function recordBrineResult(machine, opts = {}) {
+    const attemptId = Number(opts.attempt_id != null ? opts.attempt_id : opts.attemptId);
+    const result = normalizeTestResult(opts.result);
+    const note = String(opts.note || opts.failure_note || '').trim();
+    if (!Number.isInteger(attemptId) || attemptId <= 0) {
+      return errResult(400, 'validation', 'attempt_id is required (Brine attempt).');
+    }
+    if (!result) {
+      return errResult(400, 'validation', 'result must be PASS or FAIL.');
+    }
+    if (result === 'FAIL' && !note) {
+      return errResult(400, 'validation', 'A failure reason is required for Brine FAIL.');
+    }
+    return withTransaction(async (client) => {
+      const { rows } = await client.query(`SELECT * FROM test_attempts WHERE id = $1 FOR UPDATE`, [
+        attemptId,
+      ]);
+      if (!rows.length) return errResult(404, 'not_found', 'Brine attempt not found.');
+      const attempt = rows[0];
+      if (String(attempt.test_type || '').toUpperCase() !== 'BRINE') {
+        return errResult(409, 'wrong_type', 'Not a Brine attempt.');
+      }
+      if (attempt.brine_actual_amount == null) {
+        return errResult(409, 'incomplete', 'Press STOP FILL and record the actual amount before PASS/FAIL.');
+      }
+      const prior = String(attempt.attempt_status || '')
+        .trim()
+        .toLowerCase();
+      if (prior === 'passed' || prior === 'failed' || prior === 'cancelled' || normalizeTestResult(attempt.result)) {
+        return errResult(409, 'already_complete', 'This Brine attempt already has a result.');
+      }
+      const tankId = Number(attempt.tank_id);
+      const tank = await getTankById(tankId, client);
+      if (!tank || tank.deleted_at) {
+        return errResult(404, 'tank_not_found', 'Tank not found.');
+      }
+      if (normalizeAssemblyTankStatus(tank.status) !== ASSEMBLY_STATUSES.TESTING_IN_PROGRESS) {
+        return errResult(409, 'tank_status', 'Brine result requires Testing in progress.');
+      }
+      const ts = opts.at || nowIso();
+      const user = opts.user || {};
+      await client.query(
+        `UPDATE test_attempts
+         SET result = $1,
+             attempt_status = $2,
+             failure_note = $3,
+             completed_at = COALESCE(completed_at, $4::timestamptz),
+             tester_user_id = COALESCE($5, tester_user_id),
+             tester_user_name = COALESCE($6, tester_user_name)
+         WHERE id = $7`,
+        [
+          result,
+          result === 'PASS' ? 'passed' : 'failed',
+          result === 'FAIL' ? note : null,
+          ts,
+          user.id != null ? Number(user.id) : null,
+          user.name || user.username || null,
+          attemptId,
+        ]
+      );
+      const parentId =
+        attempt.parent_attempt_id != null ? Number(attempt.parent_attempt_id) : null;
+      if (result === 'FAIL') {
+        if (parentId) {
+          await client.query(
+            `UPDATE test_attempts
+             SET result = 'FAIL',
+                 attempt_status = 'failed',
+                 failure_note = $1,
+                 completed_at = COALESCE(completed_at, $2::timestamptz)
+             WHERE id = $3
+               AND UPPER(TRIM(COALESCE(test_type, ''))) = 'TESTING'
+               AND LOWER(TRIM(COALESCE(attempt_status, ''))) = 'in_progress'`,
+            [note.slice(0, 4000), ts, parentId]
+          );
+        }
+        await client.query(
+          `UPDATE tanks SET status = $1, updated_at = $2::timestamptz WHERE id = $3`,
+          [ASSEMBLY_STATUSES.TESTING_FAILED, ts, tankId]
+        );
+      }
+      return okResult({
+        action: 'brine_result',
+        attempt_id: attemptId,
+        testing_attempt_id: parentId,
+        result,
+        tank: await enrichTankSummaryWithTestingFailure(
+          mapTankSummary(await getTankById(tankId, client)),
+          client
+        ),
+        message:
+          result === 'PASS'
+            ? 'Brine PASS — press READY FOR QA/QC to send the tank to QA/QC.'
+            : 'Brine FAIL — tank moved to FAILED / HOLD.',
       });
     });
   }
 
   /**
-   * TEST COMPLETE — final PASS/FAIL after Vacuum PASS + Brine complete.
-   * FAIL → testing_failed (FAILED/HOLD). PASS → ready_for_dome_install.
+   * READY FOR QA/QC — the selected test (Vacuum OR Brine) PASSED on the open Testing attempt.
+   * Closes the Testing attempt as PASS and moves the tank to ready_for_qa. Does NOT start QA.
+   */
+  async function markTestingReadyForQa(machine, opts = {}) {
+    const midRaw = Number(machine && machine.id);
+    const mid = Number.isInteger(midRaw) && midRaw > 0 ? midRaw : null;
+    const tankId = Number(opts.tankId != null ? opts.tankId : opts.tank_id);
+    if (!Number.isInteger(tankId) || tankId <= 0) {
+      return errResult(400, 'validation', 'tankId is required.');
+    }
+    return withTransaction(async (client) => {
+      await client.query(`SELECT id FROM tanks WHERE id = $1 FOR UPDATE`, [tankId]);
+      const tank = await getTankById(tankId, client);
+      if (!tank || tank.deleted_at) {
+        return errResult(404, 'tank_not_found', 'Tank not found.');
+      }
+      const status = normalizeAssemblyTankStatus(tank.status);
+      if (status !== ASSEMBLY_STATUSES.TESTING_IN_PROGRESS) {
+        return errResult(
+          409,
+          'tank_status',
+          `READY FOR QA/QC requires Testing in progress (got "${status}").`,
+          { tank_status: status }
+        );
+      }
+      const ctx = await getTestingFailureContext(tankId, client);
+      if (!ctx.can_ready_for_qa) {
+        let message = 'Complete the selected test with PASS (Vacuum or Brine) before READY FOR QA/QC.';
+        if (ctx.open_vacuum_attempt_id) message = 'Record the ending Vacuum reading first.';
+        else if (ctx.open_brine_attempt_id) message = 'Press STOP FILL for the open Brine test first.';
+        else if (ctx.pending_vacuum_result) message = 'Choose Vacuum PASS or FAIL first.';
+        else if (ctx.pending_brine_result) message = 'Choose Brine PASS or FAIL first.';
+        return errResult(409, 'test_not_passed', message);
+      }
+      const ts = opts.at || nowIso();
+      const user = opts.user || {};
+      const parentId = ctx.open_testing_attempt_id;
+      await client.query(
+        `UPDATE test_attempts
+         SET result = 'PASS',
+             attempt_status = 'passed',
+             completed_at = COALESCE(completed_at, $1::timestamptz),
+             machine_id = COALESCE(machine_id, $2),
+             tester_user_id = COALESCE($3, tester_user_id),
+             tester_user_name = COALESCE($4, tester_user_name)
+         WHERE id = $5
+           AND UPPER(TRIM(COALESCE(test_type, ''))) = 'TESTING'`,
+        [ts, mid, user.id != null ? Number(user.id) : null, user.name || user.username || null, parentId]
+      );
+      const nextStatus = await markTankTestingPassed(tank, ts, client);
+      return okResult({
+        action: 'ready_for_qa',
+        testing_attempt_id: parentId,
+        selected_test: ctx.vacuum_passed ? 'VACUUM' : 'BRINE',
+        next_status: nextStatus,
+        tank: mapTankSummary(await getTankById(tankId, client)),
+        message: `Tank ${tank.tank_number} moved to Ready for QA/QC. Press START QA when ready.`,
+      });
+    });
+  }
+
+  /** Testing PASS → ready_for_qa (QA/QC next). Returns the new status. */
+  async function markTankTestingPassed(tank, ts, client) {
+    const nextStatus = ASSEMBLY_STATUSES.READY_FOR_QA;
+    await client.query(
+      `UPDATE tanks
+       SET status = $1,
+           testing_completed_at = COALESCE(testing_completed_at, $2::timestamptz),
+           updated_at = $2::timestamptz
+       WHERE id = $3`,
+      [nextStatus, ts, Number(tank.id)]
+    );
+    return nextStatus;
+  }
+
+  function testingPassMessage() {
+    return 'Testing PASS — tank moved to Ready for QA/QC.';
+  }
+
+  /**
+   * TEST COMPLETE — final PASS/FAIL after the selected test (Vacuum PASS or Brine fill recorded).
+   * FAIL → testing_failed (FAILED/HOLD). PASS → ready_for_qa (see markTankTestingPassed).
    */
   async function completeTesting(machine, opts = {}) {
     const midRaw = Number(machine && machine.id);
@@ -3949,25 +4399,21 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         return errResult(409, 'already_complete', 'This Testing attempt is already complete.');
       }
       const ctx = await getTestingFailureContext(tankId, client);
-      if (!ctx.vacuum_passed) {
-        return errResult(
-          409,
-          'vacuum_required',
-          'TEST COMPLETE is locked until Vacuum PASS for this Testing attempt.'
-        );
-      }
-      if (!ctx.brine_completed) {
-        return errResult(
-          409,
-          'brine_required',
-          'Complete Brine (START FILL + STOP FILL) before TEST COMPLETE.'
-        );
-      }
       if (ctx.open_brine_attempt_id) {
-        return errResult(409, 'brine_open', 'Finish the open Brine fill before TEST COMPLETE.');
+        return errResult(409, 'brine_open', 'Finish the open Brine fill (STOP FILL) before TEST COMPLETE.');
+      }
+      if (ctx.open_vacuum_attempt_id) {
+        return errResult(409, 'vacuum_open', 'Record the ending Vacuum reading before TEST COMPLETE.');
       }
       if (ctx.pending_vacuum_result) {
         return errResult(409, 'vacuum_pending_result', 'Choose Vacuum PASS or FAIL before TEST COMPLETE.');
+      }
+      if (!ctx.vacuum_passed && !ctx.brine_completed) {
+        return errResult(
+          409,
+          'test_required',
+          'Complete the selected test (Vacuum PASS or Brine START FILL + STOP FILL) before TEST COMPLETE.'
+        );
       }
       await client.query(
         `UPDATE test_attempts
@@ -3990,15 +4436,9 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
           attemptId,
         ]
       );
+      let nextStatus = ASSEMBLY_STATUSES.TESTING_FAILED;
       if (result === 'PASS') {
-        await client.query(
-          `UPDATE tanks
-           SET status = $1,
-               testing_completed_at = COALESCE(testing_completed_at, $2::timestamptz),
-               updated_at = $2::timestamptz
-           WHERE id = $3`,
-          [ASSEMBLY_STATUSES.READY_FOR_DOME_INSTALL, ts, tankId]
-        );
+        nextStatus = await markTankTestingPassed(tank, ts, client);
       } else {
         await client.query(
           `UPDATE tanks
@@ -4012,13 +4452,14 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         action: 'testing_complete',
         attempt_id: attemptId,
         result,
+        next_status: nextStatus,
         tank: await enrichTankSummaryWithTestingFailure(
           mapTankSummary(await getTankById(tankId, client)),
           client
         ),
         message:
           result === 'PASS'
-            ? 'Testing PASS — ready for Dome Install.'
+            ? testingPassMessage(nextStatus)
             : 'Testing FAIL — tank moved to FAILED / HOLD. Retest or Send Back to FAB Rework.',
       });
     });
@@ -4088,27 +4529,32 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         return errResult(404, 'tank_not_found', 'Tank not found.');
       }
       const status = normalizeAssemblyTankStatus(tank.status);
-      if (status !== ASSEMBLY_STATUSES.TESTING_FAILED) {
+      const fromQa = status === ASSEMBLY_STATUSES.QA_FAILED;
+      if (status !== ASSEMBLY_STATUSES.TESTING_FAILED && !fromQa) {
         return errResult(
           409,
           'tank_status',
-          `Send Back to FAB Rework requires Testing Failed / Hold (got "${status}").`
+          `Send Back to FAB Rework requires Testing or QA/QC Failed / Hold (got "${status}").`
         );
       }
       const ts = opts.at || nowIso();
       const user = opts.user || {};
       const reason = String(opts.reason || opts.note || opts.failure_note || '').trim();
       let failNote = reason;
-      if (!failNote) {
+      if (!failNote && fromQa) {
+        failNote = tank.qa_failure_note || 'QA/QC FAIL — sent to FAB rework';
+      } else if (!failNote) {
         const ctx = await getTestingFailureContext(tankId, client);
         failNote =
           (ctx.latest_failed_vacuum && ctx.latest_failed_vacuum.failure_note) ||
+          (ctx.latest_failed_brine && ctx.latest_failed_brine.failure_note) ||
           (ctx.latest_failed_testing && ctx.latest_failed_testing.failure_note) ||
           'Testing FAIL — sent to FAB rework';
       }
 
       // Reuse existing FAB rework_required state (same path FAB kiosks already honor).
-      await client.query(
+      // QA columns (qa_result / qa_failure_note / qa_user_*) and test_attempts history are left intact.
+      const upd = await client.query(
         `UPDATE tanks
          SET status = 'rework_required',
              testing_machine_id = NULL,
@@ -4116,25 +4562,42 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
              requires_test = TRUE,
              completed_at = NULL,
              updated_at = $1::timestamptz
-         WHERE id = $2`,
-        [ts, tankId]
+         WHERE id = $2 AND LOWER(TRIM(status)) = $3`,
+        [ts, tankId, status]
       );
+      if (!upd.rowCount) {
+        return errResult(409, 'tank_status_changed', 'Tank status changed — refresh and try again.');
+      }
 
       try {
         await client.query(
           `INSERT INTO tank_admin_phase2_audit
              (action, tank_id, tank_number, performed_by, performed_at, reason, previous_status, next_status, details)
-           VALUES ('testing_fail_to_fab_rework',$1,$2,$3,$4::timestamptz,$5,'testing_failed','rework_required',$6::jsonb)`,
+           VALUES ($1,$2,$3,$4,$5::timestamptz,$6,$7,'rework_required',$8::jsonb)`,
           [
+            fromQa ? 'qa_fail_to_fab_rework' : 'testing_fail_to_fab_rework',
             tankId,
             tank.tank_number,
             user.name || user.username || 'qa_kiosk',
             ts,
             failNote.slice(0, 4000),
-            JSON.stringify({
-              source: 'vacuum_fail',
-              machine_id: machine && machine.id != null ? Number(machine.id) : null,
-            }),
+            status,
+            JSON.stringify(
+              fromQa
+                ? {
+                    source: 'qa_fail',
+                    machine_id: machine && machine.id != null ? Number(machine.id) : null,
+                    qa_result: tank.qa_result || null,
+                    qa_failure_note: tank.qa_failure_note || null,
+                    qa_completed_at: tank.qa_completed_at || null,
+                    qa_user_name: tank.qa_user_name || null,
+                    testing_completed_at: tank.testing_completed_at || null,
+                  }
+                : {
+                    source: 'vacuum_fail',
+                    machine_id: machine && machine.id != null ? Number(machine.id) : null,
+                  }
+            ),
           ]
         );
       } catch (_err) {
@@ -4313,15 +4776,13 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       const labor = await computeStageLaborForTank(row.id);
       const summary = await enrichTankSummaryWithTestingFailure(mapTankSummary(row, labor));
       const st = normalizeAssemblyTankStatus(row.status);
-      if (st === ASSEMBLY_STATUSES.READY_FOR_QA) ready_for_qa.push(summary);
+      if (st === ASSEMBLY_STATUSES.READY_FOR_QA && isUntestedLegacyQaTank(row)) {
+        ready_for_testing.push({ ...summary, legacy_ready_for_qa: true });
+      } else if (st === ASSEMBLY_STATUSES.READY_FOR_QA) ready_for_qa.push(summary);
       else if (st === ASSEMBLY_STATUSES.QA_IN_PROGRESS) qa_in_progress.push(summary);
       else if (st === ASSEMBLY_STATUSES.QA_FAILED || st === ASSEMBLY_STATUSES.TESTING_FAILED) {
         const source =
-          st === ASSEMBLY_STATUSES.QA_FAILED
-            ? 'qa'
-            : summary.latest_failed_vacuum
-              ? 'vacuum'
-              : 'testing';
+          st === ASSEMBLY_STATUSES.QA_FAILED ? 'qa' : summary.failure_source || 'testing';
         failed_hold.push({
           ...summary,
           failure_source: source,
@@ -4404,6 +4865,9 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
     stopWork,
     assemblyComplete,
     restoreTankToAssembly,
+    restoreTankToAssemblyFromDownstream,
+    recordBrineResult,
+    markTestingReadyForQa,
     removeTankFromAssembly,
     listRemovedFromAssemblyTanks,
     returnRemovedTankToAssembly,
