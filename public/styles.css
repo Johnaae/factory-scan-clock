@@ -5425,6 +5425,17 @@ table.fj-table tbody tr:hover {
   color: #0f172a;
 }
 
+.team-dashboard-card-titles {
+  min-width: 0;
+}
+
+.team-dashboard-department {
+  margin: 2px 0 0;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #475569;
+}
+
 .team-dashboard-status {
   font-size: 0.72rem;
   font-weight: 700;

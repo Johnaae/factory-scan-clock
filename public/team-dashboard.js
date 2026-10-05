@@ -213,6 +213,11 @@
     </div>`;
   }
 
+  function departmentLine(team) {
+    const dept = team && team.department ? String(team.department).trim() : '';
+    return `Department: ${dept || 'Not set'}`;
+  }
+
   function renderTeamCard(team, opts) {
     const st = team.status || 'idle';
     const actionBtn = teamActionBtn(team, opts);
@@ -224,7 +229,10 @@
 
     return `<article class="team-dashboard-card ${!team.active ? 'team-dashboard-card--inactive' : ''}" data-team-id="${team.id}">
       <header class="team-dashboard-card-head">
-        <h3 class="team-dashboard-card-title">${escapeHtml(team.name)}</h3>
+        <div class="team-dashboard-card-titles">
+          <h3 class="team-dashboard-card-title">${escapeHtml(team.name)}</h3>
+          <p class="team-dashboard-department" data-field="department">${escapeHtml(departmentLine(team))}</p>
+        </div>
         <div class="team-dashboard-head-actions">
           <span class="team-dashboard-status ${statusClass(st)}" data-field="status">${escapeHtml(team.active ? statusLabel(st, team.status_label) : 'Inactive')}</span>
           <span class="team-dashboard-head-btns" data-field="team-actions">${actionBtn}</span>
@@ -265,6 +273,7 @@
       const label = escapeHtml(team.active ? statusLabel(st, team.status_label) : 'Inactive');
       if (statusEl.innerHTML !== label) statusEl.innerHTML = label;
     }
+    setField('department', escapeHtml(departmentLine(team)));
     setField('machine', escapeHtml(team.current_machine || '—'));
     setField('tank', renderTankCell(team.current_tank));
     setField('phase', escapeHtml(team.current_phase || '—'));

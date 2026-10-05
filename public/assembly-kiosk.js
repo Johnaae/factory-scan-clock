@@ -79,7 +79,12 @@ function applyConfigData(data) {
   recentlyFinished = Array.isArray(data.recently_finished_assembly) ? data.recently_finished_assembly : [];
   // Scan responses re-render from partial data without removed_tanks — keep the last known list.
   if (Array.isArray(data.removed_tanks)) removedTanks = data.removed_tanks;
-  if (!focusedTeamId && activeTeams.length) focusedTeamId = Number(activeTeams[0].team_id);
+  if (
+    activeTeams.length &&
+    (!focusedTeamId || !activeTeams.some((t) => Number(t.team_id) === Number(focusedTeamId)))
+  ) {
+    focusedTeamId = Number(activeTeams[0].team_id);
+  }
   if (data.machine && data.machine.slug) {
     try {
       localStorage.setItem(KIOSK_SLUG_KEY, String(data.machine.slug));
@@ -216,7 +221,18 @@ function liveAssemblyDurationDisplay(tank) {
   return `${Math.floor(totalMin / 60)}h ${totalMin % 60}m`;
 }
 
+function otherTeamNames(teams) {
+  return (teams || []).map((t) => t.team_name || `Team ${t.team_id}`).join(', ');
+}
+
 function eligibleOptionLabel(tank) {
+  const st = String((tank && tank.status) || '').toLowerCase();
+  if (st === 'assembly_in_progress') {
+    const teams = Array.isArray(tank.assembly_active_teams) ? tank.assembly_active_teams : [];
+    return teams.length
+      ? `Tank ${tank.tank_number || '—'} — In Assembly (${otherTeamNames(teams)})`
+      : `Tank ${tank.tank_number || '—'} — In Assembly`;
+  }
   if (tank && tank.assembly_restored_at) {
     return `Tank ${tank.tank_number || '—'} — Restored, Ready for Assembly`;
   }
@@ -262,7 +278,7 @@ function assemblyActionButtons(tank, teamId) {
       `<button type="button" class="btn-primary btn-touch btn-touch--complete" data-ak-action="finish" data-tank-id="${tid}" data-team-id="${teamId}">FINISH</button>`
     );
     btns.push(
-      `<button type="button" class="btn-secondary btn-touch" data-ak-action="remove_from_assembly" data-tank-id="${tid}" data-team-id="${teamId}">REMOVE FROM ASSEMBLY</button>`
+      `<button type="button" class="btn-secondary btn-touch" data-ak-action="remove_from_assembly" data-tank-id="${tid}" data-team-id="${teamId}">REMOVE</button>`
     );
   }
   if (session && stage === 'ASSEMBLY') {
@@ -273,7 +289,7 @@ function assemblyActionButtons(tank, teamId) {
       `<button type="button" class="btn-primary btn-touch btn-touch--complete" data-ak-action="finish" data-tank-id="${tid}" data-team-id="${teamId}">FINISH</button>`
     );
     btns.push(
-      `<button type="button" class="btn-secondary btn-touch" data-ak-action="remove_from_assembly" data-tank-id="${tid}" data-team-id="${teamId}">REMOVE FROM ASSEMBLY</button>`
+      `<button type="button" class="btn-secondary btn-touch" data-ak-action="remove_from_assembly" data-tank-id="${tid}" data-team-id="${teamId}">REMOVE</button>`
     );
   }
   return btns.join('');
@@ -284,15 +300,22 @@ function renderTankCard(tank, teamId) {
   const session = tank.active_session || null;
   const active = Boolean(session) && String(session.stage || '').toUpperCase() === 'ASSEMBLY';
   return `<article class="ak-tank-card ${active ? 'is-active' : ''}" data-tank-id="${Number(tank.id)}">
-    <div>
+    <div class="ak-tank-head">
       <h3 class="ak-tank-title">Tank ${escapeHtml(tank.tank_number || '—')}</h3>
-      <p class="ak-tank-stage">Status: ${escapeHtml(statusLabel(status))}</p>
+      <span class="ak-tank-status">${escapeHtml(statusLabel(status))}</span>
     </div>
     <div class="ak-metrics">
-      <div class="ak-metric"><p class="ak-metric-label">Assembly Duration</p><p class="ak-metric-value">${escapeHtml(liveAssemblyDurationDisplay(tank))}</p></div>
-      <div class="ak-metric"><p class="ak-metric-label">Assembly Labor</p><p class="ak-metric-value">${escapeHtml(laborDisplay(tank))}</p></div>
+      <div class="ak-metric"><span class="ak-metric-label">Duration</span><span class="ak-metric-value">${escapeHtml(liveAssemblyDurationDisplay(tank))}</span></div>
+      <div class="ak-metric"><span class="ak-metric-label">Labor</span><span class="ak-metric-value">${escapeHtml(laborDisplay(tank))}</span></div>
     </div>
-    <div class="wk-touch">${assemblyActionButtons(tank, teamId)}</div>
+    ${
+      Array.isArray(tank.assembly_other_teams) && tank.assembly_other_teams.length
+        ? `<p class="ak-tank-stage">Also working: ${escapeHtml(otherTeamNames(tank.assembly_other_teams))}${
+            tank.tank_labor_display ? ` · Tank total labor: ${escapeHtml(tank.tank_labor_display)}` : ''
+          }</p>`
+        : ''
+    }
+    <div class="wk-touch ak-actions">${assemblyActionButtons(tank, teamId)}</div>
   </article>`;
 }
 
@@ -308,26 +331,30 @@ function renderTeamCard(team) {
   const tankOptions = (eligibleTanks || [])
     .filter((t) => {
       const st = String(t.status || '').toLowerCase();
-      return (
-        st === 'ready_for_assembly' &&
-        t.assembly_machine_id == null &&
-        !t.completed_at
-      );
+      if (t.completed_at) return false;
+      if (st === 'ready_for_assembly') return t.assembly_machine_id == null;
+      // Other teams may join a tank already in Assembly; hide it only from teams already on it.
+      if (st === 'assembly_in_progress') {
+        const onTank = (t.assembly_active_teams || []).some((a) => Number(a.team_id) === teamId);
+        const onCard = (team.tanks || []).some((ct) => Number(ct.id) === Number(t.id));
+        return !onTank && !onCard;
+      }
+      return false;
     })
     .map((t) => `<option value="${Number(t.id)}">${escapeHtml(eligibleOptionLabel(t))}</option>`)
     .join('');
   const tanksHtml = (team.tanks || []).map((t) => renderTankCard(t, teamId)).join('');
   return `<section class="ak-team-card ${onLunch ? 'is-lunch' : 'is-working'} ${focused ? 'is-focused' : ''}" data-team-id="${teamId}">
     <div class="ak-team-head">
-      <div>
-        <h2 class="ak-team-title">${escapeHtml(team.team_name || `Team ${teamId}`)}</h2>
-        <p class="ak-team-meta">${onLunch ? 'On lunch — timers paused for this team only' : 'Independent Assembly team card'}</p>
-        <p class="ak-roster">${rosterNames ? `On shift: ${escapeHtml(rosterNames)}` : 'No open-shift employees'}</p>
+      <h2 class="ak-team-title">${escapeHtml(team.team_name || `Team ${teamId}`)}</h2>
+      <div class="ak-team-badges">
+        <span class="ak-badge ak-badge--selected" data-selected-badge ${focused ? '' : 'hidden'}>SELECTED</span>
+        ${teamStatusBadge(team)}
       </div>
-      ${teamStatusBadge(team)}
     </div>
+    ${onLunch ? '<p class="ak-team-meta">On lunch — timers paused for this team only</p>' : ''}
+    <p class="ak-roster"><span class="ak-roster-label">On shift:</span> ${rosterNames ? escapeHtml(rosterNames) : 'No open-shift employees'}</p>
     <div class="ak-select-panel">
-      <p class="ak-select-label">Tank</p>
       <div class="ak-select-row">
         <select data-team-tank-select="${teamId}" aria-label="Select tank for team">
           <option value="">Select completed FAB tank…</option>
@@ -337,7 +364,7 @@ function renderTeamCard(team) {
       </div>
     </div>
     <div class="ak-tank-grid">${tanksHtml || '<p class="ak-empty">No tank confirmed for this team yet.</p>'}</div>
-    <div class="wk-touch" data-team-controls="${teamId}">
+    <div class="wk-touch ak-team-actions" data-team-controls="${teamId}">
       ${
         onLunch
           ? `<button type="button" class="btn-primary btn-touch" data-ak-action="resume" data-team-id="${teamId}">Resume</button>`
@@ -458,12 +485,28 @@ function renderAll() {
   if (els.teamsEmpty) els.teamsEmpty.hidden = true;
   els.teamCards.innerHTML = activeTeams.map(renderTeamCard).join('');
   wireTouchPrevent(els.teamCards);
-  els.teamCards.querySelectorAll('[data-team-id]').forEach((card) => {
-    card.addEventListener('click', () => {
-      const id = Number(card.getAttribute('data-team-id'));
-      if (Number.isInteger(id) && id > 0) focusedTeamId = id;
+  els.teamCards.querySelectorAll('section.ak-team-card[data-team-id]').forEach((card) => {
+    card.addEventListener('click', (ev) => {
+      // Buttons / tank picker act on their own card without changing the selection.
+      if (ev.target.closest('button, select, option, input, label')) return;
+      selectTeam(Number(card.getAttribute('data-team-id')));
     });
   });
+}
+
+/** SELECTED TEAM — employee barcode scans join this team. Only one at a time. */
+function selectTeam(teamId) {
+  if (!Number.isInteger(teamId) || teamId <= 0 || teamId === focusedTeamId) return;
+  focusedTeamId = teamId;
+  if (!els.teamCards) return;
+  els.teamCards.querySelectorAll('section.ak-team-card[data-team-id]').forEach((card) => {
+    const on = Number(card.getAttribute('data-team-id')) === teamId;
+    card.classList.toggle('is-focused', on);
+    const badge = card.querySelector('[data-selected-badge]');
+    if (badge) badge.hidden = !on;
+  });
+  const team = activeTeams.find((t) => Number(t.team_id) === teamId);
+  showWarning(`${(team && team.team_name) || 'Team'} selected — employee scans join this team.`);
 }
 
 async function loadConfig() {
@@ -528,7 +571,6 @@ async function confirmTankForTeam(teamId) {
       return;
     }
     showWarning(data.message || 'Tank confirmed. Press START for labor.');
-    focusedTeamId = teamId;
     await loadConfig();
   } finally {
     actionBusy = false;
@@ -618,7 +660,6 @@ async function handleTeamCardsClick(ev) {
   const action = btn.getAttribute('data-ak-action');
   const teamId = Number(btn.getAttribute('data-team-id'));
   const tankId = Number(btn.getAttribute('data-tank-id'));
-  focusedTeamId = teamId || focusedTeamId;
 
   if (action === 'confirm_tank') {
     await confirmTankForTeam(teamId);
@@ -641,9 +682,14 @@ async function handleTeamCardsClick(ev) {
           ? btn.closest('article').querySelector('.ak-tank-title').textContent
           : 'this tank')
       : 'this tank';
+    const teamRow = (activeTeams || []).find((t) => Number(t.team_id) === teamId);
+    const tankRow = teamRow ? (teamRow.tanks || []).find((t) => Number(t.id) === tankId) : null;
+    const others = tankRow && Array.isArray(tankRow.assembly_other_teams) ? tankRow.assembly_other_teams : [];
     const ok = await askConfirm(
       'Finish Assembly?',
-      `This ends Assembly for ${tankNo} and sends the tank to Ready for Testing.`,
+      others.length
+        ? `This finishes this team's work on ${tankNo}.\n\nAssembly stays open until the other team(s) also finish: ${otherTeamNames(others)}.`
+        : `This ends Assembly for ${tankNo} and sends the tank to Ready for Testing.`,
       'Finish'
     );
     if (!ok) return;
@@ -734,7 +780,11 @@ async function submitScan(raw) {
     showWarning('Use the buttons for tank actions. Scan only a TEAM or EMPLOYEE barcode here.');
     return;
   }
-  const { res, data } = await postAction({ action: 'scan', barcode });
+  const { res, data } = await postAction({
+    action: 'scan',
+    barcode,
+    team_id: Number.isInteger(focusedTeamId) && focusedTeamId > 0 ? focusedTeamId : undefined,
+  });
   if (!res.ok || !data.ok) {
     showWarning((data && data.message) || 'Scan a Team or Employee barcode only.');
     return;

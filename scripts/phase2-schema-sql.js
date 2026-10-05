@@ -12,6 +12,9 @@
  *
  * Multi-team Assembly presence is tracked in assembly_kiosk_teams (not by
  * replacing machines.assigned_team_id for other teams).
+ * Several teams may work the same tank: assembly_tank_teams holds one row per
+ * (tank, team) Assembly assignment; the tank completes Assembly only when no
+ * 'active' assignment remains.
  */
 
 const PHASE2_ADD_COLUMNS_SQL = `
@@ -140,6 +143,20 @@ CREATE TABLE IF NOT EXISTS assembly_kiosk_teams (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS assembly_tank_teams (
+  id BIGSERIAL PRIMARY KEY,
+  tank_id BIGINT NOT NULL REFERENCES tanks(id) ON DELETE CASCADE,
+  team_id BIGINT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+  machine_id BIGINT REFERENCES machines(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  confirmed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  finished_at TIMESTAMPTZ,
+  ended_at TIMESTAMPTZ,
+  end_reason TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS tank_admin_phase2_audit (
   id BIGSERIAL PRIMARY KEY,
   action TEXT NOT NULL,
@@ -203,6 +220,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_assembly_kiosk_teams_open
   WHERE left_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_assembly_kiosk_teams_machine
   ON assembly_kiosk_teams(machine_id, joined_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_assembly_tank_teams_active
+  ON assembly_tank_teams(tank_id, team_id)
+  WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_assembly_tank_teams_team
+  ON assembly_tank_teams(team_id, status);
+CREATE INDEX IF NOT EXISTS idx_assembly_tank_teams_tank
+  ON assembly_tank_teams(tank_id, status);
 CREATE INDEX IF NOT EXISTS idx_tank_admin_phase2_audit_tank
   ON tank_admin_phase2_audit(tank_number, performed_at DESC);
 `;
@@ -238,6 +262,7 @@ const PHASE2_REQUIRED_TABLES = [
   'test_attempts',
   'test_attempt_notes',
   'assembly_kiosk_teams',
+  'assembly_tank_teams',
 ];
 
 module.exports = {

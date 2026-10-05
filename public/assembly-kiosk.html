@@ -10,54 +10,77 @@
     <style>
       .wk-sub { font-size: 1.1rem; font-weight: 700; color: #1e3a5f; margin: 0.15rem 0 0; }
       .ak-hint { margin: 10px 0 0; font-weight: 700; color: #334155; }
-      .ak-team-grid { display: grid; gap: 16px; margin-top: 16px; }
+      /* Assembly kiosk is a dashboard of team cards — allow a wider page than other kiosks. */
+      .kiosk-page { max-width: min(1680px, 100%); }
+      .ak-team-grid {
+        display: grid; gap: 14px; margin-top: 14px; align-items: start;
+        grid-template-columns: repeat(auto-fill, minmax(min(100%, 400px), 1fr));
+      }
       .ak-team-card {
-        border: 3px solid #94a3b8; border-radius: 16px; padding: 16px;
-        background: #fff; display: grid; gap: 12px;
+        border: 3px solid #94a3b8; border-radius: 14px; padding: 12px;
+        background: #fff; display: grid; gap: 8px; min-width: 0; align-content: start;
       }
       .ak-team-card.is-lunch { border-color: #f59e0b; background: #fffbeb; }
-      .ak-team-card.is-working { border-color: #16a34a; background: linear-gradient(180deg, #f0fdf4 0%, #fff 56px); }
-      .ak-team-card.is-focused { box-shadow: 0 0 0 3px #93c5fd inset; }
-      .ak-team-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; align-items: flex-start; }
-      .ak-team-title { margin: 0; font-size: 1.45rem; font-weight: 900; color: #0f172a; }
-      .ak-team-meta { margin: 4px 0 0; font-weight: 700; color: #475569; }
+      .ak-team-card.is-working { border-color: #16a34a; background: linear-gradient(180deg, #f0fdf4 0%, #fff 48px); }
+      .ak-team-card { cursor: pointer; }
+      .ak-team-card.is-focused { box-shadow: 0 0 0 5px #2563eb; }
+      .ak-team-badges { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: flex-end; }
+      .ak-badge--selected { background: #2563eb; color: #fff; }
+      .ak-badge[hidden] { display: none; }
+      .ak-team-head { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+      .ak-team-title { margin: 0; font-size: 1.3rem; font-weight: 900; color: #0f172a; min-width: 0; overflow-wrap: anywhere; }
+      .ak-team-meta { margin: 0; font-weight: 700; color: #92400e; font-size: 0.9rem; }
       .ak-badge {
-        display: inline-block; padding: 8px 14px; border-radius: 999px; font-size: 0.85rem; font-weight: 900;
-        letter-spacing: 0.04em; text-transform: uppercase;
+        display: inline-block; padding: 6px 12px; border-radius: 999px; font-size: 0.8rem; font-weight: 900;
+        letter-spacing: 0.04em; text-transform: uppercase; white-space: nowrap;
       }
       .ak-badge--working { background: #dcfce7; color: #166534; }
       .ak-badge--lunch { background: #fef3c7; color: #92400e; }
       .ak-badge--active { background: #e0e7ff; color: #3730a3; }
+      .ak-roster-label { color: #64748b; }
       .ak-select-panel {
-        padding: 12px 14px; border: 1px solid #cbd5e1; border-radius: 12px;
-        background: #f8fafc; display: grid; gap: 10px;
+        padding: 8px; border: 1px solid #cbd5e1; border-radius: 10px;
+        background: #f8fafc; display: grid; gap: 8px;
       }
-      .ak-select-label { margin: 0; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; color: #475569; font-weight: 800; }
-      .ak-select-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: stretch; }
+      .ak-select-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; }
       .ak-select-row select {
-        flex: 1 1 220px; min-height: 52px; font-size: 1.05rem; font-weight: 700;
-        border: 2px solid #94a3b8; border-radius: 10px; padding: 8px 12px; background: #fff; color: #0f172a;
+        flex: 1 1 200px; min-width: 0; min-height: 52px; font-size: 1rem; font-weight: 700;
+        border: 2px solid #94a3b8; border-radius: 10px; padding: 6px 10px; background: #fff; color: #0f172a;
       }
-      .ak-select-row .btn-touch { flex: 0 0 auto; min-width: 160px; }
+      .ak-select-row .btn-touch { flex: 0 0 auto; min-width: 140px; min-height: 52px; font-weight: 800; }
       .wk-touch { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
       .wk-touch .btn-touch { min-height: 56px; font-size: 15px; font-weight: 800; border-radius: 12px; }
+      .ak-actions, .ak-team-actions { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+      .ak-actions .btn-touch, .ak-team-actions .btn-touch {
+        min-height: 54px; padding: 6px 8px; font-size: 14px; line-height: 1.15; white-space: normal;
+      }
       .btn-touch--employee-out { background: #fff7ed; border-color: #fdba74; color: #9a3412; }
       .btn-touch--complete { background: #eff6ff; border-color: #93c5fd; color: #1e40af; }
       .btn-touch--start-work {
         background: #166534; border-color: #166534; color: #fff;
-        font-size: 1.05rem !important; min-height: 64px !important;
+        font-size: 1.05rem !important; min-height: 56px !important;
       }
-      .ak-tank-grid { display: grid; gap: 12px; }
+      .ak-tank-grid { display: grid; gap: 8px; }
       .ak-tank-card {
-        background: #fff; border: 2px solid #e2e8f0; border-radius: 14px; padding: 14px; display: grid; gap: 10px;
+        background: #fff; border: 2px solid #e2e8f0; border-radius: 12px; padding: 10px; display: grid; gap: 8px;
       }
       .ak-tank-card.is-active { border-color: #2563eb; background: #f8fbff; }
-      .ak-tank-title { margin: 0; font-size: 1.25rem; font-weight: 800; color: #0f172a; }
-      .ak-tank-stage { margin: 4px 0 0; font-size: 0.95rem; font-weight: 700; color: #334155; }
-      .ak-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-      .ak-metric { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px 12px; }
-      .ak-metric-label { margin: 0 0 4px; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: #64748b; font-weight: 700; }
-      .ak-metric-value { margin: 0; font-size: 1.05rem; font-weight: 800; color: #1e3a5f; }
+      .ak-tank-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 6px; }
+      .ak-tank-title { margin: 0; font-size: 1.2rem; font-weight: 800; color: #0f172a; }
+      .ak-tank-status {
+        padding: 4px 10px; border-radius: 999px; background: #e2e8f0; color: #1e3a5f;
+        font-size: 0.85rem; font-weight: 800; white-space: nowrap;
+      }
+      .ak-tank-card.is-active .ak-tank-status { background: #dbeafe; color: #1e40af; }
+      .ak-tank-stage { margin: 0; font-size: 0.9rem; font-weight: 700; color: #334155; }
+      .ak-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+      .ak-metric {
+        background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 6px 10px;
+        display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px;
+      }
+      .ak-metric-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: #64748b; font-weight: 700; }
+      .ak-metric-value { font-size: 1.05rem; font-weight: 800; color: #1e3a5f; }
+      .ak-team-card .ak-empty { padding: 8px 10px; font-size: 0.9rem; }
       .ak-empty { margin: 0; padding: 14px; border: 1px dashed #cbd5e1; border-radius: 12px; background: #f8fafc; font-weight: 700; color: #64748b; }
       .ak-recent { margin-top: 18px; border: 2px solid #fcd34d; border-radius: 14px; padding: 14px; background: #fffbeb; }
       .ak-recent-title { margin: 0 0 10px; font-size: 1rem; letter-spacing: 0.04em; text-transform: uppercase; }
@@ -88,7 +111,9 @@
       .employee-out-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }
       .employee-out-actions .btn-primary, .employee-out-actions .btn-secondary { min-height: 52px; font-size: 16px; font-weight: 800; }
       .lang-bar { margin-left: auto; }
-      @media (max-width: 640px) { .ak-metrics { grid-template-columns: 1fr; } }
+      @media (max-width: 380px) {
+        .ak-actions, .ak-team-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      }
     </style>
   </head>
   <body class="scan-kiosk">
@@ -118,6 +143,7 @@
         </form>
         <p id="scanWarning" class="scan-warning" role="alert" hidden></p>
         <p class="ak-hint">Team scan does not start labor. Confirm tank, then press START.</p>
+        <p class="ak-hint">Tap a team card to select it — employee badge scans join the selected team for this shift.</p>
         <div id="teamCards" class="ak-team-grid" aria-live="polite"></div>
         <div id="teamsEmpty" class="ak-empty">No teams on this kiosk yet. Scan a TEAM barcode to begin.</div>
         <section id="returnRemoved" class="ak-return" hidden>
@@ -163,6 +189,6 @@
       </div>
     </div>
 
-    <script src="/assembly-kiosk.js?v=workflow-order-1"></script>
+    <script src="/assembly-kiosk.js?v=grid-layout-1"></script>
   </body>
 </html>

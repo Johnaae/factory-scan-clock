@@ -12,7 +12,22 @@ const teamsBody = document.getElementById('teamsBody');
 const teamHint = document.getElementById('teamHint');
 const newTeamName = document.getElementById('newTeamName');
 const newTeamBarcode = document.getElementById('newTeamBarcode');
+const newTeamDepartment = document.getElementById('newTeamDepartment');
 const btnAddTeam = document.getElementById('btnAddTeam');
+
+const TEAM_DEPARTMENTS = ['Fabrication', 'Assembly', 'Dome', 'QA/QC'];
+
+function departmentOptionsHtml(current) {
+  const value = String(current || '');
+  const known = TEAM_DEPARTMENTS.includes(value);
+  return [
+    `<option value=""${value ? '' : ' selected'}>${value ? 'Select department…' : 'Not set — select…'}</option>`,
+    ...TEAM_DEPARTMENTS.map(
+      (d) => `<option value="${escapeHtml(d)}"${d === value ? ' selected' : ''}>${escapeHtml(d)}</option>`
+    ),
+    value && !known ? `<option value="${escapeHtml(value)}" selected>${escapeHtml(value)}</option>` : '',
+  ].join('');
+}
 const logoutBtn = document.getElementById('logoutBtn');
 const showInactiveTeams = document.getElementById('showInactiveTeams');
 
@@ -76,6 +91,11 @@ function renderTeams(teams) {
             <label>Barcode</label>
             <input class="team-barcode-input" type="text" value="${escapeHtml(t.barcode)}" data-team-id="${Number(t.id)}" ${isActive ? '' : 'disabled'} />
           </div>
+          <div class="field" style="flex:1;margin:0">
+            <label>Department</label>
+            <select class="team-department-input" data-team-id="${Number(t.id)}" ${isActive ? '' : 'disabled'}>${departmentOptionsHtml(t.department)}</select>
+          </div>
+          <button type="button" class="btn btn-sm btn-print-team" data-team-id="${Number(t.id)}">Print Barcode</button>
           <button type="button" class="btn btn-sm btn-save-team" data-team-id="${Number(t.id)}" ${isActive ? '' : 'disabled'}>Save</button>
           ${teamActions}
         </div>
@@ -108,12 +128,21 @@ teamsBody.addEventListener('click', async (e) => {
     const card = saveBtn.closest('.team-card');
     const name = card.querySelector('.team-name-input').value.trim();
     const barcode = card.querySelector('.team-barcode-input').value.trim();
+    const deptEl = card.querySelector('.team-department-input');
+    const department = deptEl ? deptEl.value : '';
     const { res, data } = await api(`/api/manager/teams/${teamId}`, {
       method: 'PUT',
-      body: JSON.stringify({ name, barcode }),
+      body: JSON.stringify({ name, barcode, department }),
     });
     hint(res.ok ? 'Team saved.' : (data && data.message) || 'Save failed.', !res.ok);
     if (res.ok) void loadTeams();
+    return;
+  }
+  const printBtn = e.target.closest('.btn-print-team');
+  if (printBtn) {
+    const teamId = Number(printBtn.getAttribute('data-team-id'));
+    if (!Number.isInteger(teamId) || teamId <= 0) return;
+    window.open(`/manager/command-print?type=team&team_id=${teamId}`, '_blank', 'noopener');
     return;
   }
   const deleteBtn = e.target.closest('.btn-delete-team');
@@ -162,18 +191,20 @@ if (btnAddTeam) {
   btnAddTeam.addEventListener('click', async () => {
     const name = newTeamName.value.trim();
     const barcode = newTeamBarcode.value.trim();
-    if (!name || !barcode) {
-      hint('Team name and barcode are required.', true);
+    const department = newTeamDepartment ? newTeamDepartment.value : '';
+    if (!name || !barcode || !department) {
+      hint('Team name, barcode and department are required.', true);
       return;
     }
     const { res, data } = await api('/api/manager/teams', {
       method: 'POST',
-      body: JSON.stringify({ name, barcode }),
+      body: JSON.stringify({ name, barcode, department }),
     });
     hint(res.ok ? 'Team created.' : (data && data.message) || 'Could not create team.', !res.ok);
     if (res.ok) {
       newTeamName.value = '';
       newTeamBarcode.value = '';
+      if (newTeamDepartment) newTeamDepartment.value = '';
       void loadTeams();
     }
   });

@@ -226,6 +226,7 @@ ALTER TABLE machines ADD COLUMN IF NOT EXISTS assigned_team_id BIGINT;
 ALTER TABLE machines ADD COLUMN IF NOT EXISTS assigned_team_day TEXT;
 ALTER TABLE machines ADD COLUMN IF NOT EXISTS assigned_team_at TIMESTAMPTZ;
 ALTER TABLE team_members ADD COLUMN IF NOT EXISTS employee_id BIGINT;
+ALTER TABLE teams ADD COLUMN IF NOT EXISTS department TEXT;
 ALTER TABLE session_team_members ADD COLUMN IF NOT EXISTS employee_code TEXT;
 ALTER TABLE session_team_members ADD COLUMN IF NOT EXISTS employee_name TEXT;
 ALTER TABLE session_team_members ADD COLUMN IF NOT EXISTS hourly_rate NUMERIC(10, 2);

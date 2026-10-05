@@ -6360,14 +6360,15 @@ async function handleAssemblyScanAction(machine, body) {
   const employee = await lookupActiveEmployeeByScan(barcode);
   if (employee) {
     const assignment = await phase1.getMachineAssignment(machine.id);
-    if (!assignment) {
+    const selectedTeamId = Number(body.team_id != null ? body.team_id : body.teamId);
+    if (!assignment && !(Number.isInteger(selectedTeamId) && selectedTeamId > 0)) {
       return {
         ok: false,
         status: 409,
         body: { ok: false, error: 'need_team', message: NEED_TEAM_MESSAGE },
       };
     }
-    if (body.employee_out === true) {
+    if (body.employee_out === true && assignment) {
       const stageOut = await phase2.employeeOutFromStage(machine, { employee_id: employee.id });
       if (stageOut.ok) return stageOut;
       const out = await phase1.employeeOutFromTeam(employee.id, assignment.team_id, {
@@ -6377,18 +6378,13 @@ async function handleAssemblyScanAction(machine, body) {
       if (!out.ok) return out;
       return { ok: true, status: 200, body: { ok: true, ...out.body, assignment } };
     }
-    return {
-      ok: true,
-      status: 200,
-      body: {
-        ok: true,
-        action: 'employee_selected',
-        employee: { id: Number(employee.id), code: employee.code, name: employee.name },
-        confirmer: { id: Number(employee.id), code: employee.code, name: employee.name },
-        assignment,
-        confirmation_line: `Selected Employee: ${employee.name}.`,
-      },
-    };
+    // Employee scan joins / moves to the SELECTED Assembly team card (temporary, this shift).
+    const moved = await phase2.moveEmployeeToAssemblyTeam(machine, {
+      employee_id: employee.id,
+      team_id: Number.isInteger(selectedTeamId) && selectedTeamId > 0 ? selectedTeamId : assignment.team_id,
+    });
+    if (!moved.ok) return moved;
+    return { ok: true, status: 200, body: { ...moved.body, assignment } };
   }
 
   return {
@@ -6574,7 +6570,11 @@ app.post('/api/kiosk/assembly/employee-out', async (req, res) => {
       });
     }
     const assignment = await phase1.getMachineAssignment(machine.id);
-    if (!assignment) {
+    // Employee Out on a Team Card applies to that card's team, not the last-scanned team.
+    const cardTeamId = Number(req.body && req.body.team_id);
+    const outTeamId =
+      Number.isInteger(cardTeamId) && cardTeamId > 0 ? cardTeamId : assignment ? Number(assignment.team_id) : null;
+    if (!outTeamId) {
       return res.status(409).json({ ok: false, error: 'need_team', message: NEED_TEAM_MESSAGE });
     }
     const employeeId = Number(req.body && req.body.employee_id);
@@ -6585,7 +6585,7 @@ app.post('/api/kiosk/assembly/employee-out', async (req, res) => {
     if (stageOut.ok) {
       return res.json({ ...stageOut.body, assignment });
     }
-    const onShift = await phase1.listOpenShiftEmployeesForTeam(assignment.team_id);
+    const onShift = await phase1.listOpenShiftEmployeesForTeam(outTeamId);
     if (!onShift.some((e) => Number(e.id) === employeeId)) {
       return res.status(409).json({
         ok: false,
@@ -6593,7 +6593,7 @@ app.post('/api/kiosk/assembly/employee-out', async (req, res) => {
         message: 'That employee is not currently on shift for this team.',
       });
     }
-    const out = await phase1.employeeOutFromTeam(employeeId, assignment.team_id, {
+    const out = await phase1.employeeOutFromTeam(employeeId, outTeamId, {
       source: 'assembly_kiosk_employee_out',
       reason: 'Assembly kiosk employee out',
     });
@@ -6648,10 +6648,14 @@ app.post('/api/kiosk/assembly/action', async (req, res) => {
         employee: confirmerFromBody(body),
       });
     } else if (action === 'stop_work' || action === 'stop') {
-      result = await phase2.stopWork(machine, { tank_id: body.tank_id });
+      result = await phase2.stopWork(machine, {
+        tank_id: body.tank_id,
+        team_id: body.team_id != null ? body.team_id : body.teamId,
+      });
     } else if (action === 'assembly_complete' || action === 'finish') {
       result = await phase2.assemblyComplete(machine, {
         tank_id: body.tank_id,
+        team_id: body.team_id != null ? body.team_id : body.teamId,
         employee: confirmerFromBody(body),
       });
     } else if (action === 'remove_from_assembly') {
@@ -6698,6 +6702,7 @@ app.post('/api/kiosk/assembly/action', async (req, res) => {
       if (!paused.ok) return res.status(paused.status).json(paused.body);
       // Close only this team's kiosk presence when team_id provided.
       if (Number.isInteger(Number(teamId)) && Number(teamId) > 0) {
+        await phase2.endAssemblyTeamMoves(Number(teamId));
         await pool.query(
           `UPDATE assembly_kiosk_teams
            SET left_at = NOW(), status = 'left', updated_at = NOW()
@@ -7176,6 +7181,11 @@ app.get('/api/manager/teams/dashboard', async (req, res) => {
     const teams = await phase1.buildTeamDashboardCards();
     const stageByTeam = await unifiedLabor.listActiveStageLaborByTeam();
     const merged = unifiedLabor.mergeTeamDashboardWithStageLabor(teams, stageByTeam);
+    const { rows: deptRows } = await pool.query(`SELECT id, department FROM teams`);
+    const deptById = new Map(deptRows.map((r) => [Number(r.id), r.department || null]));
+    for (const team of merged) {
+      team.department = deptById.get(Number(team.id)) || null;
+    }
     return res.json({ ok: true, teams: merged });
   } catch (err) {
     console.error('[manager teams dashboard]', err);
@@ -7285,13 +7295,24 @@ app.get('/api/manager/employees/search', async (req, res) => {
   }
 });
 
+const TEAM_DEPARTMENTS = ['Fabrication', 'Assembly', 'Dome', 'QA/QC'];
+
+/** Canonical department label, '' when blank, or null when not a known department. */
+function normalizeTeamDepartment(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  if (!s) return '';
+  return TEAM_DEPARTMENTS.find((d) => d.toLowerCase() === s.toLowerCase()) || null;
+}
+
 app.get('/api/manager/teams/full', async (req, res) => {
   const auth = currentManagerFromSession(req);
   if (!auth) {
     return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Manager login required.' });
   }
   try {
-    const { rows: teams } = await pool.query(`SELECT id, name, barcode, active FROM teams ORDER BY name ASC`);
+    const { rows: teams } = await pool.query(
+      `SELECT id, name, barcode, active, department FROM teams ORDER BY name ASC`
+    );
     const { rows: members } = await pool.query(
       `SELECT tm.id, tm.team_id, tm.name, tm.role, tm.active, tm.created_at, tm.employee_id,
               e.code AS employee_code, e.name AS employee_name
@@ -7305,7 +7326,7 @@ app.get('/api/manager/teams/full', async (req, res) => {
       const tid = Number(m.team_id);
       if (byTeam.has(tid)) byTeam.get(tid).members.push(m);
     }
-    return res.json({ ok: true, teams: [...byTeam.values()] });
+    return res.json({ ok: true, teams: [...byTeam.values()], departments: TEAM_DEPARTMENTS });
   } catch (err) {
     console.error('[manager teams full]', err);
     return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load teams.' });
@@ -7331,12 +7352,20 @@ app.post('/api/manager/teams', async (req, res) => {
   if (!auth) return res.status(401).json({ ok: false, error: 'not_authenticated' });
   const name = String((req.body && req.body.name) || '').trim();
   const barcode = phase1.normalizeTeamBarcode((req.body && req.body.barcode) || '');
-  if (!name || !barcode) return res.status(400).json({ ok: false, error: 'validation', message: 'Name and barcode required.' });
+  const department = normalizeTeamDepartment(req.body && req.body.department);
+  if (!name || !barcode || !department) {
+    return res.status(400).json({
+      ok: false,
+      error: 'validation',
+      message: `Team name, barcode and department (${TEAM_DEPARTMENTS.join(', ')}) are required.`,
+    });
+  }
   try {
     const ts = nowIso();
     const { rows } = await pool.query(
-      `INSERT INTO teams (name, barcode, active, created_at, updated_at) VALUES ($1,$2,1,$3,$3) RETURNING *`,
-      [name, barcode, ts]
+      `INSERT INTO teams (name, barcode, department, active, created_at, updated_at)
+       VALUES ($1,$2,$3,1,$4,$4) RETURNING *`,
+      [name, barcode, department, ts]
     );
     return res.json({ ok: true, team: rows[0] });
   } catch (err) {
@@ -7356,13 +7385,22 @@ app.put('/api/manager/teams/:id', async (req, res) => {
   if (!Number.isInteger(id) || id <= 0 || !name || !barcode) {
     return res.status(400).json({ ok: false, error: 'validation', message: 'Invalid team data.' });
   }
+  const department = normalizeTeamDepartment(req.body && req.body.department);
+  if (department === null) {
+    return res.status(400).json({
+      ok: false,
+      error: 'validation',
+      message: `Department must be one of: ${TEAM_DEPARTMENTS.join(', ')}.`,
+    });
+  }
   try {
-    await pool.query(`UPDATE teams SET name = $1, barcode = $2, updated_at = $3::timestamptz WHERE id = $4`, [
-      name,
-      barcode,
-      nowIso(),
-      id,
-    ]);
+    // Blank department keeps the stored value (older teams may not have one yet).
+    await pool.query(
+      `UPDATE teams
+       SET name = $1, barcode = $2, department = COALESCE(NULLIF($3, ''), department), updated_at = $4::timestamptz
+       WHERE id = $5`,
+      [name, barcode, department, nowIso(), id]
+    );
     return res.json({ ok: true });
   } catch (err) {
     return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not update team.' });
@@ -11611,25 +11649,61 @@ svg{max-width:100%;height:120px}
 </body></html>`;
 }
 
-async function renderTeamBarcodesPrintPage() {
-  const { rows } = await pool.query(`SELECT name, barcode FROM teams WHERE active = 1 ORDER BY name ASC`);
-  let bcIndex = 0;
+/**
+ * Team barcode print page filtered by saved teams.department.
+ * Without a department only the picker is rendered — no barcodes, no auto-print.
+ */
+async function renderTeamBarcodesPrintPage(departmentRaw) {
+  const department = normalizeTeamDepartment(departmentRaw) || '';
+  const esc = (s) =>
+    String(s == null ? '' : s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  const options = TEAM_DEPARTMENTS.map(
+    (d) => `<option value="${esc(d)}"${d === department ? ' selected' : ''}>${esc(d)}</option>`
+  ).join('');
+  const picker = `<form class="picker no-print" method="get" action="/manager/command-print">
+<input type="hidden" name="type" value="teams" />
+<label for="department">Select Department:</label>
+<select id="department" name="department" required>
+<option value=""${department ? '' : ' selected'} disabled>Select department…</option>${options}
+</select>
+<button type="submit">Show / Print Barcodes</button>
+${department ? '<button type="button" onclick="window.print()">Print Again</button>' : ''}
+</form>`;
+
+  let body = '<p class="hint no-print">Choose a department to show its team barcodes.</p>';
   const scripts = [];
-  const cards = rows
-    .map((t) => {
-      const safeTitle = String(t.name).replace(/</g, '&lt;');
-      const safeVal = String(t.barcode).replace(/</g, '&lt;');
-      const esc = String(t.barcode).replace(/'/g, "\\'");
-      const id = `bc${bcIndex++}`;
-      scripts.push(`JsBarcode('#${id}','${esc}',{format:'CODE128',displayValue:false,height:110,margin:10,width:2.5});`);
-      return `<div class="card"><p class="title">${safeTitle}</p><p class="sub">Team Badge</p><svg id="${id}"></svg><p class="value">${safeVal}</p></div>`;
-    })
-    .join('');
-  return `<!doctype html><html><head><meta charset="utf-8" /><title>Team Barcodes</title>
-<style>body{font-family:Arial,sans-serif;margin:20px;color:#0f172a}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:20px}.card{border:2px solid #cbd5e1;border-radius:12px;padding:20px;text-align:center}.title{font-size:28px;font-weight:800;margin:0 0 6px}.sub{font-size:13px;color:#64748b;margin:0 0 12px;text-transform:uppercase}.value{font-family:monospace;font-size:18px;margin-top:10px;font-weight:700}svg{height:110px;width:100%}</style>
+  if (department) {
+    const { rows } = await pool.query(
+      `SELECT name, barcode FROM teams WHERE active = 1 AND department = $1 ORDER BY name ASC`,
+      [department]
+    );
+    let bcIndex = 0;
+    const cards = rows
+      .map((t) => {
+        const jsVal = String(t.barcode).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        const id = `bc${bcIndex++}`;
+        scripts.push(`JsBarcode('#${id}','${jsVal}',{format:'CODE128',displayValue:false,height:110,margin:10,width:2.5});`);
+        return `<div class="card"><p class="title">${esc(t.name)}</p><p class="sub">Team Badge · ${esc(department)}</p><svg id="${id}"></svg><p class="value">${esc(t.barcode)}</p></div>`;
+      })
+      .join('');
+    body = `<h2 class="dept">Department: ${esc(department)}</h2>
+<div class="grid">${cards || `<p>No active teams in ${esc(department)}.</p>`}</div>`;
+    if (rows.length) scripts.push('window.setTimeout(()=>window.print(),400);');
+  }
+
+  return `<!doctype html><html><head><meta charset="utf-8" /><title>Team Barcodes${department ? ` — ${esc(department)}` : ''}</title>
+<style>body{font-family:Arial,sans-serif;margin:20px;color:#0f172a}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:20px}.card{border:2px solid #cbd5e1;border-radius:12px;padding:20px;text-align:center;break-inside:avoid}.title{font-size:28px;font-weight:800;margin:0 0 6px}.sub{font-size:13px;color:#64748b;margin:0 0 12px;text-transform:uppercase}.value{font-family:monospace;font-size:18px;margin-top:10px;font-weight:700}svg{height:110px;width:100%}
+.picker{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:0 0 18px;padding:12px;border:2px solid #cbd5e1;border-radius:12px;background:#f8fafc}
+.picker label{font-weight:800}.picker select,.picker button{font-size:16px;padding:8px 12px;min-height:42px;border-radius:8px}
+.picker button{font-weight:800;cursor:pointer}.dept{font-size:20px;margin:0 0 14px}.hint{color:#475569;font-weight:700}
+@media print{.no-print{display:none!important}body{margin:8px}}</style>
 <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script></head><body>
-<h1>Team Barcodes</h1><div class="grid">${cards || '<p>No teams.</p>'}</div>
-<script>${scripts.join('')}window.setTimeout(()=>window.print(),400);</script></body></html>`;
+<h1>Team Barcodes</h1>${picker}${body}
+<script>${scripts.join('')}</script></body></html>`;
 }
 
 function renderPhaseBarcodesPrintPage() {
@@ -11729,11 +11803,27 @@ app.get('/manager/command-print', (req, res) => {
     return res.type('html').send(renderActivitiesByAreaPrintPage());
   }
   if (type === 'teams') {
-    return renderTeamBarcodesPrintPage()
+    return renderTeamBarcodesPrintPage(req.query.department)
       .then((html) => res.type('html').send(html))
       .catch((err) => {
         console.error('[print teams]', err);
         res.status(500).send('Could not generate team barcodes.');
+      });
+  }
+  if (type === 'team') {
+    const teamId = Number(req.query.team_id);
+    if (!Number.isInteger(teamId) || teamId <= 0) return res.status(400).send('team_id is required.');
+    return pool
+      .query(`SELECT name, barcode, department FROM teams WHERE id = $1`, [teamId])
+      .then(({ rows }) => {
+        const team = rows[0];
+        if (!team) return res.status(404).send('Team not found.');
+        const sub = `Department: ${team.department || 'Not set'} · Team Badge`;
+        return res.type('html').send(renderCommandBarcodePrintPage(team.name, team.barcode, sub));
+      })
+      .catch((err) => {
+        console.error('[print team]', err);
+        res.status(500).send('Could not generate team barcode.');
       });
   }
   if (type === 'phases' || type === 'winding-activities' || type === 'machine-activities') {

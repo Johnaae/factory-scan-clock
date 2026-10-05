@@ -37,6 +37,16 @@
             <label for="newTeamBarcode">Barcode</label>
             <input id="newTeamBarcode" type="text" placeholder="e.g. TEAM-WINDER-2" autocomplete="off" />
           </div>
+          <div class="field">
+            <label for="newTeamDepartment">Department</label>
+            <select id="newTeamDepartment">
+              <option value="">Select department…</option>
+              <option value="Fabrication">Fabrication</option>
+              <option value="Assembly">Assembly</option>
+              <option value="Dome">Dome</option>
+              <option value="QA/QC">QA/QC</option>
+            </select>
+          </div>
           <button id="btnAddTeam" class="btn btn-primary manager-form-action-btn" type="button">Add team</button>
         </div>
         <div class="toastline manager-alert" id="teamHint"></div>
@@ -59,6 +69,6 @@
       </section>
     </main>
     <script src="/team-member-picker.js?v=3"></script>
-    <script src="/teams.js"></script>
+    <script src="/teams.js?v=department-2"></script>
   </body>
 </html>
