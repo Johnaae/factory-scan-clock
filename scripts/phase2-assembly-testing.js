@@ -2787,11 +2787,12 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       }
 
       // End Assembly Duration at assembly_completed_at. Never reset assembly_started_at.
-      // Route by requires_test: Ready for Testing (then QA/QC) vs Ready for Dome Install.
+      // Every tank goes through QA/QC; only Testing is skipped when requires_test is off.
+      // Ready for Dome Install is reached only via QA/QC PASS.
       const requiresTest = tankRequiresTest(tank);
       const nextStatus = requiresTest
         ? ASSEMBLY_STATUSES.READY_FOR_TESTING
-        : ASSEMBLY_STATUSES.READY_FOR_DOME_INSTALL;
+        : ASSEMBLY_STATUSES.READY_FOR_QA;
       await client.query(
         `UPDATE tanks
          SET status = $1,
@@ -2818,7 +2819,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         requires_test: requiresTest,
         message: requiresTest
           ? `${allTeamsNote}Assembly complete — Ready for Testing. QA/QC reviews the tank after Testing.`
-          : `${allTeamsNote}Assembly complete — ready for Dome Install (no testing required). Removed from Assembly kiosk. Production time frozen.`,
+          : `${allTeamsNote}Assembly complete — Ready for QA/QC (no testing required).`,
       });
     });
   }
