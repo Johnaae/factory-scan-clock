@@ -31,12 +31,12 @@ jobs:
 
           BACKUP_FILE="factory-scan-$(date -u +%Y-%m-%d-%H%M%S).dump"
 
-          pg_dump \
-            --dbname="$DATABASE_URL" \
-            --format=custom \
-            --no-owner \
-            --no-acl \
-            --file="$BACKUP_FILE"
+          docker run --rm \
+          -e DATABASE_URL="$DATABASE_URL" \
+          -v "$PWD:/backup" \
+          postgres:18 \
+          sh -c 'pg_dump --dbname="$DATABASE_URL" --format=custom --no-owner --no-acl --file="/backup/$1"' \
+          sh "$BACKUP_FILE"
 
           test -s "$BACKUP_FILE"
 
