@@ -1,0 +1,47 @@
+
+name: Daily Neon Backup
+
+on:
+  schedule:
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Backup Neon and upload to S3
+        env:
+          DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-2
+        run: |
+          set -euo pipefail
+
+          BACKUP_FILE="factory-scan-$(date -u +%Y-%m-%d-%H%M%S).dump"
+
+          pg_dump \
+            --dbname="$DATABASE_URL" \
+            --format=custom \
+            --no-owner \
+            --no-acl \
+            --file="$BACKUP_FILE"
+
+          test -s "$BACKUP_FILE"
+
+          aws s3 cp "$BACKUP_FILE" \
+            "s3://factory-scan-backup/daily/$BACKUP_FILE" \
+            --sse AES256
+
+          rm -f "$BACKUP_FILE"
