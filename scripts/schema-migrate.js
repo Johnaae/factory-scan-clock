@@ -829,6 +829,71 @@ UPDATE machines SET workflow = 'winding' WHERE workflow = 'winding' OR name ILIK
   } catch (err) {
     log.warn('[migration] users.role QA_QC check (noncritical):', err.message);
   }
+
+  await ensureEmployeeShopsSchema(client, log);
+}
+
+/**
+ * Employee Shop Assignment (permanent department eligibility). New table only; no existing
+ * table, column or row is changed. ON DELETE CASCADE removes only this table's own rows when
+ * an employee row is deleted, so the existing employee delete keeps working.
+ */
+const EMPLOYEE_SHOPS_SQL = `
+CREATE TABLE IF NOT EXISTS employee_shops (
+  employee_id BIGINT NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+  shop TEXT NOT NULL CHECK (shop IN ('Fabrication', 'Assembly', 'Dome')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (employee_id, shop)
+);
+CREATE INDEX IF NOT EXISTS idx_employee_shops_shop ON employee_shops (shop);
+`;
+
+/**
+ * Reads pg_class with a fresh snapshot rather than to_regclass(): waiting on an advisory lock
+ * does not refresh the session's catalog cache, so to_regclass() can miss a table another
+ * session committed while this one waited.
+ */
+async function employeeShopsSchemaPresent(client) {
+  const { rows } = await client.query(
+    `SELECT COUNT(*)::int AS n FROM pg_class c JOIN pg_namespace ns ON ns.oid = c.relnamespace
+     WHERE ns.nspname = 'public' AND c.relname IN ('employee_shops', 'idx_employee_shops_shop')`
+  );
+  return Boolean(rows[0] && rows[0].n === 2);
+}
+
+/**
+ * Creates employee_shops once. The additive pass runs on every cold start without the schema
+ * lock, and concurrent CREATE TABLE IF NOT EXISTS can still collide, so creation takes
+ * SCHEMA_LOCK_KEY as a transaction-scoped advisory lock (released at COMMIT/ROLLBACK, also
+ * safe through a transaction-mode pooler; re-entrant when this session already holds the
+ * session-level lock during a full migration).
+ * Noncritical: the app treats a missing table as "Shop Assignment not available yet",
+ * and the next cold start retries.
+ */
+async function ensureEmployeeShopsSchema(client, log = console) {
+  try {
+    if (await employeeShopsSchemaPresent(client)) return { created: false };
+    await client.query('BEGIN');
+    let created = false;
+    try {
+      await client.query(`SELECT set_config('lock_timeout', '8000', true)`);
+      await client.query(`SELECT set_config('statement_timeout', '20000', true)`);
+      await client.query('SELECT pg_advisory_xact_lock($1)', [SCHEMA_LOCK_KEY]);
+      if (!(await employeeShopsSchemaPresent(client))) {
+        await client.query(EMPLOYEE_SHOPS_SQL);
+        created = true;
+      }
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    }
+    if (created) log.log('[migration] employee_shops table ready');
+    return { created };
+  } catch (err) {
+    log.warn('[migration] employee_shops (noncritical, retried on next start):', err.message);
+    return { created: false, error: err.message };
+  }
 }
 
 /** Verify tank soft-delete columns + audit table exist (throws if missing after additive pass). */
@@ -929,6 +994,8 @@ async function runSchemaMigration(client, options = {}) {
       throw err;
     }
 
+    await ensureEmployeeShopsSchema(client, log);
+
     if (!skipBackfills) {
       await runOptionalBackfills(client, log);
     }
@@ -965,6 +1032,8 @@ module.exports = {
   runSchemaMigration,
   runSchemaMigrationWithPool,
   runAdditiveSchemaPass,
+  ensureEmployeeShopsSchema,
+  EMPLOYEE_SHOPS_SQL,
   ensureTankTrashSchema,
   runOptionalBackfills,
   verifyRequiredTables,

@@ -7325,8 +7325,9 @@ function normalizeTeamDepartment(raw) {
 
 /**
  * Employee Shop Assignment = permanent department eligibility (separate from badge role and
- * from the current team / shift). Stored in employee_shops, created by the manual migration
- * scripts/migrate-employee-shops.js. Until that runs, shops read as empty and saves are refused.
+ * from the current team / shift). Stored in employee_shops, created by the startup schema pass
+ * (scripts/schema-migrate.js). If that step has not succeeded yet, shops read as empty and
+ * saves are refused.
  */
 const EMPLOYEE_SHOPS = ['Fabrication', 'Assembly', 'Dome'];
 const EMPLOYEE_SHOPS_RECHECK_MS = 60000;
