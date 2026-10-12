@@ -7267,7 +7267,13 @@ app.get('/api/manager/employees/search', async (req, res) => {
     return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Manager login required.' });
   }
   const q = String(req.query.q || req.query.search || '').trim();
+  const teamId = Number(req.query.team_id);
   try {
+    let teamDepartment = '';
+    if (Number.isInteger(teamId) && teamId > 0) {
+      const t = await pool.query(`SELECT department FROM teams WHERE id = $1`, [teamId]);
+      teamDepartment = t.rows.length ? normalizeTeamDepartment(t.rows[0].department) || '' : '';
+    }
     let rows;
     if (q) {
       const safe = q.replace(/%/g, '').replace(/_/g, '');
@@ -7285,9 +7291,22 @@ app.get('/api/manager/employees/search', async (req, res) => {
       );
       rows = r.rows;
     }
+    const shopsReady = await isEmployeeShopsReady();
+    const shopsMap = await loadEmployeeShopsMap(rows.map((e) => Number(e.id)));
     return res.json({
       ok: true,
-      employees: rows.map((e) => ({ id: Number(e.id), code: e.code, name: e.name })),
+      shop_assignment_ready: shopsReady,
+      team_department: teamDepartment || null,
+      employees: rows.map((e) => {
+        const shops = shopsMap.get(Number(e.id)) || [];
+        return {
+          id: Number(e.id),
+          code: e.code,
+          name: e.name,
+          shops,
+          shop_eligibility: shopsReady ? shopEligibility(shops, teamDepartment) : 'not_applicable',
+        };
+      }),
     });
   } catch (err) {
     console.error('[manager employees search]', err);
@@ -7302,6 +7321,115 @@ function normalizeTeamDepartment(raw) {
   const s = String(raw == null ? '' : raw).trim();
   if (!s) return '';
   return TEAM_DEPARTMENTS.find((d) => d.toLowerCase() === s.toLowerCase()) || null;
+}
+
+/**
+ * Employee Shop Assignment = permanent department eligibility (separate from badge role and
+ * from the current team / shift). Stored in employee_shops, created by the manual migration
+ * scripts/migrate-employee-shops.js. Until that runs, shops read as empty and saves are refused.
+ */
+const EMPLOYEE_SHOPS = ['Fabrication', 'Assembly', 'Dome'];
+const EMPLOYEE_SHOPS_RECHECK_MS = 60000;
+let employeeShopsReady = false;
+let employeeShopsCheckedAt = 0;
+
+async function isEmployeeShopsReady() {
+  if (employeeShopsReady) return true;
+  if (Date.now() - employeeShopsCheckedAt < EMPLOYEE_SHOPS_RECHECK_MS) return false;
+  employeeShopsCheckedAt = Date.now();
+  try {
+    const r = await pool.query(`SELECT to_regclass('public.employee_shops') IS NOT NULL AS ok`);
+    employeeShopsReady = Boolean(r.rows[0] && r.rows[0].ok);
+  } catch (err) {
+    console.error('[employee shops] readiness check failed:', err.message);
+  }
+  return employeeShopsReady;
+}
+
+/** { provided: false } when the body has no shops field; otherwise canonical, de-duplicated shops. */
+function parseEmployeeShopsInput(body) {
+  if (!body || body.shops === undefined) return { provided: false, shops: [] };
+  const raw = Array.isArray(body.shops) ? body.shops : [];
+  const shops = [];
+  for (const v of raw) {
+    const s = String(v == null ? '' : v).trim();
+    const match = EMPLOYEE_SHOPS.find((x) => x.toLowerCase() === s.toLowerCase());
+    if (!match) {
+      return { provided: true, shops: [], error: `Shop must be one of: ${EMPLOYEE_SHOPS.join(', ')}.` };
+    }
+    if (!shops.includes(match)) shops.push(match);
+  }
+  return { provided: true, shops: EMPLOYEE_SHOPS.filter((s) => shops.includes(s)) };
+}
+
+/** Map employee id → shops (canonical order). Pass null for all employees. */
+async function loadEmployeeShopsMap(employeeIds) {
+  const map = new Map();
+  if (!(await isEmployeeShopsReady())) return map;
+  if (Array.isArray(employeeIds) && !employeeIds.length) return map;
+  const { rows } = Array.isArray(employeeIds)
+    ? await pool.query(`SELECT employee_id, shop FROM employee_shops WHERE employee_id = ANY($1::bigint[])`, [
+        employeeIds,
+      ])
+    : await pool.query(`SELECT employee_id, shop FROM employee_shops`);
+  for (const r of rows) {
+    const id = Number(r.employee_id);
+    if (!map.has(id)) map.set(id, []);
+    map.get(id).push(r.shop);
+  }
+  for (const [id, shops] of map) map.set(id, EMPLOYEE_SHOPS.filter((s) => shops.includes(s)));
+  return map;
+}
+
+/**
+ * 'not_applicable' for teams whose department is not a shop (QA/QC, blank);
+ * 'unassigned' when the employee has no shop yet (allowed — nothing is guessed).
+ */
+function shopEligibility(shops, teamDepartment) {
+  const dept = normalizeTeamDepartment(teamDepartment);
+  if (!dept || !EMPLOYEE_SHOPS.includes(dept)) return 'not_applicable';
+  if (!Array.isArray(shops) || !shops.length) return 'unassigned';
+  return shops.includes(dept) ? 'eligible' : 'ineligible';
+}
+
+/**
+ * Current active team memberships that no longer match the employee's Shop Assignment.
+ * Report-only: memberships are never changed automatically.
+ */
+async function loadEmployeeShopConflicts(shopsMap, employeeIds) {
+  const byEmployee = new Map();
+  if (!shopsMap.size) return byEmployee;
+  const ids = Array.isArray(employeeIds) ? employeeIds : [...shopsMap.keys()];
+  if (!ids.length) return byEmployee;
+  const { rows } = await pool.query(
+    `SELECT tm.employee_id, t.id AS team_id, t.name AS team_name, t.department
+     FROM team_members tm
+     JOIN teams t ON t.id = tm.team_id
+     WHERE tm.active = 1 AND t.active = 1 AND tm.employee_id = ANY($1::bigint[])`,
+    [ids]
+  );
+  for (const r of rows) {
+    const id = Number(r.employee_id);
+    if (shopEligibility(shopsMap.get(id), r.department) !== 'ineligible') continue;
+    if (!byEmployee.has(id)) byEmployee.set(id, []);
+    byEmployee.get(id).push({ team_id: Number(r.team_id), team_name: r.team_name, department: r.department });
+  }
+  return byEmployee;
+}
+
+async function replaceEmployeeShops(client, employeeId, shops) {
+  await client.query(`DELETE FROM employee_shops WHERE employee_id = $1 AND NOT (shop = ANY($2::text[]))`, [
+    employeeId,
+    shops,
+  ]);
+  if (shops.length) {
+    await client.query(
+      `INSERT INTO employee_shops (employee_id, shop)
+       SELECT $1, s FROM unnest($2::text[]) AS s
+       ON CONFLICT (employee_id, shop) DO NOTHING`,
+      [employeeId, shops]
+    );
+  }
 }
 
 app.get('/api/manager/teams/full', async (req, res) => {
@@ -7320,13 +7448,32 @@ app.get('/api/manager/teams/full', async (req, res) => {
        LEFT JOIN employees e ON e.id = tm.employee_id
        ORDER BY tm.team_id, COALESCE(e.name, tm.name) ASC`
     );
+    const shopsReady = await isEmployeeShopsReady();
+    const memberEmployeeIds = [...new Set(members.filter((m) => m.employee_id != null).map((m) => Number(m.employee_id)))];
+    const shopsMap = await loadEmployeeShopsMap(memberEmployeeIds);
     const byTeam = new Map();
     for (const t of teams) byTeam.set(Number(t.id), { ...t, members: [] });
     for (const m of members) {
       const tid = Number(m.team_id);
-      if (byTeam.has(tid)) byTeam.get(tid).members.push(m);
+      if (!byTeam.has(tid)) continue;
+      const team = byTeam.get(tid);
+      const shops = m.employee_id != null ? shopsMap.get(Number(m.employee_id)) || [] : [];
+      byTeam.get(tid).members.push({
+        ...m,
+        employee_shops: shops,
+        shop_conflict:
+          shopsReady && m.employee_id != null && Number(m.active) === 1
+            ? shopEligibility(shops, team.department) === 'ineligible'
+            : false,
+      });
     }
-    return res.json({ ok: true, teams: [...byTeam.values()], departments: TEAM_DEPARTMENTS });
+    return res.json({
+      ok: true,
+      teams: [...byTeam.values()],
+      departments: TEAM_DEPARTMENTS,
+      employee_shops: EMPLOYEE_SHOPS,
+      shop_assignment_ready: shopsReady,
+    });
   } catch (err) {
     console.error('[manager teams full]', err);
     return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load teams.' });
@@ -7422,7 +7569,7 @@ app.post('/api/manager/teams/:id/members', async (req, res) => {
     return res.status(400).json({ ok: false, error: 'validation', message: 'Select an employee from the directory.' });
   }
   try {
-    const teamCheck = await pool.query(`SELECT id, name FROM teams WHERE id = $1`, [teamId]);
+    const teamCheck = await pool.query(`SELECT id, name, department FROM teams WHERE id = $1`, [teamId]);
     if (!teamCheck.rows.length) {
       return res.status(404).json({ ok: false, error: 'not_found', message: 'Team not found.' });
     }
@@ -7433,6 +7580,17 @@ app.post('/api/manager/teams/:id/members', async (req, res) => {
     const emp = empRes.rows[0];
     if (Number(emp.is_active) === 0) {
       return res.status(400).json({ ok: false, error: 'inactive_employee', message: 'That employee is inactive in the directory.' });
+    }
+    const empShops = (await loadEmployeeShopsMap([employeeId])).get(employeeId) || [];
+    const teamDepartment = normalizeTeamDepartment(teamCheck.rows[0].department);
+    if (shopEligibility(empShops, teamDepartment) === 'ineligible') {
+      return res.status(409).json({
+        ok: false,
+        error: 'shop_ineligible',
+        employee_shops: empShops,
+        team_department: teamDepartment,
+        message: `${emp.name} is assigned to ${empShops.join(', ')} — not eligible for ${teamDepartment} teams. Update their Shop Assignment in the Employee Directory first.`,
+      });
     }
     const dupSame = await pool.query(
       `SELECT id FROM team_members WHERE team_id = $1 AND employee_id = $2 AND active = 1`,
@@ -8977,17 +9135,46 @@ app.get('/api/employees', async (req, res) => {
     );
     rows = r.rows;
   }
+  const shopsReady = await isEmployeeShopsReady();
+  const shopsMap = await loadEmployeeShopsMap(search ? rows.map((e) => Number(e.id)) : null);
+  const conflictsMap = await loadEmployeeShopConflicts(shopsMap, null);
   res.json({
     ok: true,
+    shop_assignment_ready: shopsReady,
+    shop_options: EMPLOYEE_SHOPS,
     employees: rows.map((e) => ({
       ...e,
       is_active: !!e.is_active,
       hourly_rate: Number.isFinite(Number(e.hourly_rate)) ? Number(e.hourly_rate) : 20,
       badge_role: e.badge_role ? String(e.badge_role) : '',
       daily_hours: Number.isFinite(Number(workedMap.get(Number(e.id)))) ? Number(workedMap.get(Number(e.id))) : 0,
+      shops: shopsMap.get(Number(e.id)) || [],
+      shop_conflicts: conflictsMap.get(Number(e.id)) || [],
     })),
   });
 });
+
+async function employeeShopFields(employeeId) {
+  const shopsMap = await loadEmployeeShopsMap([employeeId]);
+  const conflictsMap = await loadEmployeeShopConflicts(shopsMap, [employeeId]);
+  return {
+    shops: shopsMap.get(employeeId) || [],
+    shop_conflicts: conflictsMap.get(employeeId) || [],
+  };
+}
+
+/** Clear 503 when shops are sent before the manual migration has created employee_shops. */
+async function rejectShopsWithoutTable(res, parsedShops) {
+  if (!parsedShops.provided || !parsedShops.shops.length) return false;
+  if (await isEmployeeShopsReady()) return false;
+  res.status(503).json({
+    ok: false,
+    error: 'shop_assignment_not_ready',
+    message:
+      'Shop Assignment is not available yet — the employee_shops database migration has not been run. Clear the Shop Assignment to save other changes.',
+  });
+  return true;
+}
 
 app.get('/api/employees/:id', async (req, res) => {
   const id = Number(req.params.id);
@@ -9004,11 +9191,14 @@ app.get('/api/employees/:id', async (req, res) => {
   const e = r.rows[0];
   return res.json({
     ok: true,
+    shop_assignment_ready: await isEmployeeShopsReady(),
+    shop_options: EMPLOYEE_SHOPS,
     employee: {
       ...e,
       is_active: !!e.is_active,
       hourly_rate: Number.isFinite(Number(e.hourly_rate)) ? Number(e.hourly_rate) : 20,
       badge_role: e.badge_role ? String(e.badge_role) : '',
+      ...(await employeeShopFields(id)),
     },
   });
 });
@@ -9021,29 +9211,46 @@ app.post('/api/employees', async (req, res) => {
   }
   const hourly_rate = parseHourlyRate(req.body && req.body.hourly_rate);
   const badge_role = parseBadgeRoleInput(req.body);
+  const parsedShops = parseEmployeeShopsInput(req.body);
+  if (parsedShops.error) {
+    return res.status(400).json({ ok: false, error: 'validation', message: parsedShops.error });
+  }
+  if (await rejectShopsWithoutTable(res, parsedShops)) return;
 
   const ts = nowIso();
+  let client = null;
   try {
-    const ins = await pool.query(
+    client = await pool.connect();
+    await client.query('BEGIN');
+    const ins = await client.query(
       `INSERT INTO employees (code, name, is_active, hourly_rate, badge_role, created_at, updated_at)
        VALUES ($1, $2, 1, $3, $4, $5::timestamptz, $6::timestamptz)
        RETURNING id, code, name, is_active, hourly_rate, badge_role, created_at, updated_at`,
       [code, name, hourly_rate, badge_role, ts, ts]
     );
     const created = ins.rows[0];
+    if (parsedShops.shops.length) {
+      await replaceEmployeeShops(client, Number(created.id), parsedShops.shops);
+    }
+    await client.query('COMMIT');
     return res.status(201).json({
       ok: true,
       employee: {
         ...created,
         is_active: !!created.is_active,
         hourly_rate: Number(created.hourly_rate),
+        shops: parsedShops.shops,
+        shop_conflicts: [],
       },
     });
   } catch (e) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
     if (e && e.code === '23505') {
       return res.status(409).json({ ok: false, error: 'duplicate_code', message: 'Employee code already exists.' });
     }
     return res.status(500).json({ ok: false, error: 'server', message: 'Could not create employee.' });
+  } finally {
+    if (client) client.release();
   }
 });
 
@@ -9063,18 +9270,33 @@ app.put('/api/employees/:id', async (req, res) => {
   const statusRaw = String((req.body && req.body.status) || '').trim().toUpperCase();
   const is_active = statusRaw === 'INACTIVE' ? 0 : 1;
   const badge_role = parseBadgeRoleInput(req.body);
+  const parsedShops = parseEmployeeShopsInput(req.body);
+  if (parsedShops.error) {
+    return res.status(400).json({ ok: false, error: 'validation', message: parsedShops.error });
+  }
+  if (await rejectShopsWithoutTable(res, parsedShops)) return;
+  // Shops are replaced only when sent; team memberships and shifts are never changed here.
+  const writeShops = parsedShops.provided && (await isEmployeeShopsReady());
 
   const ts = nowIso();
+  let client = null;
   try {
-    await pool.query(
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await client.query(
       `UPDATE employees SET code = $1, name = $2, hourly_rate = $3, is_active = $4, badge_role = $5, updated_at = $6::timestamptz WHERE id = $7`,
       [code, name, hourly_rate, is_active, badge_role, ts, id]
     );
+    if (writeShops) await replaceEmployeeShops(client, id, parsedShops.shops);
+    await client.query('COMMIT');
   } catch (e) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
     if (e && e.code === '23505') {
       return res.status(409).json({ ok: false, error: 'duplicate_code', message: 'Employee code already exists.' });
     }
     return res.status(500).json({ ok: false, error: 'server', message: 'Could not update employee.' });
+  } finally {
+    if (client) client.release();
   }
 
   const updatedRes = await pool.query(
@@ -9090,6 +9312,7 @@ app.put('/api/employees/:id', async (req, res) => {
       is_active: !!updated.is_active,
       hourly_rate: Number(updated.hourly_rate),
       badge_role: updated.badge_role ? String(updated.badge_role) : '',
+      ...(await employeeShopFields(id)),
     },
   });
 });

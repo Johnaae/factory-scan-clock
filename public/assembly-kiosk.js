@@ -3,6 +3,19 @@
 const API = '/api/kiosk/assembly';
 const KIOSK_SLUG_KEY = 'windingKioskSlug';
 
+const AK_I18N = window.AssemblyI18n || null;
+function tr(key, vars) {
+  return AK_I18N ? AK_I18N.tr(key, vars) : key;
+}
+/** Deferred translation so a message shown on screen follows a later language switch. */
+function say(key, vars) {
+  return () => tr(key, vars);
+}
+function displayMessage(msg) {
+  if (typeof msg === 'function') return msg();
+  return AK_I18N ? AK_I18N.trServer(msg) : String(msg);
+}
+
 const els = {
   machineLabel: document.getElementById('machineLabel'),
   workflowTitle: document.getElementById('workflowTitle'),
@@ -123,15 +136,19 @@ function blurScanInputs() {
   }
 }
 
+let lastWarning = null;
+
 function showWarning(msg) {
   if (!els.warning) return;
   if (!msg) {
+    lastWarning = null;
     els.warning.hidden = true;
     els.warning.textContent = '';
     return;
   }
+  lastWarning = msg;
   els.warning.hidden = false;
-  els.warning.textContent = msg;
+  els.warning.textContent = displayMessage(msg);
 }
 
 async function api(path, opts) {
@@ -151,7 +168,7 @@ async function api(path, opts) {
   try {
     data = await res.json();
   } catch (_err) {
-    data = { ok: false, message: 'Invalid server response.' };
+    data = { ok: false, message: say('ak.msg.badResponse') };
   }
   return { res, data };
 }
@@ -178,9 +195,9 @@ function closeModal(el) {
 
 function askConfirm(title, text, okLabel) {
   return new Promise((resolve) => {
-    if (els.confirmTitle) els.confirmTitle.textContent = title || 'Confirm';
+    if (els.confirmTitle) els.confirmTitle.textContent = title || tr('ak.confirmTitle');
     if (els.confirmText) els.confirmText.textContent = text || '';
-    if (els.btnConfirmOk) els.btnConfirmOk.textContent = okLabel || 'Confirm';
+    if (els.btnConfirmOk) els.btnConfirmOk.textContent = okLabel || tr('ak.confirm');
     confirmHandler = resolve;
     openModal(els.confirmModal);
   });
@@ -193,16 +210,24 @@ function formatTs(value) {
   return d.toLocaleString();
 }
 
+const KNOWN_STATUS_LABELS = new Set([
+  'ready_for_assembly',
+  'assembly_in_progress',
+  'ready_for_qa',
+  'qa_in_progress',
+  'qa_failed',
+  'ready_for_testing',
+  'testing_in_progress',
+]);
+
 function statusLabel(status) {
   const st = String(status || '').toLowerCase();
-  if (st === 'ready_for_assembly') return 'Ready for Assembly';
-  if (st === 'assembly_in_progress') return 'Assembly Working';
-  if (st === 'ready_for_qa') return 'Ready for QA';
-  if (st === 'qa_in_progress') return 'QA In Progress';
-  if (st === 'qa_failed') return 'QA Failed';
-  if (st === 'ready_for_testing') return 'Ready for Testing';
-  if (st === 'testing_in_progress') return 'Testing';
+  if (KNOWN_STATUS_LABELS.has(st)) return tr(`ak.status.${st}`);
   return st || '—';
+}
+
+function tankLabel(tankNumber) {
+  return tr('ak.tank', { tank: tankNumber || '—' });
 }
 
 function laborDisplay(tank) {
@@ -222,21 +247,22 @@ function liveAssemblyDurationDisplay(tank) {
 }
 
 function otherTeamNames(teams) {
-  return (teams || []).map((t) => t.team_name || `Team ${t.team_id}`).join(', ');
+  return (teams || []).map((t) => t.team_name || tr('ak.team', { id: t.team_id })).join(', ');
 }
 
 function eligibleOptionLabel(tank) {
   const st = String((tank && tank.status) || '').toLowerCase();
+  const num = (tank && tank.tank_number) || '—';
   if (st === 'assembly_in_progress') {
     const teams = Array.isArray(tank.assembly_active_teams) ? tank.assembly_active_teams : [];
     return teams.length
-      ? `Tank ${tank.tank_number || '—'} — In Assembly (${otherTeamNames(teams)})`
-      : `Tank ${tank.tank_number || '—'} — In Assembly`;
+      ? tr('ak.optInAssemblyTeams', { tank: num, teams: otherTeamNames(teams) })
+      : tr('ak.optInAssembly', { tank: num });
   }
   if (tank && tank.assembly_restored_at) {
-    return `Tank ${tank.tank_number || '—'} — Restored, Ready for Assembly`;
+    return tr('ak.optRestored', { tank: num });
   }
-  return `Tank ${tank.tank_number || '—'} — Ready for Assembly`;
+  return tr('ak.optReady', { tank: num });
 }
 
 function wireTouchPrevent(root) {
@@ -257,11 +283,11 @@ function wireTouchPrevent(root) {
 
 function teamStatusBadge(team) {
   if (team.on_lunch || String(team.status || '').toLowerCase() === 'lunch') {
-    return '<span class="ak-badge ak-badge--lunch">LUNCH</span>';
+    return `<span class="ak-badge ak-badge--lunch">${escapeHtml(tr('ak.badge.lunch'))}</span>`;
   }
   const hasLabor = (team.tanks || []).some((t) => t.active_session);
-  if (hasLabor) return '<span class="ak-badge ak-badge--working">WORKING</span>';
-  return '<span class="ak-badge ak-badge--active">ACTIVE</span>';
+  if (hasLabor) return `<span class="ak-badge ak-badge--working">${escapeHtml(tr('ak.badge.working'))}</span>`;
+  return `<span class="ak-badge ak-badge--active">${escapeHtml(tr('ak.badge.active'))}</span>`;
 }
 
 function assemblyActionButtons(tank, teamId) {
@@ -270,26 +296,27 @@ function assemblyActionButtons(tank, teamId) {
   const stage = session ? String(session.stage || '').toUpperCase() : '';
   const tid = Number(tank.id);
   const btns = [];
+  const label = (key) => escapeHtml(tr(key));
   if (status === 'assembly_in_progress' && !session) {
     btns.push(
-      `<button type="button" class="btn-primary btn-touch btn-touch--start-work" data-ak-action="start" data-tank-id="${tid}" data-team-id="${teamId}" data-stage="ASSEMBLY">START</button>`
+      `<button type="button" class="btn-primary btn-touch btn-touch--start-work" data-ak-action="start" data-tank-id="${tid}" data-team-id="${teamId}" data-stage="ASSEMBLY">${label('ak.btn.start')}</button>`
     );
     btns.push(
-      `<button type="button" class="btn-primary btn-touch btn-touch--complete" data-ak-action="finish" data-tank-id="${tid}" data-team-id="${teamId}">FINISH</button>`
+      `<button type="button" class="btn-primary btn-touch btn-touch--complete" data-ak-action="finish" data-tank-id="${tid}" data-team-id="${teamId}">${label('ak.btn.finish')}</button>`
     );
     btns.push(
-      `<button type="button" class="btn-secondary btn-touch" data-ak-action="remove_from_assembly" data-tank-id="${tid}" data-team-id="${teamId}">REMOVE</button>`
+      `<button type="button" class="btn-secondary btn-touch" data-ak-action="remove_from_assembly" data-tank-id="${tid}" data-team-id="${teamId}">${label('ak.btn.remove')}</button>`
     );
   }
   if (session && stage === 'ASSEMBLY') {
     btns.push(
-      `<button type="button" class="btn-secondary btn-touch" data-ak-action="stop" data-tank-id="${tid}" data-team-id="${teamId}">STOP</button>`
+      `<button type="button" class="btn-secondary btn-touch" data-ak-action="stop" data-tank-id="${tid}" data-team-id="${teamId}">${label('ak.btn.stop')}</button>`
     );
     btns.push(
-      `<button type="button" class="btn-primary btn-touch btn-touch--complete" data-ak-action="finish" data-tank-id="${tid}" data-team-id="${teamId}">FINISH</button>`
+      `<button type="button" class="btn-primary btn-touch btn-touch--complete" data-ak-action="finish" data-tank-id="${tid}" data-team-id="${teamId}">${label('ak.btn.finish')}</button>`
     );
     btns.push(
-      `<button type="button" class="btn-secondary btn-touch" data-ak-action="remove_from_assembly" data-tank-id="${tid}" data-team-id="${teamId}">REMOVE</button>`
+      `<button type="button" class="btn-secondary btn-touch" data-ak-action="remove_from_assembly" data-tank-id="${tid}" data-team-id="${teamId}">${label('ak.btn.remove')}</button>`
     );
   }
   return btns.join('');
@@ -301,17 +328,17 @@ function renderTankCard(tank, teamId) {
   const active = Boolean(session) && String(session.stage || '').toUpperCase() === 'ASSEMBLY';
   return `<article class="ak-tank-card ${active ? 'is-active' : ''}" data-tank-id="${Number(tank.id)}">
     <div class="ak-tank-head">
-      <h3 class="ak-tank-title">Tank ${escapeHtml(tank.tank_number || '—')}</h3>
+      <h3 class="ak-tank-title">${escapeHtml(tankLabel(tank.tank_number))}</h3>
       <span class="ak-tank-status">${escapeHtml(statusLabel(status))}</span>
     </div>
     <div class="ak-metrics">
-      <div class="ak-metric"><span class="ak-metric-label">Duration</span><span class="ak-metric-value">${escapeHtml(liveAssemblyDurationDisplay(tank))}</span></div>
-      <div class="ak-metric"><span class="ak-metric-label">Labor</span><span class="ak-metric-value">${escapeHtml(laborDisplay(tank))}</span></div>
+      <div class="ak-metric"><span class="ak-metric-label">${escapeHtml(tr('ak.metric.duration'))}</span><span class="ak-metric-value">${escapeHtml(liveAssemblyDurationDisplay(tank))}</span></div>
+      <div class="ak-metric"><span class="ak-metric-label">${escapeHtml(tr('ak.metric.labor'))}</span><span class="ak-metric-value">${escapeHtml(laborDisplay(tank))}</span></div>
     </div>
     ${
       Array.isArray(tank.assembly_other_teams) && tank.assembly_other_teams.length
-        ? `<p class="ak-tank-stage">Also working: ${escapeHtml(otherTeamNames(tank.assembly_other_teams))}${
-            tank.tank_labor_display ? ` · Tank total labor: ${escapeHtml(tank.tank_labor_display)}` : ''
+        ? `<p class="ak-tank-stage">${escapeHtml(tr('ak.alsoWorking', { teams: otherTeamNames(tank.assembly_other_teams) }))}${
+            tank.tank_labor_display ? escapeHtml(tr('ak.tankTotalLabor', { labor: tank.tank_labor_display })) : ''
           }</p>`
         : ''
     }
@@ -346,32 +373,32 @@ function renderTeamCard(team) {
   const tanksHtml = (team.tanks || []).map((t) => renderTankCard(t, teamId)).join('');
   return `<section class="ak-team-card ${onLunch ? 'is-lunch' : 'is-working'} ${focused ? 'is-focused' : ''}" data-team-id="${teamId}">
     <div class="ak-team-head">
-      <h2 class="ak-team-title">${escapeHtml(team.team_name || `Team ${teamId}`)}</h2>
+      <h2 class="ak-team-title">${escapeHtml(team.team_name || tr('ak.team', { id: teamId }))}</h2>
       <div class="ak-team-badges">
-        <span class="ak-badge ak-badge--selected" data-selected-badge ${focused ? '' : 'hidden'}>SELECTED</span>
+        <span class="ak-badge ak-badge--selected" data-selected-badge ${focused ? '' : 'hidden'}>${escapeHtml(tr('ak.badge.selected'))}</span>
         ${teamStatusBadge(team)}
       </div>
     </div>
-    ${onLunch ? '<p class="ak-team-meta">On lunch — timers paused for this team only</p>' : ''}
-    <p class="ak-roster"><span class="ak-roster-label">On shift:</span> ${rosterNames ? escapeHtml(rosterNames) : 'No open-shift employees'}</p>
+    ${onLunch ? `<p class="ak-team-meta">${escapeHtml(tr('ak.onLunch'))}</p>` : ''}
+    <p class="ak-roster"><span class="ak-roster-label">${escapeHtml(tr('ak.onShift'))}</span> ${escapeHtml(rosterNames || tr('ak.noOpenShift'))}</p>
     <div class="ak-select-panel">
       <div class="ak-select-row">
-        <select data-team-tank-select="${teamId}" aria-label="Select tank for team">
-          <option value="">Select completed FAB tank…</option>
+        <select data-team-tank-select="${teamId}" aria-label="${escapeHtml(tr('ak.selectTankForTeam'))}">
+          <option value="">${escapeHtml(tr('ak.selectFabTank'))}</option>
           ${tankOptions}
         </select>
-        <button type="button" class="btn-primary btn-touch" data-ak-action="confirm_tank" data-team-id="${teamId}">CONFIRM TANK</button>
+        <button type="button" class="btn-primary btn-touch" data-ak-action="confirm_tank" data-team-id="${teamId}">${escapeHtml(tr('ak.btn.confirmTank'))}</button>
       </div>
     </div>
-    <div class="ak-tank-grid">${tanksHtml || '<p class="ak-empty">No tank confirmed for this team yet.</p>'}</div>
+    <div class="ak-tank-grid">${tanksHtml || `<p class="ak-empty">${escapeHtml(tr('ak.noTankYet'))}</p>`}</div>
     <div class="wk-touch ak-team-actions" data-team-controls="${teamId}">
       ${
         onLunch
-          ? `<button type="button" class="btn-primary btn-touch" data-ak-action="resume" data-team-id="${teamId}">Resume</button>`
-          : `<button type="button" class="btn-secondary btn-touch" data-ak-action="lunch" data-team-id="${teamId}">Lunch</button>`
+          ? `<button type="button" class="btn-primary btn-touch" data-ak-action="resume" data-team-id="${teamId}">${escapeHtml(tr('ak.btn.resume'))}</button>`
+          : `<button type="button" class="btn-secondary btn-touch" data-ak-action="lunch" data-team-id="${teamId}">${escapeHtml(tr('ak.btn.lunch'))}</button>`
       }
-      <button type="button" class="btn-secondary btn-touch btn-touch--employee-out" data-ak-action="employee_out" data-team-id="${teamId}">Employee Out</button>
-      <button type="button" class="btn-secondary btn-touch" data-ak-action="end_shift" data-team-id="${teamId}">End Shift</button>
+      <button type="button" class="btn-secondary btn-touch btn-touch--employee-out" data-ak-action="employee_out" data-team-id="${teamId}">${escapeHtml(tr('ak.btn.employeeOut'))}</button>
+      <button type="button" class="btn-secondary btn-touch" data-ak-action="end_shift" data-team-id="${teamId}">${escapeHtml(tr('ak.btn.endShift'))}</button>
     </div>
   </section>`;
 }
@@ -389,10 +416,10 @@ function renderRecentlyFinished() {
     .map((t) => {
       const tid = Number(t.id);
       return `<article class="ak-recent-card" data-tank-id="${tid}">
-        <h3>Tank ${escapeHtml(t.tank_number || '—')}</h3>
-        <p>Finished: ${escapeHtml(formatTs(t.assembly_completed_at))}</p>
-        <p>Status: ${escapeHtml(statusLabel(t.status))}</p>
-        <button type="button" class="btn-primary btn-touch" data-ak-action="restore_to_assembly" data-tank-id="${tid}">RESTORE TO ASSEMBLY</button>
+        <h3>${escapeHtml(tankLabel(t.tank_number))}</h3>
+        <p>${escapeHtml(tr('ak.finishedAt', { ts: formatTs(t.assembly_completed_at) }))}</p>
+        <p>${escapeHtml(tr('ak.statusLine', { status: statusLabel(t.status) }))}</p>
+        <button type="button" class="btn-primary btn-touch" data-ak-action="restore_to_assembly" data-tank-id="${tid}">${escapeHtml(tr('ak.btn.restore'))}</button>
       </article>`;
     })
     .join('');
@@ -403,7 +430,7 @@ function syncReturnRemovedButton() {
   if (!els.btnReturnRemoved || !els.returnRemovedSelect) return;
   els.btnReturnRemoved.hidden = !els.returnRemovedSelect.value;
   els.btnReturnRemoved.disabled = returnRemovedBusy;
-  els.btnReturnRemoved.textContent = returnRemovedBusy ? 'Returning…' : 'Return to Assembly';
+  els.btnReturnRemoved.textContent = returnRemovedBusy ? tr('ak.returning') : tr('ak.returnBtn');
 }
 
 function renderReturnRemoved() {
@@ -411,20 +438,20 @@ function renderReturnRemoved() {
   const rows = removedTanks || [];
   if (!rows.length) {
     els.returnRemoved.hidden = true;
-    els.returnRemovedSelect.innerHTML = '<option value="">Select removed tank…</option>';
+    els.returnRemovedSelect.innerHTML = `<option value="">${escapeHtml(tr('ak.selectRemoved'))}</option>`;
     returnRemovedSignature = '';
     syncReturnRemovedButton();
     return;
   }
   els.returnRemoved.hidden = false;
   // Only rebuild options when the list changes so the 10 s poll never resets an operator's pick.
-  const signature = rows.map((t) => `${Number(t.id)}:${t.tank_number}`).join('|');
+  const signature = `${tr('ak.selectRemoved')}|${rows.map((t) => `${Number(t.id)}:${t.tank_number}`).join('|')}`;
   if (signature !== returnRemovedSignature) {
     const previous = els.returnRemovedSelect.value;
     els.returnRemovedSelect.innerHTML =
-      '<option value="">Select removed tank…</option>' +
+      `<option value="">${escapeHtml(tr('ak.selectRemoved'))}</option>` +
       rows
-        .map((t) => `<option value="${Number(t.id)}">Tank ${escapeHtml(t.tank_number || '—')}</option>`)
+        .map((t) => `<option value="${Number(t.id)}">${escapeHtml(tankLabel(t.tank_number))}</option>`)
         .join('');
     els.returnRemovedSelect.value = rows.some((t) => String(Number(t.id)) === previous) ? previous : '';
     returnRemovedSignature = signature;
@@ -437,13 +464,13 @@ async function returnRemovedTank() {
   const tankId = Number(els.returnRemovedSelect.value);
   const tank = (removedTanks || []).find((t) => Number(t.id) === tankId);
   if (!tank) {
-    showWarning('Select a removed tank first.');
+    showWarning(say('ak.msg.selectRemovedFirst'));
     return;
   }
   const ok = await askConfirm(
-    'Return Tank to Assembly?',
-    `Tank ${tank.tank_number}\n\nThe tank goes back to the Assembly tank list. It is not sent back to FAB.\nFAB completion, prior Assembly labor and history are preserved.\nNo timer or labor starts until a team confirms the tank and presses START.`,
-    'Return to Assembly'
+    tr('ak.msg.returnTitle'),
+    tr('ak.msg.returnBody', { tank: tank.tank_number }),
+    tr('ak.returnBtn')
   );
   if (!ok || returnRemovedBusy || actionBusy) return;
   returnRemovedBusy = true;
@@ -453,16 +480,16 @@ async function returnRemovedTank() {
   try {
     const { res, data } = await postAction({ action: 'return_removed_to_assembly', tank_id: tankId });
     if (!res.ok || !data.ok) {
-      showWarning((data && data.message) || 'Could not return the tank to Assembly.');
+      showWarning((data && data.message) || say('ak.msg.returnFailed'));
       if (res.status === 409) await loadConfig();
       return;
     }
     removedTanks = removedTanks.filter((t) => Number(t.id) !== tankId);
     renderReturnRemoved();
-    showWarning(data.message || `Tank ${tank.tank_number} returned to Assembly.`);
+    showWarning(data.message || say('ak.msg.returned', { tank: tank.tank_number }));
     await loadConfig();
   } catch (_err) {
-    showWarning('Could not reach the server. Check the connection and try again.');
+    showWarning(say('ak.msg.offline'));
   } finally {
     returnRemovedBusy = false;
     actionBusy = false;
@@ -470,10 +497,13 @@ async function returnRemovedTank() {
   }
 }
 
+function renderMachineLabel() {
+  if (!els.machineLabel) return;
+  els.machineLabel.textContent = (config && config.machine && config.machine.name) || tr('ak.subtitle');
+}
+
 function renderAll() {
-  if (config && config.machine && els.machineLabel) {
-    els.machineLabel.textContent = config.machine.name || 'Assembly Production';
-  }
+  renderMachineLabel();
   renderRecentlyFinished();
   renderReturnRemoved();
   if (!els.teamCards) return;
@@ -506,7 +536,8 @@ function selectTeam(teamId) {
     if (badge) badge.hidden = !on;
   });
   const team = activeTeams.find((t) => Number(t.team_id) === teamId);
-  showWarning(`${(team && team.team_name) || 'Team'} selected — employee scans join this team.`);
+  const teamName = team && team.team_name;
+  showWarning(() => tr('ak.msg.teamSelected', { team: teamName || tr('ak.teamFallback') }));
 }
 
 async function loadConfig() {
@@ -515,13 +546,13 @@ async function loadConfig() {
     const { res, data } = await api(`${API}/config`, { cache: 'no-store' });
     if (seq !== loadConfigSeq) return; // newer loadConfig superseded this response
     if (res.status === 409 && data && data.workflow === 'winding') {
-      showWarning(data.message || 'This machine is winding — redirecting…');
+      showWarning(data.message || say('ak.msg.windingRedirect'));
       const slug = (config && config.machine && config.machine.slug) || null;
       if (slug) window.location.href = `/kiosk/machine/${encodeURIComponent(slug)}`;
       return;
     }
     if (!res.ok || !data.ok) {
-      showWarning((data && data.message) || 'Could not load assembly kiosk.');
+      showWarning((data && data.message) || say('ak.msg.loadFailed'));
       return;
     }
     applyConfigData(data);
@@ -541,7 +572,7 @@ async function runTeamAction(payload, okMessage) {
   try {
     const { res, data } = await postAction(payload);
     if (!res.ok || !data.ok) {
-      showWarning((data && data.message) || 'Action failed.');
+      showWarning((data && data.message) || say('ak.msg.actionFailed'));
       return;
     }
     if (okMessage || data.message) showWarning(okMessage || data.message);
@@ -555,7 +586,7 @@ async function confirmTankForTeam(teamId) {
   const select = els.teamCards.querySelector(`[data-team-tank-select="${teamId}"]`);
   const tankId = select ? Number(select.value) : 0;
   if (!tankId) {
-    showWarning('Select a tank for this team first.');
+    showWarning(say('ak.msg.selectTankFirst'));
     return;
   }
   if (actionBusy) return;
@@ -567,10 +598,10 @@ async function confirmTankForTeam(teamId) {
       body: JSON.stringify({ tank_id: tankId, team_id: teamId }),
     });
     if (!res.ok || !data.ok) {
-      showWarning((data && data.message) || 'Could not confirm tank.');
+      showWarning((data && data.message) || say('ak.msg.confirmFailed'));
       return;
     }
-    showWarning(data.message || 'Tank confirmed. Press START for labor.');
+    showWarning(data.message || say('ak.msg.tankConfirmed'));
     await loadConfig();
   } finally {
     actionBusy = false;
@@ -582,13 +613,13 @@ async function openEmployeeOut(teamId) {
   employeeOutPick = null;
   if (els.employeeOutConfirm) els.employeeOutConfirm.hidden = true;
   if (els.btnConfirmEmployeeOut) els.btnConfirmEmployeeOut.hidden = true;
-  if (els.employeeOutHint) els.employeeOutHint.textContent = 'Select an employee on this team’s open shift.';
+  if (els.employeeOutHint) els.employeeOutHint.textContent = tr('ak.employeeOutHint');
   openModal(els.employeeOutModal);
   const { res, data } = await api(`${API}/shift-employees?team_id=${encodeURIComponent(teamId)}`, {
     cache: 'no-store',
   });
   if (!res.ok || !data.ok) {
-    showWarning((data && data.message) || 'Could not load employees.');
+    showWarning((data && data.message) || say('ak.msg.loadEmployeesFailed'));
     closeEmployeeOut();
     return;
   }
@@ -616,7 +647,7 @@ async function openEmployeeOut(teamId) {
       employeeOutPick = emp;
       if (els.employeeOutConfirm) els.employeeOutConfirm.hidden = false;
       if (els.employeeOutConfirmText) {
-        els.employeeOutConfirmText.textContent = `Clock out ${emp.name}? They leave this team’s active stage labor only.`;
+        els.employeeOutConfirmText.textContent = tr('ak.msg.clockOutQuestion', { name: emp.name });
       }
       if (els.btnConfirmEmployeeOut) els.btnConfirmEmployeeOut.hidden = false;
     });
@@ -643,10 +674,10 @@ async function confirmEmployeeOut() {
       body: JSON.stringify({ employee_id: employeeOutPick.id, team_id: employeeOutTeamId }),
     });
     if (!res.ok || !data.ok) {
-      showWarning((data && data.message) || 'Could not clock employee out.');
+      showWarning((data && data.message) || say('ak.msg.clockOutFailed'));
       return;
     }
-    showWarning(data.message || `${employeeOutPick.name} clocked out.`);
+    showWarning(data.message || say('ak.msg.clockedOut', { name: employeeOutPick.name }));
     closeEmployeeOut();
     await loadConfig();
   } finally {
@@ -668,29 +699,29 @@ async function handleTeamCardsClick(ev) {
   if (action === 'start') {
     await runTeamAction(
       { action: 'start', tank_id: tankId, team_id: teamId, stage: 'ASSEMBLY' },
-      'Assembly labor started for this team.'
+      say('ak.msg.laborStarted')
     );
     return;
   }
   if (action === 'stop') {
-    await runTeamAction({ action: 'stop', tank_id: tankId, team_id: teamId }, 'Labor stopped.');
+    await runTeamAction({ action: 'stop', tank_id: tankId, team_id: teamId }, say('ak.msg.laborStopped'));
     return;
   }
   if (action === 'finish') {
     const tankNo = btn.closest('[data-tank-id]')
       ? (btn.closest('article') && btn.closest('article').querySelector('.ak-tank-title')
           ? btn.closest('article').querySelector('.ak-tank-title').textContent
-          : 'this tank')
-      : 'this tank';
+          : tr('ak.thisTank'))
+      : tr('ak.thisTank');
     const teamRow = (activeTeams || []).find((t) => Number(t.team_id) === teamId);
     const tankRow = teamRow ? (teamRow.tanks || []).find((t) => Number(t.id) === tankId) : null;
     const others = tankRow && Array.isArray(tankRow.assembly_other_teams) ? tankRow.assembly_other_teams : [];
     const ok = await askConfirm(
-      'Finish Assembly?',
+      tr('ak.msg.finishTitle'),
       others.length
-        ? `This finishes this team's work on ${tankNo}.\n\nAssembly stays open until the other team(s) also finish: ${otherTeamNames(others)}.`
-        : `This ends Assembly for ${tankNo} and sends the tank to Ready for Testing.`,
-      'Finish'
+        ? tr('ak.msg.finishOthers', { tank: tankNo, teams: otherTeamNames(others) })
+        : tr('ak.msg.finishLast', { tank: tankNo }),
+      tr('ak.msg.finishOk')
     );
     if (!ok) return;
     await runTeamAction({ action: 'finish', tank_id: tankId, team_id: teamId }, null);
@@ -698,38 +729,38 @@ async function handleTeamCardsClick(ev) {
   }
   if (action === 'remove_from_assembly') {
     const titleEl = btn.closest('article') && btn.closest('article').querySelector('.ak-tank-title');
-    const label = titleEl ? titleEl.textContent : `Tank ${tankId}`;
+    const label = titleEl ? titleEl.textContent : tankLabel(tankId);
     const ok = await askConfirm(
-      'Remove Tank From Assembly?',
-      `${label}\n\nThis will remove the tank from the current Assembly schedule.\nProduction history already recorded will be preserved.`,
-      'Remove From Assembly'
+      tr('ak.msg.removeTitle'),
+      tr('ak.msg.removeBody', { tank: label }),
+      tr('ak.msg.removeOk')
     );
     if (!ok) return;
     await runTeamAction(
       { action: 'remove_from_assembly', tank_id: tankId, team_id: teamId },
-      'Tank removed from the Assembly schedule.'
+      say('ak.msg.removed')
     );
     return;
   }
   if (action === 'lunch') {
     if (!Number.isInteger(teamId) || teamId <= 0) {
-      showWarning('Lunch must be pressed on a Team Card.');
+      showWarning(say('ak.msg.lunchOnCard'));
       return;
     }
-    await runTeamAction({ action: 'lunch', team_id: teamId }, 'Team lunch — this team paused only.');
+    await runTeamAction({ action: 'lunch', team_id: teamId }, say('ak.msg.lunchStarted'));
     return;
   }
   if (action === 'resume') {
     if (!Number.isInteger(teamId) || teamId <= 0) {
-      showWarning('Resume must be pressed on a Team Card. Do not rescan the Team barcode.');
+      showWarning(say('ak.msg.resumeOnCard'));
       return;
     }
-    await runTeamAction({ action: 'resume', team_id: teamId }, 'Team resumed.');
+    await runTeamAction({ action: 'resume', team_id: teamId }, say('ak.msg.resumed'));
     return;
   }
   if (action === 'employee_out') {
     if (!Number.isInteger(teamId) || teamId <= 0) {
-      showWarning('Employee Out must be pressed on a Team Card.');
+      showWarning(say('ak.msg.outOnCard'));
       return;
     }
     await openEmployeeOut(teamId);
@@ -737,12 +768,12 @@ async function handleTeamCardsClick(ev) {
   }
   if (action === 'end_shift') {
     if (!Number.isInteger(teamId) || teamId <= 0) {
-      showWarning('End Shift must be pressed on a Team Card.');
+      showWarning(say('ak.msg.endShiftOnCard'));
       return;
     }
-    const ok = await askConfirm('End Shift for this team?', 'Stops this team’s labor and removes their card from the kiosk.');
+    const ok = await askConfirm(tr('ak.msg.endShiftTitle'), tr('ak.msg.endShiftBody'));
     if (!ok) return;
-    await runTeamAction({ action: 'end_shift', team_id: teamId }, 'Team end shift complete.');
+    await runTeamAction({ action: 'end_shift', team_id: teamId }, say('ak.msg.endShiftDone'));
   }
 }
 
@@ -777,7 +808,7 @@ async function submitScan(raw) {
   if (!barcode) return;
   showWarning('');
   if (isForbiddenAssemblyScanInput(barcode)) {
-    showWarning('Use the buttons for tank actions. Scan only a TEAM or EMPLOYEE barcode here.');
+    showWarning(say('ak.msg.useButtons'));
     return;
   }
   const { res, data } = await postAction({
@@ -786,7 +817,7 @@ async function submitScan(raw) {
     team_id: Number.isInteger(focusedTeamId) && focusedTeamId > 0 ? focusedTeamId : undefined,
   });
   if (!res.ok || !data.ok) {
-    showWarning((data && data.message) || 'Scan a Team or Employee barcode only.');
+    showWarning((data && data.message) || say('ak.msg.scanTeamOrEmployee'));
     return;
   }
   if (data.action === 'assign_team' || data.action === 'team_assigned' || data.action === 'team_present') {
@@ -812,14 +843,14 @@ async function submitScan(raw) {
         roster: data.roster || [],
       });
     }
-    showWarning(
-      data.message ||
-        'Team assigned. Select a tank from the dropdown and press CONFIRM TANK, then START for labor.'
-    );
+    showWarning(data.message || say('ak.msg.teamAssigned'));
   } else if (data.action === 'employee_selected' || data.confirmer) {
     pendingConfirmer = data.confirmer || data.employee || null;
     showWarning(
-      data.confirmation_line || (pendingConfirmer ? `Selected: ${pendingConfirmer.name}` : 'Employee selected.')
+      data.confirmation_line ||
+        (pendingConfirmer
+          ? say('ak.msg.selectedEmployee', { name: pendingConfirmer.name })
+          : say('ak.msg.employeeSelected'))
     );
   } else if (data.message) {
     showWarning(data.message);
@@ -867,16 +898,16 @@ async function handleRecentlyFinishedClick(ev) {
   if (!btn || actionBusy) return;
   const tankId = Number(btn.getAttribute('data-tank-id'));
   const card = btn.closest('article');
-  const title = card && card.querySelector('h3') ? card.querySelector('h3').textContent : `Tank ${tankId}`;
+  const title = card && card.querySelector('h3') ? card.querySelector('h3').textContent : tankLabel(tankId);
   const ok = await askConfirm(
-    'Restore Tank to Assembly?',
-    `${title} was marked Finish and is waiting for Testing (not started yet).\n\nRestore it to Assembly?`,
-    'Restore'
+    tr('ak.msg.restoreTitle'),
+    tr('ak.msg.restoreBody', { tank: title }),
+    tr('ak.msg.restoreOk')
   );
   if (!ok) return;
   await runTeamAction(
     { action: 'restore_to_assembly', tank_id: tankId },
-    'Tank restored to the Assembly selection list. Confirm the tank again.'
+    say('ak.msg.restored')
   );
 }
 
@@ -916,8 +947,26 @@ function bindModals() {
   }
 }
 
+function bindLanguage() {
+  const fi = window.FactoryI18n;
+  if (!fi) return;
+  fi.mountSelector('kioskLangMount');
+  fi.applyDom();
+  renderMachineLabel();
+  syncReturnRemovedButton();
+  window.addEventListener('factory-lang-change', () => {
+    renderAll();
+    syncReturnRemovedButton();
+    if (lastWarning) showWarning(lastWarning);
+    // Badge scanners type into the focused element; never leave the language picker focused.
+    const active = document.activeElement;
+    if (active && active.id === 'factoryLangSelect' && typeof active.blur === 'function') active.blur();
+  });
+}
+
 bindScan();
 bindModals();
+bindLanguage();
 void loadConfig().then(() => {
   setInterval(() => void loadConfig(), 10000);
 });

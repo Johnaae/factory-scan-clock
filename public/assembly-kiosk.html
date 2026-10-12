@@ -121,33 +121,33 @@
       <header class="kiosk-header">
         <div class="kiosk-header-row">
           <div>
-            <h1>Factory Scan Clock</h1>
+            <h1 data-i18n="app.title">Factory Scan Clock</h1>
             <p id="machineLabel" class="wk-sub">Assembly Production</p>
           </div>
           <div id="kioskLangMount" class="lang-bar"></div>
-          <button id="logoutBtn" type="button" class="btn-secondary">Exit Kiosk</button>
+          <button id="logoutBtn" type="button" class="btn-secondary" data-i18n="ak.exitKiosk">Exit Kiosk</button>
         </div>
       </header>
       <section class="kiosk-card scan-panel">
         <div class="scan-panel-head">
-          <h2 id="workflowTitle">Scan Team or Employee</h2>
-          <p id="workflowSub">Scan a TEAM barcode to add an independent team card. Each team selects its own tank. Lunch / Resume / Employee Out are per team.</p>
+          <h2 id="workflowTitle" data-i18n="ak.scanTitle">Scan Team or Employee</h2>
+          <p id="workflowSub" data-i18n="ak.scanSub">Scan a TEAM barcode to add an independent team card. Each team selects its own tank. Lunch / Resume / Employee Out are per team.</p>
         </div>
         <input id="scannerTrap" type="text" class="scanner-trap-input" tabindex="0" inputmode="none" autocomplete="off" readonly aria-label="Scanner" />
         <form id="scanForm" class="scan-input-row" autocomplete="off">
-          <label for="manualBarcodeInput">Scan Team / Employee only</label>
+          <label for="manualBarcodeInput" data-i18n="ak.scanLabel">Scan Team / Employee only</label>
           <div class="scan-input-wrap scan-input-wrap--scanner">
-            <input id="manualBarcodeInput" type="text" placeholder="TEAM or EMPLOYEE barcode only" autocomplete="off" />
-            <button id="scanButton" type="button" class="scan-submit-btn">Scan</button>
+            <input id="manualBarcodeInput" type="text" placeholder="TEAM or EMPLOYEE barcode only" data-i18n-placeholder="ak.scanPlaceholder" autocomplete="off" />
+            <button id="scanButton" type="button" class="scan-submit-btn" data-i18n="ak.scanBtn">Scan</button>
           </div>
         </form>
         <p id="scanWarning" class="scan-warning" role="alert" hidden></p>
-        <p class="ak-hint">Team scan does not start labor. Confirm tank, then press START.</p>
-        <p class="ak-hint">Tap a team card to select it — employee badge scans join the selected team for this shift.</p>
+        <p class="ak-hint" data-i18n="ak.hintTeamScan">Team scan does not start labor. Confirm tank, then press START.</p>
+        <p class="ak-hint" data-i18n="ak.hintSelectTeam">Tap a team card to select it — employee badge scans join the selected team for this shift.</p>
         <div id="teamCards" class="ak-team-grid" aria-live="polite"></div>
-        <div id="teamsEmpty" class="ak-empty">No teams on this kiosk yet. Scan a TEAM barcode to begin.</div>
+        <div id="teamsEmpty" class="ak-empty" data-i18n="ak.noTeams">No teams on this kiosk yet. Scan a TEAM barcode to begin.</div>
         <section id="returnRemoved" class="ak-return" hidden>
-          <h2 class="ak-recent-title">Return Tank to Assembly</h2>
+          <h2 class="ak-recent-title" data-i18n="ak.returnTitle">Return Tank to Assembly</h2>
           <div class="ak-select-row">
             <select id="returnRemovedSelect" aria-label="Removed tank to return to Assembly">
               <option value="">Select removed tank…</option>
@@ -156,7 +156,7 @@
           </div>
         </section>
         <section id="recentlyFinished" class="ak-recent" hidden>
-          <h2 class="ak-recent-title">Recently Finished Assembly</h2>
+          <h2 class="ak-recent-title" data-i18n="ak.recentTitle">Recently Finished Assembly</h2>
           <div id="recentlyFinishedList"></div>
         </section>
       </section>
@@ -167,7 +167,7 @@
         <h3 id="confirmTitle">Confirm</h3>
         <p id="confirmText"></p>
         <div class="employee-out-actions">
-          <button type="button" class="btn-secondary" id="btnConfirmCancel">Cancel</button>
+          <button type="button" class="btn-secondary" id="btnConfirmCancel" data-i18n="ak.cancel">Cancel</button>
           <button type="button" class="btn-primary" id="btnConfirmOk">Confirm</button>
         </div>
       </div>
@@ -175,20 +175,22 @@
 
     <div id="employeeOutModal" class="modal-note employee-out-modal" hidden>
       <div class="modal-note-card employee-out-card">
-        <h3>Employee Out</h3>
-        <p id="employeeOutHint" class="ak-hint">Select an employee on this team’s open shift.</p>
+        <h3 data-i18n="ak.employeeOutTitle">Employee Out</h3>
+        <p id="employeeOutHint" class="ak-hint" data-i18n="ak.employeeOutHint">Select an employee on this team’s open shift.</p>
         <div id="employeeOutList" class="employee-out-list"></div>
-        <p id="employeeOutEmpty" class="employee-out-empty" hidden>No open-shift employees for this team.</p>
+        <p id="employeeOutEmpty" class="employee-out-empty" data-i18n="ak.employeeOutEmpty" hidden>No open-shift employees for this team.</p>
         <div id="employeeOutConfirm" hidden>
           <p id="employeeOutConfirmText" class="employee-out-confirm-text"></p>
         </div>
         <div class="employee-out-actions">
-          <button type="button" class="btn-secondary" id="btnCancelEmployeeOut">Cancel</button>
-          <button type="button" class="btn-primary" id="btnConfirmEmployeeOut" hidden>Confirm Out</button>
+          <button type="button" class="btn-secondary" id="btnCancelEmployeeOut" data-i18n="ak.cancel">Cancel</button>
+          <button type="button" class="btn-primary" id="btnConfirmEmployeeOut" data-i18n="ak.confirmOut" hidden>Confirm Out</button>
         </div>
       </div>
     </div>
 
-    <script src="/assembly-kiosk.js?v=grid-layout-1"></script>
+    <script src="/i18n.js"></script>
+    <script src="/assembly-kiosk-i18n.js?v=1"></script>
+    <script src="/assembly-kiosk.js?v=i18n-1"></script>
   </body>
 </html>

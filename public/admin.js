@@ -10,6 +10,11 @@ const fName = document.getElementById('fName');
 const fBadgeRole = document.getElementById('fBadgeRole');
 const fRate = document.getElementById('fRate');
 const fStatus = document.getElementById('fStatus');
+const fShops = document.getElementById('fShops');
+const fShopsToggle = document.getElementById('fShopsToggle');
+const fShopsSummary = document.getElementById('fShopsSummary');
+const fShopsMenu = document.getElementById('fShopsMenu');
+const fShopsNotice = document.getElementById('fShopsNotice');
 
 const btnAdd = document.getElementById('btnAdd');
 const btnPrintAllBadges = document.getElementById('btnPrintAllBadges');
@@ -21,6 +26,10 @@ const logoutBtn = document.getElementById('logoutBtn');
 let employees = [];
 let editingId = null;
 let searchTimer = null;
+let shopAssignmentReady = false;
+
+const SHOP_NOT_READY_TEXT =
+  'Shop Assignment becomes available after the employee_shops database migration is run.';
 
 function escapeHtml(s) {
   return String(s)
@@ -38,7 +47,58 @@ function normalizeEmployee(e) {
     id: Number(e.id),
     is_active: !!e.is_active,
     hourly_rate: Number.isFinite(Number(e.hourly_rate)) ? Number(e.hourly_rate) : 20,
+    shops: Array.isArray(e.shops) ? e.shops : [],
+    shop_conflicts: Array.isArray(e.shop_conflicts) ? e.shop_conflicts : [],
   };
+}
+
+function shopCheckboxes() {
+  return fShopsMenu ? [...fShopsMenu.querySelectorAll('input[type="checkbox"]')] : [];
+}
+
+function getSelectedShops() {
+  return shopCheckboxes()
+    .filter((cb) => cb.checked)
+    .map((cb) => cb.value);
+}
+
+function shopTagsHtml(shops) {
+  if (!shops || !shops.length) return '<span class="shop-tag shop-tag--none">Unassigned</span>';
+  return shops.map((s) => `<span class="shop-tag">${escapeHtml(s)}</span>`).join('');
+}
+
+function renderShopSummary() {
+  if (fShopsSummary) fShopsSummary.innerHTML = shopTagsHtml(getSelectedShops());
+}
+
+function setShopMenuOpen(open) {
+  if (!fShopsMenu || !fShopsToggle) return;
+  fShopsMenu.hidden = !open;
+  fShopsToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (fShops) fShops.classList.toggle('is-open', open);
+}
+
+function conflictText(conflicts) {
+  const list = (conflicts || []).map((c) => `${c.team_name} (${c.department})`).join(', ');
+  return list
+    ? `Review needed: currently on ${list}, outside the assigned shop(s). Team membership was not changed.`
+    : '';
+}
+
+function setShopFields(shops, conflicts) {
+  const selected = new Set(shops || []);
+  shopCheckboxes().forEach((cb) => {
+    cb.checked = selected.has(cb.value);
+    cb.disabled = !shopAssignmentReady;
+  });
+  if (fShopsToggle) fShopsToggle.disabled = !shopAssignmentReady;
+  setShopMenuOpen(false);
+  renderShopSummary();
+  if (fShopsNotice) {
+    const text = !shopAssignmentReady ? SHOP_NOT_READY_TEXT : conflictText(conflicts);
+    fShopsNotice.textContent = text;
+    fShopsNotice.hidden = !text;
+  }
 }
 
 async function apiJson(url, opts) {
@@ -69,6 +129,7 @@ function closeModal() {
   modalBackdrop.setAttribute('aria-hidden', 'true');
   editingId = null;
   modalHint.textContent = '';
+  setShopMenuOpen(false);
 }
 
 function render() {
@@ -83,9 +144,14 @@ function render() {
       const st = e.is_active ? '<span class="badge badge-in">Active</span>' : '<span class="badge badge-muted">Inactive</span>';
       const rate = formatMoney(e.hourly_rate != null ? e.hourly_rate : 20);
       const eid = escapeHtml(String(e.id));
+      const conflict = conflictText(e.shop_conflicts);
       return `<tr>
         <td><strong>${escapeHtml(e.code)}</strong></td>
         <td>${escapeHtml(e.name)}</td>
+        <td>
+          <div class="shop-cell">${shopTagsHtml(e.shops)}</div>
+          ${conflict ? `<p class="shop-conflict">${escapeHtml(conflict)}</p>` : ''}
+        </td>
         <td class="td-num">${escapeHtml(rate)}</td>
         <td>${st}</td>
         <td>
@@ -100,7 +166,7 @@ function render() {
     })
     .join('');
 
-  empBody.innerHTML = rows || '<tr><td colspan="5" class="muted">No employees found.</td></tr>';
+  empBody.innerHTML = rows || '<tr><td colspan="6" class="muted">No employees found.</td></tr>';
 }
 
 async function load() {
@@ -111,7 +177,13 @@ async function load() {
     return;
   }
   employees = (data.employees || []).map(normalizeEmployee);
-  adminHint.textContent = `${employees.length} employee${employees.length === 1 ? '' : 's'} loaded.`;
+  shopAssignmentReady = !!data.shop_assignment_ready;
+  const conflictCount = employees.filter((e) => e.shop_conflicts.length).length;
+  adminHint.textContent =
+    `${employees.length} employee${employees.length === 1 ? '' : 's'} loaded.` +
+    (conflictCount
+      ? ` ${conflictCount} employee${conflictCount === 1 ? '' : 's'} on a team outside their Shop Assignment — review below.`
+      : '');
   render();
 }
 
@@ -123,6 +195,7 @@ function startCreate() {
   fBadgeRole.value = 'Fabrication Team Member';
   fRate.value = '20';
   fStatus.value = 'ACTIVE';
+  setShopFields([], []);
   fCode.disabled = false;
   modalHint.textContent = '';
   openModal();
@@ -151,6 +224,7 @@ async function openEmployeeEditModal(rawId) {
   fBadgeRole.value = e.badge_role || 'Fabrication Team Member';
   fRate.value = String(Number.isFinite(Number(e.hourly_rate)) ? Number(e.hourly_rate) : 20);
   fStatus.value = e.is_active ? 'ACTIVE' : 'INACTIVE';
+  setShopFields(e.shops, e.shop_conflicts);
   fCode.disabled = false;
   modalHint.textContent = '';
   openModal();
@@ -168,34 +242,43 @@ async function save() {
     return;
   }
 
+  const payload = { code, name, hourly_rate, badge_role, status };
+  // Shops are sent only once the table exists, so saving never wipes or blocks other fields.
+  if (shopAssignmentReady) payload.shops = getSelectedShops();
+
   btnSave.disabled = true;
   modalHint.textContent = 'Saving…';
+  let saved = null;
   try {
     if (!editingId) {
       const { res, data } = await apiJson('/api/employees', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code, name, hourly_rate, badge_role, status }),
+        body: JSON.stringify(payload),
       });
       if (!res.ok) {
         modalHint.textContent = (data && data.message) || 'Could not create employee.';
         return;
       }
+      saved = data.employee || null;
     } else {
       console.log('Saving employee');
       const { res, data } = await apiJson(`/api/employees/${editingId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code, name, hourly_rate, badge_role, status }),
+        body: JSON.stringify(payload),
       });
       if (!res.ok) {
         modalHint.textContent = (data && data.message) || (data && data.error) || 'Could not update employee.';
         return;
       }
+      saved = data.employee || null;
       console.log('Employee saved');
     }
     await load();
     closeModal();
+    const conflict = saved ? conflictText(saved.shop_conflicts) : '';
+    if (conflict) adminHint.textContent = `${saved.name}: ${conflict}`;
   } finally {
     btnSave.disabled = false;
   }
@@ -246,6 +329,18 @@ if (btnPrintAllBadges) {
     window.open('/api/employees/badges.pdf?active_only=1', '_blank', 'noopener,noreferrer');
   });
 }
+if (fShopsToggle) {
+  fShopsToggle.addEventListener('click', () => setShopMenuOpen(fShopsMenu.hidden));
+}
+if (fShopsMenu) {
+  fShopsMenu.addEventListener('change', () => renderShopSummary());
+}
+document.addEventListener('click', (e) => {
+  if (fShops && fShopsMenu && !fShopsMenu.hidden && !fShops.contains(e.target)) setShopMenuOpen(false);
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && fShopsMenu && !fShopsMenu.hidden) setShopMenuOpen(false);
+});
 btnCloseModal.addEventListener('click', () => closeModal());
 btnCancel.addEventListener('click', () => closeModal());
 btnSave.addEventListener('click', () => void save());

@@ -13,7 +13,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=shops-2" />
   </head>
   <body>
     <header class="topbar">
@@ -85,6 +85,7 @@
                 <tr>
                   <th>Code</th>
                   <th>Name</th>
+                  <th>Shop</th>
                   <th class="th-num">Hourly rate</th>
                   <th>Status</th>
                   <th style="min-width: 260px">Actions</th>
@@ -119,6 +120,22 @@
             <label for="fBadgeRole">Badge role</label>
             <input id="fBadgeRole" type="text" placeholder="e.g. Fabrication Team Member" autocomplete="off" />
           </div>
+          <div class="field">
+            <label id="fShopsLabel" for="fShopsToggle">Shop Assignment</label>
+            <div class="shop-multi" id="fShops">
+              <button type="button" class="shop-multi-toggle" id="fShopsToggle" aria-haspopup="true" aria-expanded="false" aria-controls="fShopsMenu">
+                <span class="shop-multi-summary" id="fShopsSummary"></span>
+                <span aria-hidden="true">▾</span>
+              </button>
+              <div class="shop-multi-menu" id="fShopsMenu" role="group" aria-labelledby="fShopsLabel" hidden>
+                <label class="shop-multi-option"><input type="checkbox" value="Fabrication" /> Fabrication</label>
+                <label class="shop-multi-option"><input type="checkbox" value="Assembly" /> Assembly</label>
+                <label class="shop-multi-option"><input type="checkbox" value="Dome" /> Dome</label>
+              </div>
+            </div>
+            <p class="shop-help">Permanent shop eligibility for team assignment. Separate from Badge role. Changing it does not move the employee off a team or change today's shift.</p>
+            <p class="shop-conflict" id="fShopsNotice" hidden></p>
+          </div>
           <div class="field retain-focus">
             <label for="fRate">Hourly rate (USD)</label>
             <input id="fRate" type="number" inputmode="decimal" min="0" step="0.01" placeholder="20" autocomplete="off" />
@@ -139,7 +156,7 @@
       </div>
     </div>
 
-    <script src="/admin.js"></script>
+    <script src="/admin.js?v=shops-1"></script>
     <script src="/admin-footer.js"></script>
     <script src="/pwa.js"></script>
   </body>

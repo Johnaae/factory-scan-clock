@@ -16,11 +16,14 @@
     return `${emp.code} — ${emp.name}`;
   }
 
-  async function searchEmployees(query) {
+  /** With teamId, each employee includes shop_eligibility for that team's department. */
+  async function searchEmployees(query, teamId) {
     const q = String(query || '').trim();
-    const url = q
-      ? `/api/manager/employees/search?q=${encodeURIComponent(q)}`
-      : '/api/manager/employees/search';
+    const params = new URLSearchParams();
+    if (q) params.set('q', q);
+    if (Number(teamId) > 0) params.set('team_id', String(Number(teamId)));
+    const qs = params.toString();
+    const url = qs ? `/api/manager/employees/search?${qs}` : '/api/manager/employees/search';
     const res = await fetch(url, { cache: 'no-store', headers: { Accept: 'application/json' } });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data.ok) throw new Error((data && data.message) || 'Could not search employees.');
@@ -49,7 +52,32 @@
   function memberNameHtml(m) {
     const name = m.employee_name || m.name || '—';
     const code = m.employee_code ? `<span class="muted team-member-code">${escapeHtml(m.employee_code)}</span>` : '';
-    return `<span class="team-member-detail-name">${escapeHtml(name)}</span>${code}`;
+    const shops = Array.isArray(m.employee_shops) ? m.employee_shops.join(', ') : '';
+    const conflict = m.shop_conflict
+      ? ` <span class="badge badge-warn team-member-shop-conflict" title="Shop Assignment: ${escapeHtml(shops)}. Membership was not changed — review and move or keep.">Shop mismatch — review</span>`
+      : '';
+    return `<span class="team-member-detail-name">${escapeHtml(name)}</span>${code}${conflict}`;
+  }
+
+  const ELIGIBILITY_RANK = { eligible: 0, not_applicable: 0, unassigned: 1, ineligible: 2 };
+
+  function sortByEligibility(employees) {
+    return employees
+      .map((e, i) => ({ e, i }))
+      .sort((a, b) => {
+        const ra = ELIGIBILITY_RANK[a.e.shop_eligibility] || 0;
+        const rb = ELIGIBILITY_RANK[b.e.shop_eligibility] || 0;
+        return ra - rb || a.i - b.i;
+      })
+      .map((x) => x.e);
+  }
+
+  function eligibilityNote(e) {
+    const shops = Array.isArray(e.shops) ? e.shops.join(', ') : '';
+    if (e.shop_eligibility === 'unassigned') return 'Shop not set';
+    if (e.shop_eligibility === 'ineligible') return `Shop: ${shops} — not eligible for this team`;
+    if (e.shop_eligibility === 'eligible') return `Shop: ${shops}`;
+    return '';
   }
 
   function renderAddMemberForm(teamId, opts = {}) {
@@ -238,13 +266,14 @@
       listEl.innerHTML = '<li class="team-emp-combobox-option team-emp-combobox-option--empty muted" role="presentation">No matching employees.</li>';
       return;
     }
-    listEl.innerHTML = employees
-      .map(
-        (e) =>
-          `<li role="presentation"><button type="button" class="team-emp-combobox-option" role="option" data-employee-id="${Number(e.id)}" data-employee-code="${escapeHtml(e.code)}" data-employee-name="${escapeHtml(e.name)}">${escapeHtml(formatEmployeeLabel(e))}</button></li>`
-      )
+    listEl.innerHTML = sortByEligibility(employees)
+      .map((e) => {
+        const ineligible = e.shop_eligibility === 'ineligible';
+        const note = eligibilityNote(e);
+        return `<li role="presentation"><button type="button" class="team-emp-combobox-option${ineligible ? ' team-emp-combobox-option--ineligible' : ''}" role="option" data-employee-id="${Number(e.id)}" data-employee-code="${escapeHtml(e.code)}" data-employee-name="${escapeHtml(e.name)}"${ineligible ? ' disabled aria-disabled="true"' : ''}>${escapeHtml(formatEmployeeLabel(e))}${note ? `<span class="team-emp-shop-note">${escapeHtml(note)}</span>` : ''}</button></li>`;
+      })
       .join('');
-    listEl.querySelectorAll('.team-emp-combobox-option[data-employee-id]').forEach((btn) => {
+    listEl.querySelectorAll('.team-emp-combobox-option[data-employee-id]:not([disabled])').forEach((btn) => {
       btn.addEventListener('click', () => {
         onSelect({
           id: Number(btn.getAttribute('data-employee-id')),
@@ -270,7 +299,7 @@
 
   async function loadEmployeeCache(picker) {
     if (picker._employeeCache) return picker._employeeCache;
-    const employees = await searchEmployees('');
+    const employees = await searchEmployees('', picker.getAttribute('data-team-id'));
     picker._employeeCache = employees;
     return employees;
   }

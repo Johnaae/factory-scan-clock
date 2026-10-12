@@ -5855,3 +5855,135 @@ table.fj-table tbody tr:hover {
 .team-dashboard-error {
   color: #b91c1c;
 }
+
+/* ——— Employee Shop Assignment (multi-select) ——— */
+.shop-multi-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 15px;
+  min-height: 46px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.92);
+  font: inherit;
+  font-weight: 600;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.shop-multi-toggle:hover {
+  border-color: var(--border-strong);
+}
+
+.shop-multi-toggle:focus-visible,
+.shop-multi.is-open .shop-multi-toggle {
+  outline: none;
+  border-color: rgba(79, 70, 229, 0.45);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
+  background: #fff;
+}
+
+.shop-multi-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.shop-multi-menu {
+  margin-top: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #fff;
+  padding: 6px;
+  display: grid;
+  gap: 2px;
+}
+
+.shop-multi-menu[hidden] {
+  display: none;
+}
+
+.shop-multi-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 10px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: 0;
+  cursor: pointer;
+}
+
+.shop-multi-option:hover {
+  background: #f1f5f9;
+}
+
+.shop-multi-option input {
+  width: 18px;
+  height: 18px;
+}
+
+.shop-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid rgba(37, 99, 235, 0.3);
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.shop-tag--none {
+  border-color: var(--border);
+  background: #f8fafc;
+  color: var(--muted);
+}
+
+.shop-cell {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.shop-help {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.shop-conflict {
+  margin: 4px 0 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: #92400e;
+}
+
+.team-emp-shop-note {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.team-emp-combobox-option--ineligible,
+.team-emp-combobox-option--ineligible:hover {
+  cursor: not-allowed;
+  background: transparent;
+  opacity: 0.6;
+}
+
+.team-member-shop-conflict {
+  margin-left: 8px;
+  padding: 2px 8px;
+  font-size: 11px;
+}
