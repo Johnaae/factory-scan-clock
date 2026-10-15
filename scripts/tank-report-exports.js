@@ -223,6 +223,7 @@ function overviewFields(data) {
         ? 'Yes'
         : 'No',
     downtime_total: data.downtime_total_display || meta.downtime_display || '',
+    domes_installed: tank.domes_installed_display || '',
     created_at: tank.created_at || '',
     started_at: tank.first_scanned_at || tank.started_at || meta.started_at || '',
     completed_at: tank.completed_at || '',
@@ -396,6 +397,7 @@ function buildTankReportCsv(data) {
     'Project Name',
     'Model',
     'Require Test',
+    'Domes Installed',
   ];
   const lines = [csvRow(header)];
   const pushRow = (row) => {
@@ -434,6 +436,7 @@ function buildTankReportCsv(data) {
         overview.customer,
         overview.model,
         overview.requires_test,
+        overview.domes_installed,
       ])
     );
   };
@@ -516,6 +519,7 @@ async function buildTankReportXlsxBuffer(data) {
     ['Testing / QA-QC Hours (decimal)', overview.testing_elapsed_hours],
     ['Duration (lifecycle)', overview.duration],
     ['Downtime Total', overview.downtime_total],
+    ['Domes Installed', overview.domes_installed],
     ['Description', overview.description],
     ['Created', fmtWhen(overview.created_at)],
   ];

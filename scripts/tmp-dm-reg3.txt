@@ -1,0 +1,50 @@
+DB host: localhost
+DB name: factory_scan_clock
+[db] INTERNAL_LAN_MODE=true — local PostgreSQL, SSL off
+== 1. Manager logs in and opens the Dashboard
+PASS  GET /manager-dashboard -> 200
+PASS  initial load: 14 dashboard requests all 200
+== 2. Refresh repeatedly
+PASS  15 full refreshes (page + all dashboard APIs) all 200
+PASS  session still valid after refreshes
+== 3. Navigate Manager / Main Dashboard / iPad Scan
+PASS  GET /manager -> 200
+PASS  GET /dashboard (Main Dashboard) -> 200
+PASS  GET /ipad-scan -> 302 /kiosk-login (kiosk-only page, redirects without touching manager login)
+PASS  back to /manager-dashboard -> 200
+PASS  session still valid after navigation
+== 5. Multiple tabs (concurrent polling on one session + a second login)
+PASS  8 rounds x 28 concurrent requests on the same session all 200
+PASS  second tab/browser login: both sessions valid
+PASS  logging out session B does not affect session A
+== Root cause: kiosk logout in the same browser as the manager
+PASS  manager browser opens QA/QC kiosk URL -> 200
+PASS  OLD kiosk Logout (/api/auth/logout) kills the manager login: /api/manager/machines -> 401 "Manager login required.", /api/tanks -> 401
+PASS  manager browser opens /kiosk/machine/qa-qc-1 -> 200
+PASS  NEW kiosk Logout (/api/auth/kiosk-logout) on qa-qc-1: manager session stays valid
+PASS  after qa-qc-1 kiosk logout: 14 dashboard requests all 200
+PASS  manager browser opens /kiosk/machine/assembly-1 -> 200
+PASS  NEW kiosk Logout (/api/auth/kiosk-logout) on assembly-1: manager session stays valid
+PASS  after assembly-1 kiosk logout: 14 dashboard requests all 200
+PASS  served assembly-kiosk.js logout uses /api/auth/kiosk-logout
+PASS  served phase2-qa-kiosk.js machine-kiosk logout uses /api/auth/kiosk-logout
+== 8. Genuine session expiration
+PASS  fresh session valid
+PASS  expired only this test session row in the store
+PASS  expired session -> manager-session 401, /api/manager/machines 401
+PASS  expired session page load -> 302 /manager-login
+PASS  tampered/unknown cookie -> 401
+PASS  other sessions unaffected by one session expiring
+== 10. Kiosk remains independently functional
+PASS  kiosk login machine list -> 200 (Winding Machine 01, Winding Machine 02, Winding Machine 03, Winding Machine 04, assembly 1, Qa/Qc 1, Assembly 2, TEST FAB HTTP 729076, TEST ASSEMBLY HTTP 729076, TEST QAQC HTTP 729076, QA Fail UX 438119, QA Fail UX 749368, ASM Sync 315080, ASM Sync 432908, ASM Sync 667308, ASM Sync 729823, ASM Lunch 314470, ASM Lunch 432202, ASM Lunch 662154, ASM Lunch 729310, dome, TEST FAB HTTP 318735, TEST ASSEMBLY HTTP 318735, TEST QAQC HTTP 318735, TEST FAB HTTP 437868, TEST ASSEMBLY HTTP 437868, TEST QAQC HTTP 437868)
+PASS  kiosk PIN check active (wrong PIN rejected)
+PASS  winding kiosk page loads (no manager login)
+PASS  winding kiosk config API -> 200
+PASS  QA/QC kiosk page loads
+PASS  QA/QC kiosk board API -> 200
+PASS  Assembly kiosk page loads
+PASS  Assembly kiosk config API -> 200
+PASS  kiosk session does not grant manager APIs
+PASS  manager session A still valid after all kiosk activity
+
+ALL CHECKS PASSED

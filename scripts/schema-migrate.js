@@ -16,6 +16,13 @@ try {
   phase2SchemaSql = null;
 }
 
+let phase3SchemaSql = null;
+try {
+  phase3SchemaSql = require('./phase3-schema-sql');
+} catch (_err) {
+  phase3SchemaSql = null;
+}
+
 /** Stage 1 — parent / base tables (no FKs that depend on later tables). */
 const BASE_TABLES_SQL = `
 CREATE TABLE IF NOT EXISTS employees (
@@ -831,6 +838,7 @@ UPDATE machines SET workflow = 'winding' WHERE workflow = 'winding' OR name ILIK
   }
 
   await ensureEmployeeShopsSchema(client, log);
+  await ensurePhase3DomeSchema(client, log);
 }
 
 /**
@@ -892,6 +900,47 @@ async function ensureEmployeeShopsSchema(client, log = console) {
     return { created };
   } catch (err) {
     log.warn('[migration] employee_shops (noncritical, retried on next start):', err.message);
+    return { created: false, error: err.message };
+  }
+}
+
+async function relationsPresent(client, names) {
+  const { rows } = await client.query(
+    `SELECT COUNT(*)::int AS n FROM pg_class c JOIN pg_namespace ns ON ns.oid = c.relnamespace
+     WHERE ns.nspname = 'public' AND c.relname = ANY($1::text[])`,
+    [names]
+  );
+  return Boolean(rows[0] && rows[0].n === names.length);
+}
+
+/**
+ * Phase 3 Dome tables (scripts/phase3-schema-sql.js). Same locking as employee_shops.
+ * Noncritical: Dome features report "not available yet" until the tables exist.
+ */
+async function ensurePhase3DomeSchema(client, log = console) {
+  if (!phase3SchemaSql) return { created: false, error: 'phase3-schema-sql not loaded' };
+  const { PHASE3_DOME_SQL, PHASE3_DOME_RELATIONS } = phase3SchemaSql;
+  try {
+    if (await relationsPresent(client, PHASE3_DOME_RELATIONS)) return { created: false };
+    await client.query('BEGIN');
+    let created = false;
+    try {
+      await client.query(`SELECT set_config('lock_timeout', '8000', true)`);
+      await client.query(`SELECT set_config('statement_timeout', '20000', true)`);
+      await client.query('SELECT pg_advisory_xact_lock($1)', [SCHEMA_LOCK_KEY]);
+      if (!(await relationsPresent(client, PHASE3_DOME_RELATIONS))) {
+        await client.query(PHASE3_DOME_SQL);
+        created = true;
+      }
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    }
+    if (created) log.log('[migration] Phase 3 dome tables ready');
+    return { created };
+  } catch (err) {
+    log.warn('[migration] Phase 3 dome tables (noncritical, retried on next start):', err.message);
     return { created: false, error: err.message };
   }
 }
@@ -995,6 +1044,7 @@ async function runSchemaMigration(client, options = {}) {
     }
 
     await ensureEmployeeShopsSchema(client, log);
+    await ensurePhase3DomeSchema(client, log);
 
     if (!skipBackfills) {
       await runOptionalBackfills(client, log);
@@ -1034,6 +1084,7 @@ module.exports = {
   runAdditiveSchemaPass,
   ensureEmployeeShopsSchema,
   EMPLOYEE_SHOPS_SQL,
+  ensurePhase3DomeSchema,
   ensureTankTrashSchema,
   runOptionalBackfills,
   verifyRequiredTables,

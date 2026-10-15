@@ -64,6 +64,9 @@ function workflowBadgeHtml(m) {
   } else if (wf === 'qa_testing') {
     label = m.workflow_label || 'QA/QC';
     cls = 'ma-workflow-badge ma-workflow-badge--qa';
+  } else if (wf === 'dome') {
+    label = m.workflow_label || 'Dome Shop';
+    cls = 'ma-workflow-badge ma-workflow-badge--dome';
   }
   return `<span class="${cls}">${escapeHtml(label)}</span>`;
 }

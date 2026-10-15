@@ -1,0 +1,48 @@
+scratch databases created on localhost: fsc_shoptest_prodlike_1791777858914, fsc_shoptest_empty_1791777858914
+== Production-like database built by committed code (what Neon runs today)
+PASS  committed code does not create employee_shops
+  seeded rows: assembly_kiosk_teams=1, employee_team_memberships=2, employees=3, machines=1, scan_logs=2, stage_labor_participants=1, stage_labor_sessions=1, tanks=1, team_members=2, teams=2
+== employee_shops step alone: 8 simultaneous callers on a copy of the seeded database
+PASS  all 8 callers finished without error
+PASS  exactly one caller created the table (1)
+PASS  table + index present after simultaneous creation
+== 6 concurrent cold starts with the new code (existing database, full startup pass)
+PASS  concurrent startup: no failure involving employee_shops
+  concurrent startup: 3/6 succeeded; 3 pre-existing-statement failure(s): deadlock detected at "CREATE INDEX IF NOT EXISTS idx_stage_labor_sessions_tank ON …" | deadlock detected at "ALTER TABLE employees ADD COLUMN IF NOT EXISTS badge_role TE…"
+PASS  concurrent startup: no employee_shops warnings
+PASS  employee_shops created by at most one instance (1)
+== 2 more sequential starts (idempotent)
+PASS  sequential start 1: no failure involving employee_shops
+PASS  sequential start 1: no employee_shops warnings
+PASS  start 1: no DDL — table already present
+PASS  sequential start 2: no failure involving employee_shops
+PASS  sequential start 2: no employee_shops warnings
+PASS  start 2: no DDL — table already present
+PASS  employee_shops table and idx_employee_shops_shop index exist
+PASS  primary key (employee_id, shop)
+PASS  foreign key to employees(id)
+PASS  check constraint limits shops to Fabrication/Assembly/Dome
+PASS  no shop rows created (existing employees stay Unassigned)
+PASS  assembly_kiosk_teams: 1 rows unchanged
+PASS  employee_team_memberships: 2 rows unchanged
+PASS  employees: 3 rows unchanged
+PASS  machines: 1 rows unchanged
+PASS  scan_logs: 2 rows unchanged
+PASS  stage_labor_participants: 1 rows unchanged
+PASS  stage_labor_sessions: 1 rows unchanged
+PASS  tanks: 1 rows unchanged
+PASS  team_members: 2 rows unchanged
+PASS  teams: 2 rows unchanged
+  (16 other empty tables still empty)
+PASS  no existing column added/changed/removed
+PASS  only new columns are in employee_shops (employee_shops.employee_id, employee_shops.created_at, employee_shops.shop)
+PASS  no advisory locks left held
+== 4 concurrent cold starts on an EMPTY database (first-time full migration)
+PASS  concurrent full: no failure involving employee_shops
+  concurrent full: 2/4 succeeded; 2 pre-existing-statement failure(s): deadlock detected at "CREATE INDEX IF NOT EXISTS idx_stage_labor_sessions_tank ON …" | duplicate key value violates unique constraint "pg_class_relname_nsp_index" at "CREATE INDEX IF NOT EXISTS idx_tank_pieces_tank ON tank_piec…"
+PASS  concurrent full: no employee_shops warnings
+PASS  employee_shops created on a brand-new database
+
+Scratch databases left in place (not dropped): fsc_shoptest_prodlike_1791777858914, fsc_shoptest_empty_1791777858914, fsc_shoptest_direct_1791777858914
+
+ALL CHECKS PASSED

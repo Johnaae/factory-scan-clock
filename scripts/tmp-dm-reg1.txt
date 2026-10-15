@@ -1,0 +1,119 @@
+DB host: localhost
+DB name: factory_scan_clock
+[db] INTERNAL_LAN_MODE=true — local PostgreSQL, SSL off
+lunchA {
+  "ok": true,
+  "action": "pause_station",
+  "reason": "LUNCH",
+  "team_id": 219,
+  "stopped_sessions": [
+    {
+      "id": 129,
+      "tank_id": 307,
+      "tank_number": "2026-A-662154",
+      "machine_id": 221,
+      "team_id": 219,
+      "team_name": "TeamA-662154",
+      "stage": "ASSEMBLY",
+      "status": "stopped",
+      "started_at": "2026-10-13T16:24:22.390Z",
+      "ended_at": "2026-10-13T16:24:22.440Z",
+      "started_by_employee_id": null,
+      "started_by_employee_name": null,
+      "stopped_by_employee_id": null,
+      "stopped_by_employee_name": null,
+      "notes": "LUNCH",
+      "elapsed_ms": 50,
+      "elapsed_display": "0h 0m",
+      "participants": [
+        {
+          "id": 235,
+          "employee_id": 365,
+          "employee_code": "A1-662154",
+          "employee_name": "A1 Emp 662154",
+          "team_id": 219,
+          "joined_at": "2026-10-13T16:24:22.390Z",
+          "left_at": "2026-10-13T16:24:22.440Z",
+          "open": false
+        },
+        {
+          "id": 236,
+          "employee_id": 366,
+          "employee_code": "A2-662154",
+          "employee_name": "A2 Emp 662154",
+          "team_id": 219,
+          "joined_at": "2026-10-13T16:24:22.390Z",
+          "left_at": "2026-10-13T16:24:22.435Z",
+          "open": false
+        }
+      ]
+    }
+  ],
+  "count": 1,
+  "message": "Team Lunch — this Team Card only. Press Resume on the same card when ready."
+}
+resumeA {
+  "ok": true,
+  "status": 200,
+  "body": {
+    "ok": true,
+    "action": "resume_station",
+    "team_id": 219,
+    "resumed_sessions": [
+      {
+        "id": 129,
+        "tank_id": 307,
+        "tank_number": "2026-A-662154",
+        "machine_id": 221,
+        "team_id": 219,
+        "team_name": "TeamA-662154",
+        "stage": "ASSEMBLY",
+        "status": "active",
+        "started_at": "2026-10-13T16:24:22.390Z",
+        "ended_at": null,
+        "started_by_employee_id": null,
+        "started_by_employee_name": null,
+        "stopped_by_employee_id": null,
+        "stopped_by_employee_name": null,
+        "notes": "RESUMED_AFTER_LUNCH",
+        "elapsed_ms": 53,
+        "elapsed_display": "0h 0m",
+        "participants": [
+          {
+            "id": 235,
+            "employee_id": 365,
+            "employee_code": "A1-662154",
+            "employee_name": "A1 Emp 662154",
+            "team_id": 219,
+            "joined_at": "2026-10-13T16:24:22.390Z",
+            "left_at": "2026-10-13T16:24:22.440Z",
+            "open": false
+          },
+          {
+            "id": 236,
+            "employee_id": 366,
+            "employee_code": "A2-662154",
+            "employee_name": "A2 Emp 662154",
+            "team_id": 219,
+            "joined_at": "2026-10-13T16:24:22.390Z",
+            "left_at": "2026-10-13T16:24:22.435Z",
+            "open": false
+          },
+          {
+            "id": 238,
+            "employee_id": 365,
+            "employee_code": "A1-662154",
+            "employee_name": "A1 Emp 662154",
+            "team_id": 219,
+            "joined_at": "2026-10-13T16:24:22.472Z",
+            "left_at": null,
+            "open": true
+          }
+        ]
+      }
+    ],
+    "count": 1,
+    "message": "Team resumed — Assembly labor continues for this Team Card only."
+  }
+}
+PASS lunch/resume multi-team + employee-out protection

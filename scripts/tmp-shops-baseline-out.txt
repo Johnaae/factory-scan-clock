@@ -1,0 +1,20 @@
+scratch databases created on localhost: fsc_shoptest_prodlike_1791777878225, fsc_shoptest_empty_1791777878225
+== Production-like database built by committed code (what Neon runs today)
+PASS  committed code does not create employee_shops
+  seeded rows: assembly_kiosk_teams=1, employee_team_memberships=2, employees=3, machines=1, scan_logs=2, stage_labor_participants=1, stage_labor_sessions=1, tanks=1, team_members=2, teams=2
+== BASELINE round 1: 6 concurrent cold starts with the COMMITTED code
+PASS  committed code concurrent: no failure involving employee_shops
+  committed code concurrent: 3/6 succeeded; 3 pre-existing-statement failure(s): deadlock detected at "ALTER TABLE employees ADD COLUMN IF NOT EXISTS badge_role TE…" | deadlock detected at "CREATE INDEX IF NOT EXISTS idx_stage_labor_sessions_tank ON …"
+PASS  committed code concurrent: no employee_shops warnings
+== BASELINE round 2: 6 concurrent cold starts with the COMMITTED code
+PASS  committed code concurrent: no failure involving employee_shops
+  committed code concurrent: 3/6 succeeded; 3 pre-existing-statement failure(s): deadlock detected at "CREATE INDEX IF NOT EXISTS idx_tank_pieces_tank ON tank_piec…" | deadlock detected at "ALTER TABLE employees ADD COLUMN IF NOT EXISTS badge_role TE…"
+PASS  committed code concurrent: no employee_shops warnings
+== BASELINE round 3: 6 concurrent cold starts with the COMMITTED code
+PASS  committed code concurrent: no failure involving employee_shops
+  committed code concurrent: 3/6 succeeded; 3 pre-existing-statement failure(s): deadlock detected at "CREATE INDEX IF NOT EXISTS idx_stage_labor_sessions_tank ON …" | deadlock detected at "CREATE INDEX IF NOT EXISTS idx_tank_pieces_tank ON tank_piec…"
+PASS  committed code concurrent: no employee_shops warnings
+== BASELINE: 4 concurrent cold starts on an EMPTY database with the COMMITTED code
+PASS  committed code concurrent full: no failure involving employee_shops
+  committed code concurrent full: 2/4 succeeded; 2 pre-existing-statement failure(s): duplicate key value violates unique constraint "pg_class_relname_nsp_index" at "CREATE INDEX IF NOT EXISTS idx_tank_pieces_tank ON tank_piec…" | deadlock detected at "CREATE INDEX IF NOT EXISTS idx_stage_labor_sessions_tank ON …"
+PASS  committed code concurrent full: no employee_shops warnings

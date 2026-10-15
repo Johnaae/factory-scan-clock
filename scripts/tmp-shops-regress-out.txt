@@ -1,0 +1,89 @@
+DB host: localhost
+DB name: factory_scan_clock
+[db] INTERNAL_LAN_MODE=true — local PostgreSQL, SSL off
+employees: rows<=26 count=20
+teams: rows<=164 count=10
+team_members: rows<=179 count=21
+employee_team_memberships: rows<=253 count=45
+scan_logs: rows<=0 count=0
+machine_sessions: rows<=345 count=15
+session_team_members: rows<=505 count=45
+stage_labor_sessions: rows<=122 count=12
+stage_labor_participants: rows<=216 count=26
+downtime_intervals: rows<=0 count=0
+job_finish_events: rows<=0 count=0
+assembly_kiosk_teams: rows<=21 count=4
+assembly_tank_teams: rows<=7 count=7
+tanks: rows<=267 count=6
+snapshot written: tmp-employee-shops-snapshot.json
+DB host: localhost
+DB name: factory_scan_clock
+[db] INTERNAL_LAN_MODE=true — local PostgreSQL, SSL off
+== Existing employees load with no guessed shops
+PASS  GET /api/employees -> 200
+PASS  shop_assignment_ready = true after local migration
+PASS  directory returns all 20 employees
+PASS  every employee has a shops array
+PASS  no shop rows were created for existing employees (rows: 0)
+   teams: Fabrication=Winder 1, Assembly=Assembly, Dome=ZZ Shop Test Dome 938265, QA/QC=Qa
+== Create employees with one / multiple / no shops
+PASS  create with one shop (Assembly)
+PASS  create with two shops, normalized + de-duplicated -> ["Fabrication","Dome"]
+PASS  create without shops -> Unassigned
+PASS  unknown shop rejected (400), nothing created
+PASS  rejected employee not inserted
+== Save / load when editing
+PASS  GET by id returns saved shops
+PASS  edit to all three shops
+PASS  edit without shops field keeps shops; other fields still save
+PASS  edit back to one shop
+PASS  badge role unchanged by shop edits
+== Team eligibility (search + add)
+PASS  search reports team department
+PASS  Fab+Dome employee eligible for Fabrication team
+PASS  Assembly-only employee not eligible for Fabrication team
+PASS  unassigned employee flagged "unassigned" (still allowed)
+PASS  Fab+Dome employee eligible for Dome team
+PASS  Assembly-only -> Fabrication team blocked (409 shop_ineligible)
+PASS  Fab+Dome employee added to Fabrication team
+PASS  Dome add asks to move (existing one-roster rule kept)
+PASS  Fab+Dome employee moved to Dome team
+PASS  unassigned employee can still be added (no guessing, no block)
+PASS  QA/QC team: shop filtering not applied
+== Conflict flagged, membership kept
+PASS  removing Dome shop while on a Dome team returns a conflict for review
+PASS  employee NOT removed from the Dome team
+PASS  Teams page data flags shop_conflict on the member
+PASS  Employee Directory row lists the conflict
+== Team barcodes + kiosk pages
+PASS  Fabrication team barcode print page still renders team barcode
+PASS  Assembly kiosk page loads
+PASS  Assembly kiosk page loads the language files and tags static text
+PASS  assembly-kiosk-i18n.js served to kiosk (no login needed)
+PASS  Assembly kiosk config API -> 200
+== Cleanup (test rows only)
+   temporary Dome team 165 deactivated (200)
+
+ALL CHECKS PASSED
+DB host: localhost
+DB name: factory_scan_clock
+[db] INTERNAL_LAN_MODE=true — local PostgreSQL, SSL off
+PASS  employees: 20 pre-existing rows unchanged
+PASS  teams: 10 pre-existing rows unchanged
+PASS  team_members: 21 pre-existing rows unchanged
+PASS  employee_team_memberships: 45 pre-existing rows unchanged
+PASS  scan_logs: 0 pre-existing rows unchanged
+PASS  machine_sessions: 15 pre-existing rows unchanged
+PASS  session_team_members: 45 pre-existing rows unchanged
+PASS  stage_labor_sessions: 12 pre-existing rows unchanged
+PASS  stage_labor_participants: 26 pre-existing rows unchanged
+PASS  downtime_intervals: 0 pre-existing rows unchanged
+PASS  job_finish_events: 0 pre-existing rows unchanged
+PASS  assembly_kiosk_teams: 4 pre-existing rows unchanged
+PASS  assembly_tank_teams: 7 pre-existing rows unchanged
+PASS  tanks: 6 pre-existing rows unchanged
+PASS  employee_shops left with 0 rows (test rows removed with their employees)
+PASS  no leftover ZZ test employees (0)
+PASS  no active ZZ test teams (0)
+
+ALL CHECKS PASSED

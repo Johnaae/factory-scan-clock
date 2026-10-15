@@ -1,0 +1,4 @@
+DB host: localhost
+DB name: factory_scan_clock
+[db] INTERNAL_LAN_MODE=true — local PostgreSQL, SSL off
+PASS team-card presence sync + multi-team

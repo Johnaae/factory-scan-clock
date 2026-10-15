@@ -168,6 +168,7 @@ function tankIsActive(t) {
     st === 'testing_in_progress' ||
     st === 'ready_for_dome_install' ||
     st === 'ready_for_final_completion' ||
+    st === 'dome_installed' ||
     st === 'rework_required'
   );
 }
@@ -384,13 +385,60 @@ function tankStatusLabel(t) {
     return 'Testing';
   }
   if (st === 'ready_for_dome_install' || st === 'ready_for_final_completion') return 'Ready for Dome Install';
+  if (st === 'dome_installed') return 'Dome Installed';
   if (t && t.production_status === 'Ready to Complete') return 'Ready to Complete';
   if (st === 'waiting') return 'Waiting';
   if (st === 'paused') return 'In Progress — Paused';
   return 'In Progress';
 }
 
+function tankDomeLine(t) {
+  const DI = window.DomeI18n;
+  if (!DI || !t) return '';
+  const st = String(t.status || '').toLowerCase();
+  const d = t.dome_summary;
+  const parts = [];
+  if (d && d.installed && d.installed.length) {
+    parts.push(`${DI.tr('mgr.dome.domes')}: ${d.installed.map((x) => x.dome_number).join(', ')}`);
+  }
+  if (d && d.in_progress && d.in_progress.length) {
+    parts.push(DI.tr('mgr.dome.installing', { list: d.in_progress.map((x) => x.dome_number).join(', ') }));
+  }
+  if (d && d.override) parts.push(DI.tr('mgr.dome.override'));
+  if (!parts.length && (st === 'ready_for_dome_install' || st === 'ready_for_final_completion')) {
+    parts.push(DI.tr('mgr.dome.none'));
+  }
+  if (!parts.length) return '';
+  return `<div class="tank-dome-line" style="font-size:12px;font-weight:700;color:#1e40af;margin-top:3px">${escapeHtml(parts.join(' · '))}</div>`;
+}
+
 function tankStatusBadge(t) {
+  return tankStatusBadgeBase(t) + tankDomeLine(t);
+}
+
+function renderTankReportDomeItem(data) {
+  const ds = data && data.dome_state;
+  if (!ds || !ds.ready) return '';
+  const DI = window.DomeI18n;
+  const lines = [];
+  for (const i of ds.installs || []) {
+    const desc = DI ? DI.describe(i) : [i.dome_type, i.diameter_label].filter(Boolean).join(' ');
+    const state = i.status === 'installed' ? '' : ` — ${DI ? DI.tr('dome.inv.reserved') : 'Installing'}`;
+    lines.push(`${i.dome_number} (${desc}) · Piece ${i.piece_number}${state}`);
+  }
+  for (const o of ds.overrides || []) {
+    lines.push(`${DI ? DI.tr('mgr.dome.override') : 'Completed with override'}: ${o.reason || ''} (${o.performed_by || ''})`);
+  }
+  const body = lines.length
+    ? lines.map((l) => `<div>${escapeHtml(l)}</div>`).join('')
+    : escapeHtml(DI ? DI.tr('mgr.dome.none') : 'No dome installed');
+  return `<div class="tank-lifecycle-item tank-lifecycle-item--wide">
+          <div class="tank-lifecycle-label">${escapeHtml(DI ? DI.tr('mgr.dome.domes') : 'Domes')}</div>
+          <div class="tank-lifecycle-value">${body}</div>
+        </div>`;
+}
+
+function tankStatusBadgeBase(t) {
   const st = String((t && t.status) || 'active').toLowerCase();
   if (st === 'archived') return '<span class="badge badge-muted">Completed</span>';
   if (st === 'rework_required') return '<span class="badge badge-warn">Rework Required</span>';
@@ -411,6 +459,7 @@ function tankStatusBadge(t) {
   if (st === 'ready_for_dome_install' || st === 'ready_for_final_completion') {
     return '<span class="badge badge-warn">Ready for Dome Install</span>';
   }
+  if (st === 'dome_installed') return '<span class="badge badge-in">Dome Installed</span>';
   if (t && t.production_status === 'Ready to Complete') {
     return '<span class="badge badge-warn">Ready to Complete</span>';
   }
@@ -464,6 +513,7 @@ function previousStatusLabel(status) {
   if (st === 'ready_for_testing') return 'Ready for Testing';
   if (st === 'testing_in_progress') return 'Testing In Progress';
   if (st === 'ready_for_dome_install' || st === 'ready_for_final_completion') return 'Ready for Dome Install';
+  if (st === 'dome_installed') return 'Dome Installed';
   if (st === 'waiting') return 'Waiting';
   if (st === 'paused') return 'Paused';
   if (st === 'active') return 'Active';
@@ -552,7 +602,7 @@ function buildTankMoreMenuHtml(btn) {
   const statusRaw = String(btn.getAttribute('data-status') || '').toLowerCase();
   let statusAction = '';
   if (showComplete) {
-    statusAction = `<button type="button" role="menuitem" class="tank-actions-menu-item is-success" data-act="archive" data-id="${id}">Complete Tank</button>`;
+    statusAction = `<button type="button" role="menuitem" class="tank-actions-menu-item is-success" data-act="archive" data-id="${id}" data-tank="${tank}">Complete Tank</button>`;
   } else if (statusRaw === 'archived') {
     statusAction = `<button type="button" role="menuitem" class="tank-actions-menu-item" data-act="restore" data-id="${id}">Restore</button>`;
   }
@@ -591,7 +641,8 @@ function openTankActionsMenu(anchorBtn) {
 
 function renderNormalTankActionsCell(t) {
   const st = String((t && t.status) || '').toLowerCase();
-  const canComplete = st === 'ready_for_dome_install' || st === 'ready_for_final_completion' ? '1' : '0';
+  const canComplete =
+    st === 'ready_for_dome_install' || st === 'ready_for_final_completion' || st === 'dome_installed' ? '1' : '0';
   return `<td class="tank-actions-cell">
     <div class="tank-actions">
       <button type="button" class="btn btn-sm btn-primary" data-act="report" data-id="${t.id}">View Report</button>
@@ -634,7 +685,7 @@ function handleTankActionButton(btn) {
       });
     }
   }
-  if (act === 'archive') void setTankStatus(id, 'archived');
+  if (act === 'archive') void setTankStatus(id, 'archived', btn.getAttribute('data-tank'));
   if (act === 'restore') void setTankStatus(id, 'active');
   if (act === 'restore-to-assembly') {
     const reason = window.prompt('Restore to Assembly reason (required):', '');
@@ -902,7 +953,17 @@ async function editTank(id) {
   }
   if (editTankId) editTankId.value = String(tank.id);
   if (editTankNumber) editTankNumber.value = tank.tank_number || '';
-  if (editTankStatus) editTankStatus.value = tank.status || 'waiting';
+  if (editTankStatus) {
+    editTankStatus.querySelectorAll('option[data-current-only]').forEach((o) => o.remove());
+    if (String(tank.status || '').toLowerCase() === 'dome_installed') {
+      const opt = document.createElement('option');
+      opt.value = 'dome_installed';
+      opt.textContent = 'Dome Installed';
+      opt.setAttribute('data-current-only', '1');
+      editTankStatus.appendChild(opt);
+    }
+    editTankStatus.value = tank.status || 'waiting';
+  }
   if (editTankCustomer) editTankCustomer.value = tank.customer || '';
   if (editTankModel) editTankModel.value = tank.model || '';
   if (editTankPriority) editTankPriority.value = tank.priority || '';
@@ -976,7 +1037,33 @@ function printAllTanks() {
   window.open('/api/manager/tanks/print-selected?all=1', '_blank', 'noopener,noreferrer');
 }
 
-async function setTankStatus(id, nextStatus) {
+/**
+ * Phase 3: Complete Tank answers 409 dome_required when no dome is installed. Ask the manager
+ * for an override reason; returns the reason, or null when cancelled / too short.
+ */
+function promptDomeOverrideReason(data, tankNumber) {
+  const DI = window.DomeI18n;
+  const text = DI
+    ? DI.tr('mgr.dome.overridePrompt', { tank: tankNumber || '' })
+    : (data && data.message) || 'No dome is installed. Enter an override reason:';
+  const reason = window.prompt(text, '');
+  if (reason == null) return null;
+  if (String(reason).trim().length < 3) {
+    tankHint.textContent = DI ? DI.tr('mgr.dome.reasonShort') : 'Enter a reason of at least 3 characters.';
+    return null;
+  }
+  return String(reason).trim();
+}
+
+function domeCompletionMessage(data, tankNumber) {
+  const DI = window.DomeI18n;
+  if (DI && data && (data.error === 'dome_install_in_progress' || data.error === 'dome_required')) {
+    return DI.msg(data, { tank: tankNumber });
+  }
+  return (data && data.message) || 'Tank update failed.';
+}
+
+async function setTankStatus(id, nextStatus, tankNumber) {
   if (tankActionInFlight) return;
   const makeActive = nextStatus === 'active';
   const prompt = makeActive
@@ -985,14 +1072,24 @@ async function setTankStatus(id, nextStatus) {
   if (!window.confirm(prompt)) return;
   tankActionInFlight = true;
   const url = makeActive ? `/api/tanks/${id}/restore` : `/api/tanks/${id}/archive`;
-  const { res, data } = await apiJson(url, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ status: makeActive ? 'active' : 'archived' }),
-  });
+  const send = (extra) =>
+    apiJson(url, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: makeActive ? 'active' : 'archived', ...(extra || {}) }),
+    });
+  let { res, data } = await send();
+  if (!makeActive && !res.ok && data && data.error === 'dome_required' && data.override_allowed) {
+    const reason = promptDomeOverrideReason(data, tankNumber);
+    if (reason == null) {
+      tankActionInFlight = false;
+      return;
+    }
+    ({ res, data } = await send({ dome_override_reason: reason }));
+  }
   tankActionInFlight = false;
   if (!res.ok) {
-    tankHint.textContent = (data && data.message) || 'Tank update failed.';
+    tankHint.textContent = domeCompletionMessage(data, tankNumber);
     return;
   }
   const filter = getTankStatusFilter();
@@ -1452,6 +1549,7 @@ function renderTankReport(data) {
     }
     if (st === 'rework_required') return 'Rework Required (returned from Testing / QA)';
     if (st === 'ready_for_dome_install' || st === 'ready_for_final_completion') return 'Ready for Dome Install';
+    if (st === 'dome_installed') return 'Dome Installed';
     if (st === 'archived') return 'Complete';
     if (at && at.assembly_completed_at) return 'Assembly Complete';
     if (at && at.assembly_started_at) return 'Assembly Started';
@@ -1618,6 +1716,7 @@ function renderTankReport(data) {
           <div class="tank-lifecycle-label">Downtime Total</div>
           <div class="tank-lifecycle-value">${escapeHtml(data.downtime_total_display || meta.downtime_display || '00:00')}</div>
         </div>
+        ${renderTankReportDomeItem(data)}
         <div class="tank-lifecycle-item tank-lifecycle-item--wide">
           <div class="tank-lifecycle-label">Description</div>
           <div class="tank-lifecycle-value">${escapeHtml(tank.description || 'No description')}</div>

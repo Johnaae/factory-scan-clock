@@ -1,0 +1,655 @@
+'use strict';
+
+/**
+ * Phase 3 Dome strings (English / Spanish) for the Dome Shop kiosk, the Fabrication Dome Install
+ * picker, the Dome Inventory page and the manager Complete Tank prompt. Extends the shared
+ * FactoryI18n dictionary (same language selector + saved preference as the other kiosks).
+ * Dome numbers, tank numbers, employee and team names are inserted as-is.
+ */
+(function initDomeI18n(root) {
+  const EN = {
+    'dome.label': 'Dome {dome}',
+    'dome.type.Petro': 'Petro',
+    'dome.type.Water': 'Water',
+    'dome.type.unknown': 'Not set',
+    'dome.status.created': 'Not started',
+    'dome.status.in_progress': 'Working',
+    'dome.status.lunch': 'On Lunch',
+    'dome.status.end_shift': 'Paused — End Shift',
+    'dome.status.paused': 'Stopped',
+    'dome.status.completed': 'Completed',
+    'dome.inv.available': 'Available',
+    'dome.inv.reserved': 'Installing',
+    'dome.inv.installed': 'Installed',
+    'dome.inv.not_in_inventory': 'In Production',
+    'dome.field.number': 'Dome Number',
+    'dome.field.type': 'Dome Type',
+    'dome.field.diameter': 'Diameter',
+    'dome.field.weight': 'Weight',
+    'dome.field.weightLb': 'Weight (lb)',
+    'dome.field.fabricators': 'Fabricators',
+    'dome.field.productionTime': 'Production Time',
+    'dome.field.labor': 'Labor',
+    'dome.field.created': 'Created',
+    'dome.field.completed': 'Completed',
+    'dome.field.installedOn': 'Installed On',
+    'dome.field.production': 'Production',
+    'dome.field.inventory': 'Inventory',
+    'dome.field.team': 'Team',
+    'dome.field.source': 'Source',
+    'dome.field.notes': 'Notes',
+    'dome.source.kiosk': 'Dome Shop',
+    'dome.source.manual': 'Added manually',
+    'dome.lb': '{n} lb',
+    'dome.tankPiece': 'Tank {tank} · Piece {piece}',
+    'dome.all': 'All',
+    'dome.searchPh': 'Search dome number…',
+    'dome.cancel': 'Cancel',
+    'dome.confirm': 'Confirm',
+    'dome.save': 'Save',
+    'dome.close': 'Close',
+    'dome.badResponse': 'Unexpected server response. Try again.',
+
+    'dk.subtitle': 'Dome Shop',
+    'dk.exitKiosk': 'Exit Kiosk',
+    'dk.scanTitle': 'Scan Team or Employee',
+    'dk.scanSub':
+      'Scan a Dome Team barcode to add its card. Tap a Team card to select it, then scan employee badges to add or move them to that team.',
+    'dk.scanLabel': 'Scan barcode',
+    'dk.scanPlaceholder': 'TEAM or EMPLOYEE barcode',
+    'dk.scanBtn': 'Scan',
+    'dk.teamsEmpty': 'No team on shift — scan your Dome Team barcode.',
+    'dk.teamSelected': '{team} selected — employee badges scanned now join this team.',
+    'dk.badge.selected': 'Selected',
+    'dk.badge.lunch': 'Lunch',
+    'dk.badge.working': 'Working',
+    'dk.badge.active': 'Active',
+    'dk.onShift': 'On shift:',
+    'dk.noOpenShift': 'Nobody on shift — scan employee badges.',
+    'dk.onLunch': 'On lunch — press Resume when the team is back.',
+    'dk.teamNoDomes': 'No domes yet — tap Create Dome.',
+    'dk.working': 'Working now',
+    'dk.btn.create': 'Create Dome',
+    'dk.btn.lunch': 'Lunch',
+    'dk.btn.resume': 'Resume',
+    'dk.btn.endShift': 'End Shift',
+    'dk.btn.employeeOut': 'Employee Out',
+    'dk.btn.start': 'Start Dome',
+    'dk.btn.stop': 'Stop Dome',
+    'dk.btn.complete': 'Dome Complete',
+    'dk.btn.fabricators': 'Fabricators',
+    'dk.other.title': 'Other Domes in Production',
+    'dk.other.hint': 'These domes belong to a team that is not on the kiosk. Start Dome uses the selected team ({team}).',
+    'dk.other.noTeam': 'scan a team first',
+    'dk.recent': 'Recently Completed',
+    'dk.inInventory': 'In Dome Inventory',
+    'dk.since': 'since {time}',
+    'dk.create.title': 'Create Dome',
+    'dk.create.titleTeam': 'Create Dome — {team}',
+    'dk.create.numberPh': 'e.g. D-1042',
+    'dk.create.autoFab': 'Assigned automatically — {n} on shift with {team}: {names}',
+    'dk.create.pickFab': 'Nobody is on shift with {team}. Select the fabricators:',
+    'dk.create.noFab': 'No Dome-shop employees found. A manager can set Shop Assignment = Dome.',
+    'dk.fab.team': 'On {team}',
+    'dk.fab.offShift': 'Not on shift',
+    'dk.fab.busy': 'On Dome {dome}',
+    'dk.fab.title': 'Fabricators — Dome {dome}',
+    'dk.fab.hint': 'Workers on this dome. Tap to add or remove.',
+    'dk.complete.title': 'Dome Complete',
+    'dk.complete.text': 'Enter the weight of Dome {dome}. It will be added to Dome Inventory.',
+    'dk.complete.submit': 'Complete Dome',
+    'dk.endShift.title': 'End Shift',
+    'dk.endShift.text':
+      'End Shift for {team}? Its running dome pauses for the next shift and the team card closes. Other teams keep working.',
+    'dk.out.title': 'Employee Out',
+    'dk.out.titleTeam': 'Employee Out — {team}',
+    'dk.out.hint': 'Select an employee on this team’s open shift.',
+    'dk.out.empty': 'No open-shift employees for this team.',
+    'dk.out.confirm': 'Mark {name} out for today? Their dome labor stops now.',
+    'dk.out.btn': 'Confirm Out',
+    'dk.msg.joinedDome': 'Now working on Dome {dome}.',
+    'dk.msg.domeStopped': 'Dome {list} stopped — nobody is left working on it.',
+
+    'fdi.title': 'Dome Install — Select Dome',
+    'fdi.sub': 'Tank {tank}',
+    'fdi.empty': 'No completed domes match. Check Dome Inventory.',
+    'fdi.confirmTitle': 'Start Dome Install?',
+    'fdi.confirmText': 'Install Dome {dome} ({desc}) on Tank {tank}?',
+    'fdi.start': 'Start Install',
+    'fdi.finish': 'Finish Install',
+    'fdi.cancelInstall': 'Cancel Install',
+    'fdi.finishTitle': 'Finish Install',
+    'fdi.finishText': 'Finish installing Dome {dome} on Tank {tank}? The dome will be marked Installed.',
+    'fdi.cancelTitle': 'Cancel Install',
+    'fdi.cancelText': 'Cancel the Dome Install of Dome {dome}? The dome goes back to available inventory.',
+    'fdi.banner': 'Dome Install — Dome {dome} · Tank {tank}',
+    'fdi.bannerEnded': 'Dome Install paused by End Shift — Dome {dome} · Tank {tank}. Scan Team, then Resume.',
+    'fdi.readyMode': 'Ready for Dome Install',
+    'fdi.readyStatus': 'Ready for Dome',
+    'fdi.tapDomeInstall': 'Tank {tank}: tap or scan Dome Install to choose a completed dome.',
+    'fdi.inProgress': 'Dome Install in progress on Tank {tank} (Dome {dome}). Tap Finish Install or Cancel Install.',
+
+    'di.title': 'Dome Inventory',
+    'di.nav': 'Dome Inventory',
+    'di.searchPh': 'Search dome or tank number…',
+    'di.view': 'View',
+    'di.manualNoTime': 'Added manually — no production time recorded.',
+    'di.reason': 'Reason',
+    'di.participants': 'Employees',
+    'di.count': '{n} shown',
+    'di.sub': 'Domes built in the Dome Shop or added manually. Installed domes stay here as history.',
+    'di.back': '← Manager Dashboard',
+    'di.add': 'Add Existing Dome',
+    'di.refresh': 'Refresh',
+    'di.loading': 'Loading…',
+    'di.totals.all': 'All',
+    'di.totals.available': 'Available',
+    'di.totals.reserved': 'Installing',
+    'di.totals.installed': 'Installed',
+    'di.totals.in_production': 'In Production',
+    'di.filter.diameter': 'Diameter',
+    'di.filter.type': 'Type',
+    'di.filter.status': 'Status',
+    'di.col.tank': 'Tank / Piece',
+    'di.empty': 'No domes match these filters.',
+    'di.details': 'Dome Details',
+    'di.section.labor': 'Labor by Employee',
+    'di.section.sessions': 'Production Sessions',
+    'di.section.installs': 'Installation History',
+    'di.section.events': 'History',
+    'di.noLabor': 'No production labor recorded.',
+    'di.noInstalls': 'Not installed yet.',
+    'di.noEvents': 'No history.',
+    'di.installTime': 'Install time',
+    'di.add.title': 'Add Existing Dome',
+    'di.add.hint': 'For domes that already exist. Only Dome Number, Diameter and Weight are required — no production time is recorded.',
+    'di.add.typeOptional': 'Dome Type (optional)',
+    'di.edit': 'Edit',
+    'di.edit.title': 'Edit Dome {dome}',
+    'di.install.in_progress': 'In progress',
+    'di.install.installed': 'Installed',
+    'di.install.cancelled': 'Cancelled',
+    'di.event.created': 'Created',
+    'di.event.started': 'Started',
+    'di.event.restarted': 'Restarted',
+    'di.event.resumed': 'Resumed',
+    'di.event.lunch': 'Lunch',
+    'di.event.end_shift': 'End Shift',
+    'di.event.completed': 'Completed',
+    'di.event.fabricators_changed': 'Fabricators changed',
+    'di.event.manual_add': 'Added manually',
+    'di.event.edited': 'Edited',
+    'di.event.install_started': 'Install started',
+    'di.event.installed': 'Installed',
+    'di.event.install_cancelled': 'Install cancelled',
+    'di.event.stopped': 'Stopped',
+    'di.event.employee_joined': 'Employee joined',
+    'di.event.employee_left': 'Employee left',
+
+    'mgr.dome.overridePrompt':
+      'No dome is recorded as installed on Tank {tank}.\n\nTo complete it anyway (for example, a tank whose dome was installed before Dome tracking), enter the reason:',
+    'mgr.dome.reasonShort': 'Enter a reason of at least 3 characters.',
+    'mgr.dome.domes': 'Domes',
+    'mgr.dome.none': 'No dome installed',
+    'mgr.dome.override': 'Completed with override',
+    'mgr.dome.installing': 'Installing: {list}',
+
+    'dome.ok.team_assigned': '{team} started the shift.',
+    'dome.ok.team_present': '{team} is already on this kiosk — selected.',
+    'dome.ok.employee_moved': '{name} moved from {from} to {team} for this shift.',
+    'dome.ok.employee_joined': '{name} joined {team} for this shift.',
+    'dome.ok.employee_selected': '{name} is already on {team}.',
+    'dome.ok.dome_created': 'Dome {dome} created for {team}. Press Start Dome when work begins.',
+    'dome.ok.dome_started': 'Dome {dome} started by {team}.',
+    'dome.ok.dome_stopped': 'Dome {dome} stopped.',
+    'dome.ok.lunch': '{team} on lunch. Dome {list} paused.',
+    'dome.ok.lunch_none': '{team} on lunch.',
+    'dome.ok.resume': '{team} resumed Dome {list}.',
+    'dome.ok.resume_none': '{team} is back from lunch.',
+    'dome.ok.end_shift': 'End Shift for {team}. Paused for the next shift: Dome {list}.',
+    'dome.ok.end_shift_none': 'End Shift for {team}.',
+    'dome.ok.dome_completed': 'Dome {dome} completed ({weight} lb) and added to Dome Inventory.',
+    'dome.ok.fabricators_updated': 'Fabricators updated for Dome {dome}.',
+    'dome.ok.employee_out': '{name} marked out for today.',
+    'dome.ok.dome_install_started': 'Dome Install started — Dome {dome} on Tank {tank}.',
+    'dome.ok.dome_install_finished': 'Dome {dome} installed on Tank {tank}. Tank status: Dome Installed.',
+    'dome.ok.dome_install_cancelled': 'Dome Install cancelled. Dome {dome} is back in available inventory.',
+    'dome.ok.dome_install_resumed': 'Dome Install resumed on Tank {list}.',
+    'dome.ok.manual_added': 'Dome {dome} added to inventory.',
+    'dome.ok.dome_updated': 'Dome {dome} updated.',
+
+    'dome.err.need_team': 'Scan your Team barcode first.',
+    'dome.err.select_team': 'Tap a Team card first.',
+    'dome.err.use_buttons': 'Use the buttons on the Team card for Lunch, Resume and End Shift. Scan only a TEAM or EMPLOYEE barcode.',
+    'dome.err.team_not_on_kiosk': 'That team is not on this Dome kiosk. Scan the Team barcode first.',
+    'dome.err.team_on_lunch': '{team} is on lunch. Press Resume on the team card first.',
+    'dome.err.team_busy': '{team} is already working on Dome {dome}. Stop or complete it first.',
+    'dome.err.not_assembly_team': '{name} is on shift with {team}, which is not a Dome team. Use Employee Out there first.',
+    'dome.err.no_workers': 'Nobody can work on Dome {dome}: {team} has no employees on shift. Scan employee badges onto the team first.',
+    'dome.err.dome_not_running': 'Dome {dome} is not running.',
+    'dome.err.inactive_employee': 'That employee is inactive.',
+    'dome.err.wrong_department': 'That team belongs to {department}. Scan a Dome team.',
+    'dome.err.unknown_team': 'Unknown team barcode.',
+    'dome.err.unknown_barcode': 'Unrecognized barcode. Scan a Team, employee badge, Lunch, Resume or End Shift barcode.',
+    'dome.err.dome_number_required': 'Enter a Dome Number.',
+    'dome.err.dome_type_required': 'Select a Dome Type (Petro or Water).',
+    'dome.err.diameter_required': "Select a Diameter (4', 6', 8', 10' or 12').",
+    'dome.err.duplicate_dome_number': 'That Dome Number already exists. Enter a different number.',
+    'dome.err.fabricators_required': 'Select at least one fabricator.',
+    'dome.err.invalid_fabricator': 'One or more selected fabricators are not active employees.',
+    'dome.err.not_dome_shop': 'Not assigned to the Dome shop: {names}. A manager can update Shop Assignment.',
+    'dome.err.employee_busy': 'Already working on another dome: {names}.',
+    'dome.err.dome_already_running': 'Dome {dome} is already running.',
+    'dome.err.dome_completed': 'Dome {dome} is already completed.',
+    'dome.err.dome_not_started': 'Start Dome {dome} before completing it.',
+    'dome.err.weight_required': 'Enter the Dome Weight in pounds (greater than 0).',
+    'dome.err.no_active_domes': 'No domes are running on this kiosk.',
+    'dome.err.nothing_to_resume': 'No paused domes to resume on this kiosk.',
+    'dome.err.not_on_shift': 'That employee is not currently on shift for this team.',
+    'dome.err.not_found': 'Dome not found.',
+    'dome.err.dome_not_ready': 'Dome features are not available yet — the database update has not finished. Try again in a minute.',
+    'dome.err.dome_unavailable': 'That dome is no longer available. Select a different dome.',
+    'dome.err.dome_required': 'No dome is recorded as installed on Tank {tank}.',
+    'dome.err.dome_install_in_progress': 'Tank {tank} has a Dome Install in progress. Finish or cancel it at the Fabrication kiosk first.',
+    'dome.err.need_piece': 'Select the piece for this Dome Install.',
+    'dome.err.tank_not_found': 'Tank not found.',
+    'dome.err.not_ready_for_dome_install': 'Tank {tank} is not Ready for Dome Install.',
+    'dome.err.piece_in_use': 'That piece is already being worked on.',
+    'dome.err.install_not_in_progress': 'This Dome Install is already finished or cancelled.',
+    'dome.err.install_on_other_machine': 'This Dome Install is running on another Fabrication kiosk.',
+    'dome.err.dome_install_only': 'Tank {tank} is Ready for Dome Install. Tap Dome Install.',
+    'dome.err.dome_already_installed': 'Dome {dome} is already installed on Tank {tank}.',
+    'dome.err.tank_in_use': 'Tank {tank} is already being worked on.',
+    'dome.err.dome_installed_waiting': 'Tank {tank} — Dome Installed. Waiting for the next Fabrication phase.',
+    'dome.err.dome_install_active': 'Dome Install in progress (Dome {dome}). Tap Finish Install or Cancel Install.',
+    'dome.err.server_error': 'Could not complete the action. Try again.',
+  };
+
+  const ES = {
+    'dome.label': 'Domo {dome}',
+    'dome.type.Petro': 'Petro',
+    'dome.type.Water': 'Agua',
+    'dome.type.unknown': 'Sin definir',
+    'dome.status.created': 'Sin iniciar',
+    'dome.status.in_progress': 'En proceso',
+    'dome.status.lunch': 'En almuerzo',
+    'dome.status.end_shift': 'Pausado — Fin de turno',
+    'dome.status.paused': 'Detenido',
+    'dome.status.completed': 'Completado',
+    'dome.inv.available': 'Disponible',
+    'dome.inv.reserved': 'En instalación',
+    'dome.inv.installed': 'Instalado',
+    'dome.inv.not_in_inventory': 'En producción',
+    'dome.field.number': 'Número de Domo',
+    'dome.field.type': 'Tipo de Domo',
+    'dome.field.diameter': 'Diámetro',
+    'dome.field.weight': 'Peso',
+    'dome.field.weightLb': 'Peso (lb)',
+    'dome.field.fabricators': 'Fabricadores',
+    'dome.field.productionTime': 'Tiempo de Producción',
+    'dome.field.labor': 'Mano de Obra',
+    'dome.field.created': 'Creado',
+    'dome.field.completed': 'Completado',
+    'dome.field.installedOn': 'Instalado en',
+    'dome.field.production': 'Producción',
+    'dome.field.inventory': 'Inventario',
+    'dome.field.team': 'Equipo',
+    'dome.field.source': 'Origen',
+    'dome.field.notes': 'Notas',
+    'dome.source.kiosk': 'Taller de Domos',
+    'dome.source.manual': 'Agregado manualmente',
+    'dome.lb': '{n} lb',
+    'dome.tankPiece': 'Tanque {tank} · Pieza {piece}',
+    'dome.all': 'Todos',
+    'dome.searchPh': 'Buscar número de domo…',
+    'dome.cancel': 'Cancelar',
+    'dome.confirm': 'Confirmar',
+    'dome.save': 'Guardar',
+    'dome.close': 'Cerrar',
+    'dome.badResponse': 'Respuesta inesperada del servidor. Intente de nuevo.',
+
+    'dk.subtitle': 'Taller de Domos',
+    'dk.exitKiosk': 'Salir del Kiosco',
+    'dk.scanTitle': 'Escanee Equipo o Empleado',
+    'dk.scanSub':
+      'Escanee el código de un Equipo de Domos para agregar su tarjeta. Toque una tarjeta de Equipo para seleccionarla y luego escanee los gafetes para agregar o mover empleados a ese equipo.',
+    'dk.scanLabel': 'Escanear código',
+    'dk.scanPlaceholder': 'Código de EQUIPO o EMPLEADO',
+    'dk.scanBtn': 'Escanear',
+    'dk.teamsEmpty': 'No hay equipo en turno — escanee el código de su Equipo de Domos.',
+    'dk.teamSelected': '{team} seleccionado — los gafetes que escanee ahora se unen a este equipo.',
+    'dk.badge.selected': 'Seleccionado',
+    'dk.badge.lunch': 'Almuerzo',
+    'dk.badge.working': 'Trabajando',
+    'dk.badge.active': 'Activo',
+    'dk.onShift': 'En turno:',
+    'dk.noOpenShift': 'Nadie en turno — escanee los gafetes.',
+    'dk.onLunch': 'En almuerzo — presione Reanudar cuando el equipo regrese.',
+    'dk.teamNoDomes': 'Aún no hay domos — toque Crear Domo.',
+    'dk.working': 'Trabajando ahora',
+    'dk.btn.create': 'Crear Domo',
+    'dk.btn.lunch': 'Almuerzo',
+    'dk.btn.resume': 'Reanudar',
+    'dk.btn.endShift': 'Fin de Turno',
+    'dk.btn.employeeOut': 'Salida de Empleado',
+    'dk.btn.start': 'Iniciar Domo',
+    'dk.btn.stop': 'Detener Domo',
+    'dk.btn.complete': 'Domo Completo',
+    'dk.btn.fabricators': 'Fabricadores',
+    'dk.other.title': 'Otros Domos en Producción',
+    'dk.other.hint': 'Estos domos pertenecen a un equipo que no está en el kiosco. Iniciar Domo usa el equipo seleccionado ({team}).',
+    'dk.other.noTeam': 'primero escanee un equipo',
+    'dk.recent': 'Completados Recientemente',
+    'dk.inInventory': 'En Inventario de Domos',
+    'dk.since': 'desde {time}',
+    'dk.create.title': 'Crear Domo',
+    'dk.create.titleTeam': 'Crear Domo — {team}',
+    'dk.create.numberPh': 'ej. D-1042',
+    'dk.create.autoFab': 'Asignados automáticamente — {n} en turno con {team}: {names}',
+    'dk.create.pickFab': 'Nadie está en turno con {team}. Seleccione los fabricadores:',
+    'dk.create.noFab': 'No hay empleados del taller de Domos. Un gerente puede asignar el Taller = Domo.',
+    'dk.fab.team': 'En {team}',
+    'dk.fab.offShift': 'Fuera de turno',
+    'dk.fab.busy': 'En Domo {dome}',
+    'dk.fab.title': 'Fabricadores — Domo {dome}',
+    'dk.fab.hint': 'Trabajadores de este domo. Toque para agregar o quitar.',
+    'dk.complete.title': 'Domo Completo',
+    'dk.complete.text': 'Ingrese el peso del Domo {dome}. Se agregará al Inventario de Domos.',
+    'dk.complete.submit': 'Completar Domo',
+    'dk.endShift.title': 'Fin de Turno',
+    'dk.endShift.text':
+      '¿Terminar el turno de {team}? Su domo en proceso se pausa para el siguiente turno y la tarjeta del equipo se cierra. Los demás equipos siguen trabajando.',
+    'dk.out.title': 'Salida de Empleado',
+    'dk.out.titleTeam': 'Salida de Empleado — {team}',
+    'dk.out.hint': 'Seleccione un empleado en el turno abierto de este equipo.',
+    'dk.out.empty': 'No hay empleados en turno para este equipo.',
+    'dk.out.confirm': '¿Marcar a {name} como fuera por hoy? Su mano de obra en domos se detiene ahora.',
+    'dk.out.btn': 'Confirmar Salida',
+    'dk.msg.joinedDome': 'Ahora trabaja en el Domo {dome}.',
+    'dk.msg.domeStopped': 'Domo {list} detenido — ya nadie trabaja en él.',
+
+    'fdi.title': 'Instalación de Domo — Seleccione Domo',
+    'fdi.sub': 'Tanque {tank}',
+    'fdi.empty': 'No hay domos completados que coincidan. Revise el Inventario de Domos.',
+    'fdi.confirmTitle': '¿Iniciar Instalación de Domo?',
+    'fdi.confirmText': '¿Instalar el Domo {dome} ({desc}) en el Tanque {tank}?',
+    'fdi.start': 'Iniciar Instalación',
+    'fdi.finish': 'Terminar Instalación',
+    'fdi.cancelInstall': 'Cancelar Instalación',
+    'fdi.finishTitle': 'Terminar Instalación',
+    'fdi.finishText': '¿Terminar la instalación del Domo {dome} en el Tanque {tank}? El domo quedará como Instalado.',
+    'fdi.cancelTitle': 'Cancelar Instalación',
+    'fdi.cancelText': '¿Cancelar la instalación del Domo {dome}? El domo regresa al inventario disponible.',
+    'fdi.banner': 'Instalación de Domo — Domo {dome} · Tanque {tank}',
+    'fdi.bannerEnded':
+      'Instalación de Domo pausada por Fin de Turno — Domo {dome} · Tanque {tank}. Escanee el Equipo y luego Reanudar.',
+    'fdi.readyMode': 'Listo para Instalación de Domo',
+    'fdi.readyStatus': 'Listo para Domo',
+    'fdi.tapDomeInstall': 'Tanque {tank}: toque o escanee Instalación de Domo para elegir un domo completado.',
+    'fdi.inProgress':
+      'Instalación de Domo en proceso en el Tanque {tank} (Domo {dome}). Toque Terminar Instalación o Cancelar Instalación.',
+
+    'di.title': 'Inventario de Domos',
+    'di.nav': 'Inventario de Domos',
+    'di.searchPh': 'Buscar número de domo o tanque…',
+    'di.view': 'Ver',
+    'di.manualNoTime': 'Agregado manualmente — sin tiempo de producción registrado.',
+    'di.reason': 'Motivo',
+    'di.participants': 'Empleados',
+    'di.count': '{n} mostrados',
+    'di.sub': 'Domos fabricados en el Taller de Domos o agregados manualmente. Los domos instalados quedan aquí como historial.',
+    'di.back': '← Panel del Gerente',
+    'di.add': 'Agregar Domo Existente',
+    'di.refresh': 'Actualizar',
+    'di.loading': 'Cargando…',
+    'di.totals.all': 'Todos',
+    'di.totals.available': 'Disponibles',
+    'di.totals.reserved': 'En instalación',
+    'di.totals.installed': 'Instalados',
+    'di.totals.in_production': 'En producción',
+    'di.filter.diameter': 'Diámetro',
+    'di.filter.type': 'Tipo',
+    'di.filter.status': 'Estado',
+    'di.col.tank': 'Tanque / Pieza',
+    'di.empty': 'Ningún domo coincide con estos filtros.',
+    'di.details': 'Detalles del Domo',
+    'di.section.labor': 'Mano de Obra por Empleado',
+    'di.section.sessions': 'Sesiones de Producción',
+    'di.section.installs': 'Historial de Instalación',
+    'di.section.events': 'Historial',
+    'di.noLabor': 'No hay mano de obra de producción registrada.',
+    'di.noInstalls': 'Aún no instalado.',
+    'di.noEvents': 'Sin historial.',
+    'di.installTime': 'Tiempo de instalación',
+    'di.add.title': 'Agregar Domo Existente',
+    'di.add.hint':
+      'Para domos que ya existen. Solo se requieren Número de Domo, Diámetro y Peso — no se registra tiempo de producción.',
+    'di.add.typeOptional': 'Tipo de Domo (opcional)',
+    'di.edit': 'Editar',
+    'di.edit.title': 'Editar Domo {dome}',
+    'di.install.in_progress': 'En proceso',
+    'di.install.installed': 'Instalado',
+    'di.install.cancelled': 'Cancelado',
+    'di.event.created': 'Creado',
+    'di.event.started': 'Iniciado',
+    'di.event.restarted': 'Reiniciado',
+    'di.event.resumed': 'Reanudado',
+    'di.event.lunch': 'Almuerzo',
+    'di.event.end_shift': 'Fin de Turno',
+    'di.event.completed': 'Completado',
+    'di.event.fabricators_changed': 'Cambio de fabricadores',
+    'di.event.manual_add': 'Agregado manualmente',
+    'di.event.edited': 'Editado',
+    'di.event.install_started': 'Instalación iniciada',
+    'di.event.installed': 'Instalado',
+    'di.event.install_cancelled': 'Instalación cancelada',
+    'di.event.stopped': 'Detenido',
+    'di.event.employee_joined': 'Empleado se unió',
+    'di.event.employee_left': 'Empleado salió',
+
+    'mgr.dome.overridePrompt':
+      'No hay ningún domo registrado como instalado en el Tanque {tank}.\n\nPara completarlo de todos modos (por ejemplo, un tanque cuyo domo se instaló antes del control de Domos), ingrese el motivo:',
+    'mgr.dome.reasonShort': 'Ingrese un motivo de al menos 3 caracteres.',
+    'mgr.dome.domes': 'Domos',
+    'mgr.dome.none': 'Sin domo instalado',
+    'mgr.dome.override': 'Completado con excepción',
+    'mgr.dome.installing': 'Instalando: {list}',
+
+    'dome.ok.team_assigned': '{team} inició el turno.',
+    'dome.ok.team_present': '{team} ya está en este kiosco — seleccionado.',
+    'dome.ok.employee_moved': '{name} pasó de {from} a {team} durante este turno.',
+    'dome.ok.employee_joined': '{name} se unió a {team} durante este turno.',
+    'dome.ok.employee_selected': '{name} ya está en {team}.',
+    'dome.ok.dome_created': 'Domo {dome} creado para {team}. Presione Iniciar Domo cuando comience el trabajo.',
+    'dome.ok.dome_started': '{team} inició el Domo {dome}.',
+    'dome.ok.dome_stopped': 'Domo {dome} detenido.',
+    'dome.ok.lunch': '{team} en almuerzo. Domo {list} pausado.',
+    'dome.ok.lunch_none': '{team} en almuerzo.',
+    'dome.ok.resume': '{team} reanudó el Domo {list}.',
+    'dome.ok.resume_none': '{team} regresó del almuerzo.',
+    'dome.ok.end_shift': 'Fin de Turno para {team}. Pausado para el siguiente turno: Domo {list}.',
+    'dome.ok.end_shift_none': 'Fin de Turno para {team}.',
+    'dome.ok.dome_completed': 'Domo {dome} completado ({weight} lb) y agregado al Inventario de Domos.',
+    'dome.ok.fabricators_updated': 'Fabricadores actualizados para el Domo {dome}.',
+    'dome.ok.employee_out': '{name} marcado como fuera por hoy.',
+    'dome.ok.dome_install_started': 'Instalación iniciada — Domo {dome} en el Tanque {tank}.',
+    'dome.ok.dome_install_finished': 'Domo {dome} instalado en el Tanque {tank}. Estado del tanque: Domo Instalado.',
+    'dome.ok.dome_install_cancelled': 'Instalación cancelada. El Domo {dome} regresó al inventario disponible.',
+    'dome.ok.dome_install_resumed': 'Instalación de Domo reanudada en el Tanque {list}.',
+    'dome.ok.manual_added': 'Domo {dome} agregado al inventario.',
+    'dome.ok.dome_updated': 'Domo {dome} actualizado.',
+
+    'dome.err.need_team': 'Primero escanee el código de su equipo.',
+    'dome.err.select_team': 'Primero toque una tarjeta de Equipo.',
+    'dome.err.use_buttons':
+      'Use los botones de la tarjeta del Equipo para Almuerzo, Reanudar y Fin de Turno. Escanee solo un código de EQUIPO o EMPLEADO.',
+    'dome.err.team_not_on_kiosk': 'Ese equipo no está en este kiosco de Domos. Primero escanee el código del Equipo.',
+    'dome.err.team_on_lunch': '{team} está en almuerzo. Primero presione Reanudar en la tarjeta del equipo.',
+    'dome.err.team_busy': '{team} ya trabaja en el Domo {dome}. Deténgalo o complételo primero.',
+    'dome.err.not_assembly_team': '{name} está en turno con {team}, que no es un equipo de Domos. Primero use Salida de Empleado allá.',
+    'dome.err.no_workers':
+      'Nadie puede trabajar en el Domo {dome}: {team} no tiene empleados en turno. Primero escanee los gafetes en el equipo.',
+    'dome.err.dome_not_running': 'El Domo {dome} no está en proceso.',
+    'dome.err.inactive_employee': 'Ese empleado está inactivo.',
+    'dome.err.wrong_department': 'Ese equipo pertenece a {department}. Escanee un equipo de Domos.',
+    'dome.err.unknown_team': 'Código de equipo desconocido.',
+    'dome.err.unknown_barcode':
+      'Código no reconocido. Escanee un código de Equipo, gafete de empleado, Almuerzo, Reanudar o Fin de Turno.',
+    'dome.err.dome_number_required': 'Ingrese un Número de Domo.',
+    'dome.err.dome_type_required': 'Seleccione un Tipo de Domo (Petro o Agua).',
+    'dome.err.diameter_required': "Seleccione un Diámetro (4', 6', 8', 10' o 12').",
+    'dome.err.duplicate_dome_number': 'Ese Número de Domo ya existe. Ingrese un número diferente.',
+    'dome.err.fabricators_required': 'Seleccione al menos un fabricador.',
+    'dome.err.invalid_fabricator': 'Uno o más fabricadores seleccionados no son empleados activos.',
+    'dome.err.not_dome_shop': 'No asignados al taller de Domos: {names}. Un gerente puede actualizar la asignación de taller.',
+    'dome.err.employee_busy': 'Ya trabajan en otro domo: {names}.',
+    'dome.err.dome_already_running': 'El Domo {dome} ya está en proceso.',
+    'dome.err.dome_completed': 'El Domo {dome} ya está completado.',
+    'dome.err.dome_not_started': 'Inicie el Domo {dome} antes de completarlo.',
+    'dome.err.weight_required': 'Ingrese el Peso del Domo en libras (mayor que 0).',
+    'dome.err.no_active_domes': 'No hay domos en proceso en este kiosco.',
+    'dome.err.nothing_to_resume': 'No hay domos pausados para reanudar en este kiosco.',
+    'dome.err.not_on_shift': 'Ese empleado no está en turno con este equipo.',
+    'dome.err.not_found': 'Domo no encontrado.',
+    'dome.err.dome_not_ready':
+      'Las funciones de Domos aún no están disponibles — la actualización de la base de datos no ha terminado. Intente en un minuto.',
+    'dome.err.dome_unavailable': 'Ese domo ya no está disponible. Seleccione otro domo.',
+    'dome.err.dome_required': 'No hay ningún domo registrado como instalado en el Tanque {tank}.',
+    'dome.err.dome_install_in_progress':
+      'El Tanque {tank} tiene una Instalación de Domo en proceso. Termínela o cancélela primero en el kiosco de Fabricación.',
+    'dome.err.need_piece': 'Seleccione la pieza para esta Instalación de Domo.',
+    'dome.err.tank_not_found': 'Tanque no encontrado.',
+    'dome.err.not_ready_for_dome_install': 'El Tanque {tank} no está Listo para Instalación de Domo.',
+    'dome.err.piece_in_use': 'Esa pieza ya se está trabajando.',
+    'dome.err.install_not_in_progress': 'Esta Instalación de Domo ya terminó o se canceló.',
+    'dome.err.install_on_other_machine': 'Esta Instalación de Domo está en proceso en otro kiosco de Fabricación.',
+    'dome.err.dome_install_only': 'El Tanque {tank} está Listo para Instalación de Domo. Toque Instalación de Domo.',
+    'dome.err.dome_already_installed': 'El Domo {dome} ya está instalado en el Tanque {tank}.',
+    'dome.err.tank_in_use': 'El Tanque {tank} ya se está trabajando.',
+    'dome.err.dome_installed_waiting': 'Tanque {tank} — Domo Instalado. Esperando la siguiente fase de Fabricación.',
+    'dome.err.dome_install_active': 'Instalación de Domo en proceso (Domo {dome}). Toque Terminar Instalación o Cancelar Instalación.',
+    'dome.err.server_error': 'No se pudo completar la acción. Intente de nuevo.',
+  };
+
+  function i18n() {
+    return root.FactoryI18n || null;
+  }
+
+  function lang() {
+    const fi = i18n();
+    return fi && typeof fi.getLang === 'function' ? fi.getLang() : 'en';
+  }
+
+  function fill(template, vars) {
+    return String(template).replace(/\{(\w+)\}/g, (_m, k) => (vars && vars[k] != null ? String(vars[k]) : ''));
+  }
+
+  function hasAllVars(template, vars) {
+    for (const m of String(template).matchAll(/\{(\w+)\}/g)) {
+      if (!vars || vars[m[1]] == null || vars[m[1]] === '') return false;
+    }
+    return true;
+  }
+
+  function has(key) {
+    return EN[key] != null;
+  }
+
+  /** Translate a Dome key, filling {placeholders} with values exactly as given. */
+  function tr(key, vars) {
+    const dict = lang() === 'es' ? ES : EN;
+    const template = dict[key] != null ? dict[key] : EN[key] != null ? EN[key] : key;
+    return fill(template, vars);
+  }
+
+  function typeLabel(type) {
+    return type ? tr(`dome.type.${type}`) : tr('dome.type.unknown');
+  }
+
+  /** One-line dome description, e.g. "Petro 8' · 1,234.5 lb". */
+  function describe(d) {
+    if (!d) return '';
+    const parts = [typeLabel(d.dome_type), d.diameter_label || (d.diameter_ft ? `${d.diameter_ft}'` : '')].filter(Boolean);
+    let s = parts.join(' ');
+    if (d.weight_lbs != null) s += ` · ${tr('dome.lb', { n: formatLb(d.weight_lbs) })}`;
+    return s;
+  }
+
+  function formatLb(n) {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return '';
+    return v.toLocaleString(lang() === 'es' ? 'es-MX' : 'en-US', { maximumFractionDigits: 2 });
+  }
+
+  function productionLabel(d) {
+    if (!d) return '';
+    if (d.production_status === 'paused') {
+      return tr(d.pause_reason === 'lunch' ? 'dome.status.lunch' : d.pause_reason === 'end_shift' ? 'dome.status.end_shift' : 'dome.status.paused');
+    }
+    return tr(`dome.status.${d.production_status}`);
+  }
+
+  function inventoryLabel(status) {
+    return tr(`dome.inv.${status}`);
+  }
+
+  /**
+   * Message for an API response body: translated from its error / action code when the needed
+   * values are present, otherwise the server's own (English) message.
+   */
+  function msg(body, ctx) {
+    const b = body || {};
+    const c = ctx || {};
+    const dome =
+      b.dome_number ||
+      (b.dome && b.dome.dome_number) ||
+      (b.installation && b.installation.dome_number) ||
+      c.dome ||
+      null;
+    const vars = {
+      ...c,
+      dome,
+      tank: b.tank_number || c.tank || null,
+      piece: b.piece_number != null ? b.piece_number : c.piece != null ? c.piece : null,
+      team:
+        (b.to_team && b.to_team.name) ||
+        (b.team && b.team.name) ||
+        b.team_name ||
+        (b.assignment && b.assignment.team_name) ||
+        c.team ||
+        null,
+      from: (b.from_team && b.from_team.name) || null,
+      department: b.department || null,
+      weight: b.dome && b.dome.weight_lbs != null ? formatLb(b.dome.weight_lbs) : c.weight || null,
+      list: Array.isArray(b.dome_numbers)
+        ? b.dome_numbers.join(', ')
+        : Array.isArray(b.dome_install_resumed)
+          ? b.dome_install_resumed.join(', ')
+          : null,
+      names: Array.isArray(b.busy)
+        ? b.busy.map((x) => `${x.employee_name} (${tr('dome.label', { dome: x.dome_number })})`).join(', ')
+        : Array.isArray(b.employees)
+          ? b.employees.join(', ')
+          : null,
+      name: (b.employee && b.employee.name) || c.name || null,
+    };
+    let key = null;
+    if (b.ok === false && b.error) key = `dome.err.${b.error}`;
+    else if (b.action && Array.isArray(b.dome_numbers) && !b.dome_numbers.length && has(`dome.ok.${b.action}_none`)) {
+      key = `dome.ok.${b.action}_none`;
+    } else if (b.action === 'employee_moved' && !b.from_team) key = 'dome.ok.employee_joined';
+    else if (b.action) key = `dome.ok.${b.action}`;
+    if (key && has(key) && hasAllVars(EN[key], vars)) return tr(key, vars);
+    if (b.message) return String(b.message);
+    if (b.ok === false) return tr('dome.err.server_error');
+    return '';
+  }
+
+  const fi = i18n();
+  if (fi && fi.DICTS) {
+    Object.assign(fi.DICTS.en, EN);
+    Object.assign(fi.DICTS.es, ES);
+  }
+
+  root.DomeI18n = { tr, msg, lang, has, typeLabel, describe, formatLb, productionLabel, inventoryLabel };
+})(window);

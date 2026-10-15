@@ -1,0 +1,72 @@
+{
+  "employees": {
+    "max": "291",
+    "n": 28,
+    "h": "2114b155464a7674a7f97b2fa75b9421"
+  },
+  "teams": {
+    "max": "169",
+    "n": 15,
+    "h": "617119b5ea0fba6b3bd054b6ff1aa07a"
+  },
+  "team_members": {
+    "max": "190",
+    "n": 32,
+    "h": "58c6e8d017a4203d68b204d6e1909f9b"
+  },
+  "employee_team_memberships": {
+    "max": "276",
+    "n": 61,
+    "h": "b2a0c051e8743fe8658491036f7fbbbc"
+  },
+  "scan_logs": {
+    "max": "0",
+    "n": 0,
+    "h": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "machine_sessions": {
+    "max": "351",
+    "n": 21,
+    "h": "ae2e1c8135af87248dc7eb9e6634d339"
+  },
+  "session_team_members": {
+    "max": "511",
+    "n": 51,
+    "h": "c5b457c801084b24bde9431cb0dd3753"
+  },
+  "stage_labor_sessions": {
+    "max": "122",
+    "n": 12,
+    "h": "25619f65e31f24021e2af3a3e7e418b3"
+  },
+  "stage_labor_participants": {
+    "max": "216",
+    "n": 26,
+    "h": "d38d88cb8ad6d7334770c31d1acde98c"
+  },
+  "downtime_intervals": {
+    "max": "0",
+    "n": 0,
+    "h": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "job_finish_events": {
+    "max": "0",
+    "n": 0,
+    "h": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "assembly_kiosk_teams": {
+    "max": "21",
+    "n": 4,
+    "h": "e05019e7ba4cda17cf78536ed998eff0"
+  },
+  "assembly_tank_teams": {
+    "max": "7",
+    "n": 7,
+    "h": "1f8d7b6244ccec98393cff37ad6baa91"
+  },
+  "tanks": {
+    "max": "271",
+    "n": 10,
+    "h": "1053a9989ea5ace2e10a7feac4ccc096"
+  }
+}

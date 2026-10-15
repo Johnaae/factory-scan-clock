@@ -1,0 +1,9 @@
+DB host: localhost
+DB name: factory_scan_clock
+[db] INTERNAL_LAN_MODE=true — local PostgreSQL, SSL off
+App version: 1.0.0
+Session store: Postgres
+[boot] session-store: PGStore
+NODE_ENV: development
+[db-init] starting
+[kiosk] registered GET /api/kiosk/employee/:code

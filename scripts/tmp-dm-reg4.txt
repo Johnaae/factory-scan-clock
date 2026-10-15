@@ -1,0 +1,33 @@
+DB host: localhost
+DB name: factory_scan_clock
+[db] INTERNAL_LAN_MODE=true — local PostgreSQL, SSL off
+PASS HTTP create + list + QA kiosk route
+[
+  {
+    "name": "TEST FAB HTTP 677907",
+    "workflow": "winding",
+    "expect": "winding",
+    "label": "Winding (FAB)",
+    "id": 223,
+    "slug": "test-fab-http-677907",
+    "url": "/kiosk/machine/test-fab-http-677907"
+  },
+  {
+    "name": "TEST ASSEMBLY HTTP 677907",
+    "workflow": "assembly_testing",
+    "expect": "assembly_testing",
+    "label": "Assembly + Testing",
+    "id": 224,
+    "slug": "test-assembly-http-677907",
+    "url": "/kiosk/machine/test-assembly-http-677907"
+  },
+  {
+    "name": "TEST QAQC HTTP 677907",
+    "workflow": "qa_testing",
+    "expect": "qa_testing",
+    "label": "QA/QC",
+    "id": 225,
+    "slug": "test-qaqc-http-677907",
+    "url": "/kiosk/machine/test-qaqc-http-677907"
+  }
+]

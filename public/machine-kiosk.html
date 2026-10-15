@@ -160,6 +160,37 @@
       .piece-select-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }
       .piece-select-actions .btn-secondary { min-height: 52px; font-size: 16px; font-weight: 800; }
       @media (max-width: 480px) { .piece-select-list { grid-template-columns: 1fr; } }
+      .piece-select-btn.is-dome-done { border-color: #93c5fd; background: #eff6ff; color: #1e40af; }
+      .dome-install-panel { margin-top: 10px; display: grid; gap: 8px; }
+      .dome-install-row {
+        border: 3px solid #2563eb; border-radius: 14px; padding: 10px 12px; background: #eff6ff;
+        display: flex; flex-wrap: wrap; align-items: center; gap: 10px; justify-content: space-between;
+      }
+      .dome-install-row.is-ended { border-color: #64748b; background: #f8fafc; }
+      .dome-install-row p { margin: 0; font-weight: 800; color: #1e3a5f; font-size: 1.05rem; flex: 1 1 260px; }
+      .dome-install-row .btn-touch { min-height: 56px; min-width: 150px; font-weight: 800; }
+      .dome-pick-card { width: min(760px, 100%); max-height: 94vh; overflow-y: auto; }
+      .dome-pick-tools { display: grid; gap: 8px; }
+      .dome-pick-tools input {
+        min-height: 54px; font-size: 1.15rem; font-weight: 700; border: 2px solid #94a3b8; border-radius: 10px; padding: 6px 12px;
+      }
+      .dome-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+      .dome-chip {
+        min-height: 50px; min-width: 70px; padding: 6px 14px; border: 2px solid #94a3b8; border-radius: 12px; background: #fff;
+        font: inherit; font-size: 1.05rem; font-weight: 800; color: #1e3a5f; cursor: pointer;
+      }
+      .dome-chip.is-on { background: #1d4ed8; border-color: #1d4ed8; color: #fff; }
+      .dome-pick-list { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 210px), 1fr)); }
+      .dome-pick-item {
+        text-align: left; min-height: 92px; padding: 12px 14px; border: 2px solid #cbd5e1; border-radius: 14px; background: #fff;
+        font: inherit; cursor: pointer; display: grid; gap: 4px;
+      }
+      .dome-pick-item strong { font-size: 1.3rem; color: #0f172a; overflow-wrap: anywhere; }
+      .dome-pick-item span { font-weight: 700; color: #475569; }
+      .dome-pick-item.is-on { border-color: #1d4ed8; background: #eff6ff; box-shadow: 0 0 0 3px #93c5fd; }
+      .dome-pick-confirm { margin: 0; font-size: 1.1rem; font-weight: 800; color: #1e3a5f; }
+      .dome-modal-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }
+      .dome-modal-actions button { min-height: 56px; min-width: 140px; font-size: 16px; font-weight: 800; }
       .lang-bar { margin-left: auto; }
       @media (max-width: 640px) { .wk-grid { grid-template-columns: 1fr; } }
     </style>
@@ -201,6 +232,7 @@
           <strong class="wk-rework-banner__title">REWORK REQUIRED</strong>
           <p id="reworkFailNote" class="wk-rework-banner__note"></p>
         </div>
+        <div id="domeInstallPanel" class="dome-install-panel" hidden></div>
         <div class="wk-grid">
           <div class="wk-item"><p class="wk-label">Team</p><p id="valTeam" class="wk-value">—</p></div>
           <div class="wk-item"><p class="wk-label">Tank</p><p id="valTank" class="wk-value">—</p></div>
@@ -345,7 +377,35 @@
         </div>
       </div>
     </div>
+    <div id="domePickModal" class="modal-note" role="dialog" aria-modal="true" aria-labelledby="domePickTitle" hidden>
+      <div class="modal-note-card dome-pick-card">
+        <h3 id="domePickTitle" data-i18n="fdi.title">Dome Install — Select Dome</h3>
+        <p id="domePickSub" class="muted" style="margin:0"></p>
+        <div class="dome-pick-tools">
+          <input id="domePickSearch" type="search" autocomplete="off" data-i18n-placeholder="dome.searchPh" placeholder="Search dome number…" />
+          <div id="domePickDiameters" class="dome-chips"></div>
+        </div>
+        <div id="domePickList" class="dome-pick-list"></div>
+        <p id="domePickEmpty" class="piece-select-empty" data-i18n="fdi.empty" hidden>No completed domes match. Check Dome Inventory.</p>
+        <p id="domePickConfirm" class="dome-pick-confirm" hidden></p>
+        <div class="dome-modal-actions">
+          <button type="button" class="btn-secondary" id="btnDomePickCancel" data-i18n="dome.cancel">Cancel</button>
+          <button type="button" class="btn-primary" id="btnDomePickStart" data-i18n="fdi.start" hidden>Start Install</button>
+        </div>
+      </div>
+    </div>
+    <div id="domeConfirmModal" class="modal-note" role="dialog" aria-modal="true" aria-labelledby="domeConfirmTitle" hidden>
+      <div class="modal-note-card">
+        <h3 id="domeConfirmTitle"></h3>
+        <p id="domeConfirmText" class="dome-pick-confirm"></p>
+        <div class="dome-modal-actions">
+          <button type="button" class="btn-secondary" id="btnDomeConfirmCancel" data-i18n="dome.cancel">Cancel</button>
+          <button type="button" class="btn-primary" id="btnDomeConfirmOk" data-i18n="dome.confirm">Confirm</button>
+        </div>
+      </div>
+    </div>
     <script src="/i18n.js"></script>
-    <script src="/machine-kiosk.js?v=14"></script>
+    <script src="/dome-i18n.js?v=4"></script>
+    <script src="/machine-kiosk.js?v=17"></script>
   </body>
 </html>

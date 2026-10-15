@@ -1,0 +1,21 @@
+DB host: localhost
+DB name: factory_scan_clock
+[db] INTERNAL_LAN_MODE=true — local PostgreSQL, SSL off
+employees: rows<=368 count=102
+teams: rows<=223 count=69
+team_members: rows<=256 count=98
+employee_team_memberships: rows<=411 count=193
+scan_logs: rows<=0 count=0
+machines: rows<=226 count=51
+machine_sessions: rows<=383 count=53
+session_team_members: rows<=549 count=89
+stage_labor_sessions: rows<=130 count=20
+stage_labor_participants: rows<=240 count=50
+downtime_intervals: rows<=0 count=0
+job_finish_events: rows<=0 count=0
+assembly_kiosk_teams: rows<=72 count=45
+assembly_tank_teams: rows<=15 count=15
+tanks: rows<=309 count=48
+tank_pieces: rows<=37527 count=58
+test_attempts: rows<=204 count=44
+snapshot written: tmp-phase3-snapshot.json

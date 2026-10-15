@@ -1,0 +1,15 @@
+DB host: localhost
+DB name: factory_scan_clock
+[db] INTERNAL_LAN_MODE=true — local PostgreSQL, SSL off
+[db] connecting
+[db] host label: localhost
+[migration] acquiring schema lock
+[migration] creating base tables
+[migration] creating junction tables
+[migration] creating extended tables
+[migration] adding columns
+[migration] creating indexes
+[migration] adding constraints
+[migration] running backfills
+[migration] schema complete
+EXIT:0 

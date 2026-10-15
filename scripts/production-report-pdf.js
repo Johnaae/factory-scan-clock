@@ -362,6 +362,7 @@ function buildTankReportPdfBuffer(data) {
       }),
     },
     { label: 'Downtime Total', value: data.downtime_total_display || '00:00' },
+    { label: 'Domes Installed', value: tank.domes_installed_display || '—' },
     { label: 'Description', value: tank.description || '—' },
   ]);
 

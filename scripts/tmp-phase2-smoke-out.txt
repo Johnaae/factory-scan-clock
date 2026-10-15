@@ -1,0 +1,6 @@
+DB host: localhost
+DB name: factory_scan_clock
+[db] INTERNAL_LAN_MODE=true — local PostgreSQL, SSL off
+PASS phase2 multi-team + QA/Vacuum local smoke
+{"machineId":147,"team1Id":148,"team2Id":149,"tankAId":230,"tankBId":231,"attempts":3,"labor_ms":68}
+EXIT:0 

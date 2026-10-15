@@ -115,6 +115,30 @@ let noteMode = 'general'; // general | correction
 let pendingCorrectionBarcode = null;
 let downtimeReasons = [];
 let openQaQc = null;
+/** Phase 3: the selected tank passed Assembly/Testing/QA and only accepts Dome Install. */
+let domeInstallMode = false;
+let domeInstallInProgress = null;
+let domeInstalls = [];
+let domePick = null;
+let domeConfirmResolve = null;
+let domeActionBusy = false;
+const DOME_I18N = window.DomeI18n || null;
+const DOME_ONLY_ERRORS = new Set([
+  'dome_install_only',
+  'dome_install_active',
+  'dome_unavailable',
+  'dome_not_ready',
+  'install_not_in_progress',
+  'install_on_other_machine',
+  'not_ready_for_dome_install',
+  'dome_already_installed',
+  'dome_install_in_progress',
+  'tank_in_use',
+  'dome_installed_waiting',
+]);
+function domeTr(key, vars) {
+  return DOME_I18N ? DOME_I18N.tr(key, vars) : key;
+}
 
 const MAX_TANK_PIECES = 8;
 
@@ -147,13 +171,18 @@ function isTextEntryModalOpen() {
     els.downtimeModal && !els.downtimeModal.hidden && els.downtimeModal.classList.contains('show');
   const resolveOpen =
     els.resolveQaQcModal && !els.resolveQaQcModal.hidden && els.resolveQaQcModal.classList.contains('show');
+  const domeOpen = ['domePickModal', 'domeConfirmModal'].some((id) => {
+    const el = document.getElementById(id);
+    return el && !el.hidden && el.classList.contains('show');
+  });
   return Boolean(
     noteOpen ||
       downtimeOpen ||
       resolveOpen ||
       isEmployeeOutModalOpen() ||
       isChangePhaseModalOpen() ||
-      isPieceSelectModalOpen()
+      isPieceSelectModalOpen() ||
+      domeOpen
   );
 }
 
@@ -436,7 +465,8 @@ function pieceSelectSource() {
 function isPieceEligibleForSelect(piece) {
   const done = String(piece && piece.status) === 'completed';
   // Rework tanks may re-select previously completed pieces without deleting history.
-  return !done || tankReworkRequired;
+  // Dome Install happens on pieces that already completed Fabrication.
+  return !done || tankReworkRequired || domeInstallMode;
 }
 
 function renderPieceSelectList() {
@@ -460,10 +490,14 @@ function renderPieceSelectList() {
     // Never style rework-eligible completed pieces as disabled (is-done).
     btn.className =
       'piece-select-btn' +
-      (done && eligible ? ' is-rework' : '') +
+      (done && eligible ? (domeInstallMode ? ' is-dome-done' : ' is-rework') : '') +
       (done && !eligible ? ' is-done' : '');
     btn.setAttribute('data-piece', String(n));
-    btn.textContent = done ? (eligible ? `Piece ${n} (rework)` : `Piece ${n} ✓`) : `Piece ${n}`;
+    btn.textContent = done
+      ? eligible && !domeInstallMode
+        ? `Piece ${n} (rework)`
+        : `Piece ${n} ✓`
+      : `Piece ${n}`;
     btn.disabled = !eligible;
     btn.addEventListener('mousedown', (e) => e.preventDefault());
     if (eligible) {
@@ -483,6 +517,10 @@ function renderPieceSelectList() {
  */
 function openPieceSelectModal() {
   if (!els.pieceSelectModal) return;
+  if (domeInstallMode) {
+    warn(domeTr('fdi.tapDomeInstall', { tank: pendingTank || activeTankNumber() || '' }));
+    return;
+  }
   if (!pendingTank && !activeTankNumber()) {
     warn('Scan or select a tank first.');
     return;
@@ -1041,7 +1079,7 @@ function renderPieceStatusPanel() {
   if (!els.pieceStatusPanel) return;
   const list = configuredPieces();
   const tank = activeTankNumber();
-  if (!list.length || !tank) {
+  if (!list.length || !tank || domeInstallMode) {
     els.pieceStatusPanel.hidden = true;
     els.pieceStatusPanel.innerHTML = '';
     return;
@@ -1134,7 +1172,7 @@ function renderPieceTouchButtons() {
 function renderPieces() {
   if (!els.pieceChips) return;
   const list = configuredPieces();
-  if (!list.length) {
+  if (!list.length || domeInstallMode) {
     els.pieceChips.hidden = true;
     els.pieceChips.innerHTML = '';
     renderPieceTouchButtons();
@@ -1187,8 +1225,9 @@ function renderOpenTanks() {
       const active = selectedKey && key === selectedKey ? ' is-active' : '';
       const stCls = ` is-${statusClassForSession(s)}`;
       const sessionId = s.id != null ? Number(s.id) : '';
+      const tankLevel = String(s.activity_code || s.phase_code || '').toUpperCase() === 'DOME_INSTALL';
       return `<button type="button" class="btn-secondary wk-open-tank-btn${active}${stCls}" data-tank-id="${tankId}" data-piece-number="${pieceNum}" data-session-id="${sessionId}" aria-pressed="${active ? 'true' : 'false'}">
-        Tank ${String(s.tank_number || '')} · Piece ${pieceNum} · ${String(s.phase_name || s.activity_name || '')}
+        Tank ${String(s.tank_number || '')}${tankLevel ? '' : ` · Piece ${pieceNum}`} · ${String(s.phase_name || s.activity_name || '')}
       </button>`;
     })
     .join('');
@@ -1325,6 +1364,7 @@ function renderPhases() {
   els.phaseButtons.innerHTML = '';
   for (const ph of phases) {
     if (ph.completes || ph.piece_complete) continue;
+    if (domeInstallMode && String(ph.code || '').toUpperCase() !== 'DOME_INSTALL') continue;
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'btn-secondary selection-btn';
@@ -1345,12 +1385,15 @@ function renderUi() {
   renderPieceStatusPanel();
   renderQaQcUi();
   renderReworkBanner();
+  renderDomeInstallPanel();
 
   const displaySession = focusedSession();
 
   if (els.valPiece) {
     const n = selectedPieceNumber();
-    els.valPiece.textContent = n ? `Piece ${n}` : '—';
+    const tankLevel =
+      displaySession && String(displaySession.activity_code || displaySession.phase_code || '').toUpperCase() === 'DOME_INSTALL';
+    els.valPiece.textContent = n && !tankLevel ? `Piece ${n}` : '—';
   }
 
   // Multi-tank: an open session must not block configuring another scanned tank.
@@ -1441,6 +1484,23 @@ function renderUi() {
     return;
   }
 
+  if (domeInstallMode) {
+    const tankNormDome = String(pendingTank).toUpperCase();
+    const running =
+      (domeInstalls || []).find((i) => i && i.status === 'in_progress' && String(i.tank_number || '').toUpperCase() === tankNormDome) ||
+      domeInstallInProgress;
+    els.valStatus.textContent = domeTr('fdi.readyStatus');
+    if (els.valPiece) els.valPiece.textContent = '—';
+    els.workflowTitle.textContent = domeTr('fdi.readyMode');
+    els.workflowSub.textContent = running
+      ? domeTr('fdi.inProgress', { tank: pendingTank, dome: running.dome_number })
+      : domeTr('fdi.tapDomeInstall', { tank: pendingTank });
+    els.phasePanel.hidden = Boolean(running);
+    if (els.phaseSummaryPanel) els.phaseSummaryPanel.hidden = true;
+    if (!running) renderPhases();
+    return;
+  }
+
   if (pendingPiece == null) {
     const count = clampPieceCount(pieceCount || configuredPieces().length || 1, 1) || 1;
     els.workflowTitle.textContent = tankReworkRequired ? 'Rework Required — Select Piece' : 'Select Piece';
@@ -1510,6 +1570,20 @@ async function loadConfig() {
     }
   }
   assignment = data.assignment || null;
+  domeInstalls = Array.isArray(data.dome_installs) ? data.dome_installs : [];
+  if (
+    data.active_tank_number &&
+    (!pendingTank || String(pendingTank).toUpperCase() === String(data.active_tank_number).toUpperCase())
+  ) {
+    const wasDome = domeInstallMode;
+    domeInstallMode = data.active_tank_dome_install === true;
+    if (domeInstallMode) {
+      pendingPiece = null;
+      tankReworkRequired = false;
+    } else if (wasDome) {
+      domeInstallInProgress = null;
+    }
+  }
   phaseTimeSummary = data.phase_time_summary || [];
   downtimeReasons = data.downtime_reasons || downtimeReasons;
   openQaQc = data.open_qa_qc || null;
@@ -1534,6 +1608,7 @@ async function loadConfig() {
     resumablePhase = null;
     tankReworkRequired = false;
     latestFailureNote = null;
+    domeInstallMode = false;
   }
   if (data.pending && data.pending.tank) pendingTank = data.pending.tank;
   if (data.pending && data.pending.piece != null) pendingPiece = Number(data.pending.piece);
@@ -1566,6 +1641,10 @@ async function postAction(body) {
       if (data.piece_count != null) pieceCount = Number(data.piece_count) || pieceCount;
       if (Array.isArray(data.pieces)) pieces = data.pieces;
       openPieceSelectModal();
+    }
+    if (data && DOME_ONLY_ERRORS.has(data.error) && DOME_I18N) {
+      warn(DOME_I18N.msg(data, { tank: pendingTank }));
+      return null;
     }
     warn((data && data.message) || 'Action failed.');
     return null;
@@ -1634,8 +1713,18 @@ async function consumeScanResult(data) {
     focusScanInput();
     return;
   }
+  if (data.action === 'dome_install_select') {
+    closePieceSelectModal();
+    domeInstallMode = true;
+    if (data.tank_number) pendingTank = data.tank_number;
+    if (data.piece_number != null) pendingPiece = Number(data.piece_number);
+    renderUi();
+    openDomePickModal(data);
+    return;
+  }
   if (data.action === 'team_assigned') {
     closePieceSelectModal();
+    domeInstallMode = false;
     pendingTank = null;
     pendingPiece = null;
     resumablePhase = null;
@@ -1686,6 +1775,7 @@ async function consumeScanResult(data) {
     resumablePhase = null;
     tankReworkRequired = false;
     latestFailureNote = null;
+    domeInstallMode = false;
     warn(
       data.confirmation_line ||
         data.message ||
@@ -1709,6 +1799,7 @@ async function consumeScanResult(data) {
     pendingConfirmer = null;
     tankReworkRequired = false;
     latestFailureNote = null;
+    domeInstallMode = false;
     warn(
       data.confirmation_line ||
         data.message ||
@@ -1720,6 +1811,7 @@ async function consumeScanResult(data) {
     return;
   }
   if (data.action === 'switch_tank') {
+    domeInstallMode = false;
     // Selection only — keep other open sessions running; just focus this tank+piece.
     if (Array.isArray(data.open_sessions)) openSessions = data.open_sessions;
     if (Array.isArray(data.tank_open_sessions)) tankOpenSessions = data.tank_open_sessions;
@@ -1764,6 +1856,7 @@ async function consumeScanResult(data) {
     if (data.piece_count != null) pieceCount = Number(data.piece_count) || pieces.length;
     if (data.pending && data.pending.tank) pendingTank = data.pending.tank;
     pendingPiece = data.piece_number != null ? Number(data.piece_number) : pendingPiece;
+    domeInstallMode = data.dome_install_mode === true;
     if (Array.isArray(data.open_sessions)) openSessions = data.open_sessions;
     if (Array.isArray(data.tank_open_sessions)) tankOpenSessions = data.tank_open_sessions;
     else if (pendingTank) {
@@ -1781,8 +1874,10 @@ async function consumeScanResult(data) {
     pendingTank = data.pending ? data.pending.tank : pendingTank;
     pendingPiece = data.pending && data.pending.piece != null ? Number(data.pending.piece) : null;
     resumablePhase = data.resumable_phase || null;
+    domeInstallMode = data.dome_install_mode === true;
     tankReworkRequired =
-      data.rework_required === true || String(data.tank_status || '').toLowerCase() === 'rework_required';
+      !domeInstallMode &&
+      (data.rework_required === true || String(data.tank_status || '').toLowerCase() === 'rework_required');
     latestFailureNote =
       data.latest_failure_note ||
       (data.latest_test_failure && data.latest_test_failure.failure_note) ||
@@ -1796,6 +1891,19 @@ async function consumeScanResult(data) {
       tankOpenSessions = openSessions.filter(
         (s) => String(s.tank_number || '').toUpperCase() === tankNorm
       );
+    }
+    if (domeInstallMode) {
+      // Dome Install is tank-level: no Select Piece popup.
+      closePieceSelectModal();
+      pendingPiece = null;
+      domeInstallInProgress = data.dome_install_in_progress || null;
+      warn(
+        domeInstallInProgress
+          ? domeTr('fdi.inProgress', { tank: pendingTank, dome: domeInstallInProgress.dome_number })
+          : domeTr('fdi.tapDomeInstall', { tank: pendingTank })
+      );
+      renderUi();
+      return;
     }
     warn(data.message || `Tank ${pendingTank} selected.`);
     renderUi();
@@ -1833,6 +1941,7 @@ async function consumeScanResult(data) {
     resumablePhase = null;
     tankReworkRequired = false;
     latestFailureNote = null;
+    domeInstallMode = false;
     showFinishBanner(data.confirmation_line || 'Tank released to Assembly');
     await loadConfig();
     return;
@@ -1850,6 +1959,261 @@ async function consumeScanResult(data) {
   }
   await loadConfig();
 }
+
+/* ---------- Phase 3: Dome Install ---------- */
+
+const domeEls = {
+  panel: document.getElementById('domeInstallPanel'),
+  pickModal: document.getElementById('domePickModal'),
+  pickSub: document.getElementById('domePickSub'),
+  pickSearch: document.getElementById('domePickSearch'),
+  pickDiameters: document.getElementById('domePickDiameters'),
+  pickList: document.getElementById('domePickList'),
+  pickEmpty: document.getElementById('domePickEmpty'),
+  pickConfirm: document.getElementById('domePickConfirm'),
+  pickCancel: document.getElementById('btnDomePickCancel'),
+  pickStart: document.getElementById('btnDomePickStart'),
+  confirmModal: document.getElementById('domeConfirmModal'),
+  confirmTitle: document.getElementById('domeConfirmTitle'),
+  confirmText: document.getElementById('domeConfirmText'),
+  confirmCancel: document.getElementById('btnDomeConfirmCancel'),
+  confirmOk: document.getElementById('btnDomeConfirmOk'),
+};
+
+function domeDescribe(d) {
+  return DOME_I18N ? DOME_I18N.describe(d) : '';
+}
+
+function showDomeModal(el) {
+  if (!el) return;
+  blurScanInputs();
+  el.hidden = false;
+  el.classList.add('show');
+}
+
+function hideDomeModal(el) {
+  if (!el) return;
+  el.classList.remove('show');
+  el.hidden = true;
+}
+
+function renderDomeInstallPanel() {
+  const panel = domeEls.panel;
+  if (!panel) return;
+  panel.innerHTML = '';
+  const rows = (domeInstalls || []).filter((i) => i && i.status === 'in_progress');
+  panel.hidden = rows.length === 0;
+  for (const inst of rows) {
+    const vars = { dome: inst.dome_number, tank: inst.tank_number, piece: inst.piece_number };
+    const ended = !['running', 'stopped'].includes(String(inst.session_status || ''));
+    const row = document.createElement('div');
+    row.className = 'dome-install-row' + (ended ? ' is-ended' : '');
+    const p = document.createElement('p');
+    p.textContent = domeTr(ended ? 'fdi.bannerEnded' : 'fdi.banner', vars);
+    row.appendChild(p);
+    const finish = document.createElement('button');
+    finish.type = 'button';
+    finish.className = 'btn-primary btn-touch';
+    finish.textContent = domeTr('fdi.finish');
+    finish.addEventListener('mousedown', (e) => e.preventDefault());
+    finish.addEventListener('click', () => void domeInstallAction('finish', inst));
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'btn-secondary btn-touch';
+    cancel.textContent = domeTr('fdi.cancelInstall');
+    cancel.addEventListener('mousedown', (e) => e.preventDefault());
+    cancel.addEventListener('click', () => void domeInstallAction('cancel', inst));
+    row.appendChild(finish);
+    row.appendChild(cancel);
+    panel.appendChild(row);
+  }
+}
+
+function openDomePickModal(data) {
+  domePick = {
+    tank_id: data.tank_id,
+    tank_number: data.tank_number,
+    piece_number: data.piece_number,
+    domes: Array.isArray(data.domes) ? data.domes : [],
+    diameters: Array.isArray(data.diameters) && data.diameters.length ? data.diameters : [4, 6, 8, 10, 12],
+    diameter: null,
+    selectedId: null,
+  };
+  if (domeEls.pickSearch) domeEls.pickSearch.value = '';
+  renderDomePick();
+  showDomeModal(domeEls.pickModal);
+}
+
+function closeDomePickModal() {
+  domePick = null;
+  hideDomeModal(domeEls.pickModal);
+}
+
+function renderDomePick() {
+  if (!domePick) return;
+  const vars = { tank: domePick.tank_number, piece: domePick.piece_number };
+  if (domeEls.pickSub) domeEls.pickSub.textContent = domeTr('fdi.sub', vars);
+  if (domeEls.pickDiameters) {
+    domeEls.pickDiameters.innerHTML = '';
+    const choices = [null, ...domePick.diameters];
+    for (const dia of choices) {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'dome-chip' + (domePick.diameter === dia ? ' is-on' : '');
+      chip.textContent = dia == null ? domeTr('dome.all') : `${dia}'`;
+      chip.addEventListener('click', () => {
+        domePick.diameter = dia;
+        renderDomePick();
+      });
+      domeEls.pickDiameters.appendChild(chip);
+    }
+  }
+  const q = String((domeEls.pickSearch && domeEls.pickSearch.value) || '').trim().toUpperCase();
+  const list = domePick.domes.filter(
+    (d) =>
+      (domePick.diameter == null || Number(d.diameter_ft) === Number(domePick.diameter)) &&
+      (!q || String(d.dome_number || '').toUpperCase().includes(q))
+  );
+  if (domePick.selectedId != null && !list.some((d) => Number(d.id) === Number(domePick.selectedId))) {
+    domePick.selectedId = null;
+  }
+  if (domeEls.pickList) {
+    domeEls.pickList.innerHTML = '';
+    for (const d of list) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'dome-pick-item' + (Number(d.id) === Number(domePick.selectedId) ? ' is-on' : '');
+      const strong = document.createElement('strong');
+      strong.textContent = d.dome_number;
+      const span = document.createElement('span');
+      span.textContent = domeDescribe(d);
+      btn.appendChild(strong);
+      btn.appendChild(span);
+      btn.addEventListener('click', () => {
+        domePick.selectedId = d.id;
+        renderDomePick();
+      });
+      domeEls.pickList.appendChild(btn);
+    }
+  }
+  if (domeEls.pickEmpty) domeEls.pickEmpty.hidden = list.length > 0;
+  const selected = domePick.domes.find((d) => Number(d.id) === Number(domePick.selectedId)) || null;
+  if (domeEls.pickConfirm) {
+    domeEls.pickConfirm.hidden = !selected;
+    domeEls.pickConfirm.textContent = selected
+      ? domeTr('fdi.confirmText', { ...vars, dome: selected.dome_number, desc: domeDescribe(selected) })
+      : '';
+  }
+  if (domeEls.pickStart) domeEls.pickStart.hidden = !selected;
+}
+
+async function startDomeInstall() {
+  if (!domePick || domePick.selectedId == null || domeActionBusy) return;
+  domeActionBusy = true;
+  const pick = domePick;
+  try {
+    const data = await postAction({
+      action: 'dome_install_start',
+      tank_id: pick.tank_id,
+      tank_number: pick.tank_number,
+      piece_number: pick.piece_number,
+      dome_id: pick.selectedId,
+    });
+    if (!data) {
+      if (domePick === pick) {
+        const { res, data: avail } = await api(`${API}/domes/available`, { cache: 'no-store' });
+        if (res.ok && avail && Array.isArray(avail.domes) && domePick === pick) {
+          pick.domes = avail.domes;
+          renderDomePick();
+        }
+      }
+      return;
+    }
+    closeDomePickModal();
+    domeInstallMode = false;
+    pendingTank = data.tank_number || pick.tank_number;
+    pendingPiece = data.piece_number != null ? Number(data.piece_number) : pick.piece_number;
+    applyAssignment(data);
+    if (Array.isArray(data.open_sessions)) openSessions = data.open_sessions;
+    if (Array.isArray(data.tank_open_sessions)) tankOpenSessions = data.tank_open_sessions;
+    warn(DOME_I18N ? DOME_I18N.msg(data) : data.message);
+    await loadConfig();
+    focusScanInput();
+  } finally {
+    domeActionBusy = false;
+  }
+}
+
+function confirmDome(title, text) {
+  return new Promise((resolve) => {
+    if (!domeEls.confirmModal) {
+      resolve(window.confirm(text));
+      return;
+    }
+    domeConfirmResolve = resolve;
+    domeEls.confirmTitle.textContent = title;
+    domeEls.confirmText.textContent = text;
+    showDomeModal(domeEls.confirmModal);
+  });
+}
+
+function settleDomeConfirm(value) {
+  hideDomeModal(domeEls.confirmModal);
+  const resolve = domeConfirmResolve;
+  domeConfirmResolve = null;
+  if (resolve) resolve(value);
+}
+
+async function domeInstallAction(kind, inst) {
+  if (domeActionBusy) return;
+  const vars = { dome: inst.dome_number, tank: inst.tank_number, piece: inst.piece_number };
+  const ok = await confirmDome(
+    domeTr(kind === 'finish' ? 'fdi.finishTitle' : 'fdi.cancelTitle'),
+    domeTr(kind === 'finish' ? 'fdi.finishText' : 'fdi.cancelText', vars)
+  );
+  if (!ok) {
+    focusScanInput();
+    return;
+  }
+  domeActionBusy = true;
+  try {
+    const data = await postAction({
+      action: kind === 'finish' ? 'dome_install_finish' : 'dome_install_cancel',
+      installation_id: inst.installation_id,
+    });
+    if (data) {
+      const tankNorm = String(inst.tank_number || '').toUpperCase();
+      if (String(pendingTank || '').toUpperCase() === tankNorm) {
+        pendingTank = null;
+        pendingPiece = null;
+        resumablePhase = null;
+      }
+      domeInstallMode = false;
+      if (kind === 'finish') showFinishBanner(DOME_I18N ? DOME_I18N.msg(data, vars) : data.message);
+      else warn(DOME_I18N ? DOME_I18N.msg(data, vars) : data.message);
+    }
+    await loadConfig();
+    focusScanInput();
+  } finally {
+    domeActionBusy = false;
+  }
+}
+
+if (domeEls.pickSearch) domeEls.pickSearch.addEventListener('input', () => renderDomePick());
+if (domeEls.pickCancel) {
+  domeEls.pickCancel.addEventListener('click', () => {
+    closeDomePickModal();
+    focusScanInput();
+  });
+}
+if (domeEls.pickStart) domeEls.pickStart.addEventListener('click', () => void startDomeInstall());
+if (domeEls.confirmCancel) domeEls.confirmCancel.addEventListener('click', () => settleDomeConfirm(false));
+if (domeEls.confirmOk) domeEls.confirmOk.addEventListener('click', () => settleDomeConfirm(true));
+window.addEventListener('factory-lang-change', () => {
+  renderDomeInstallPanel();
+  renderDomePick();
+  if (domeInstallMode) renderUi();
+});
 
 async function handleScan(raw) {
   warn('');
@@ -2044,7 +2408,8 @@ document.addEventListener('keydown', (e) => {
     e.target === els.noteBody ||
     e.target === els.downtimeNote ||
     e.target === els.downtimeReason ||
-    e.target === els.resolveQaQcNote
+    e.target === els.resolveQaQcNote ||
+    e.target === domeEls.pickSearch
   ) {
     return;
   }

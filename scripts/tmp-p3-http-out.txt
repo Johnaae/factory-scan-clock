@@ -1,0 +1,182 @@
+DB host: localhost
+DB name: factory_scan_clock
+[db] INTERNAL_LAN_MODE=true — local PostgreSQL, SSL off
+== Setup (ZZP3 test rows)
+PASS  create machine with workflow=dome
+PASS  create test Fabrication machine
+PASS  create test Assembly machine
+PASS  create 2 Dome + Fabrication + Assembly test teams
+== Dome kiosk routing
+PASS  dome machine URL serves dome-kiosk.html
+PASS  winding API rejects dome kiosk session
+PASS  GET /api/kiosk/dome/config
+PASS  diameters + types offered
+PASS  create dome needs a team on the kiosk
+PASS  Fabrication team rejected on Dome kiosk
+== Multiple Dome teams on one kiosk (Assembly presence)
+PASS  Dome team A scan adds its card
+PASS  Dome team B scan adds a second card
+PASS  rescanning team A focuses it (no duplicate card)
+PASS  config: 2 team cards side by side
+PASS  each card shows its default roster on shift
+PASS  scan "STOP:LUNCH" -> use the team-card buttons (Assembly rule)
+PASS  scan "LUNCH" -> use the team-card buttons (Assembly rule)
+PASS  scan "RESUME" -> use the team-card buttons (Assembly rule)
+PASS  scan "END_SHIFT" -> use the team-card buttons (Assembly rule)
+== Assembly / Dome moves stay separate
+PASS  Assembly kiosk: Assembly team scanned
+PASS  Dome kiosk cannot pull an Assembly-team employee
+PASS  Assembly kiosk cannot pull a Dome-team employee
+PASS  D5 still only on Dome team B
+== Create Dome (team employees assigned automatically)
+PASS  diameter 7' rejected
+PASS  type Oil rejected
+PASS  two teams on the kiosk: Create Dome needs the selected team
+PASS  manual pick of a Fabrication-only employee rejected
+PASS  create dome A (Petro 8') for team A — no fabricator pick, team roster assigned
+PASS  duplicate dome number (case/space-insensitive) rejected
+PASS  create dome B (Water 10') for team B
+PASS  create dome C for team A
+PASS  each team card lists its own domes
+== Teams work different domes at the same time
+PASS  cannot complete a dome that never started
+PASS  team A starts dome A
+PASS  team B starts dome B at the same time
+PASS  team A cannot run a second dome at once
+PASS  labor: dome A = team A (3), dome B = team B (2)
+== Employee scan moves to the selected team (labor follows, no duplicate)
+PASS  D3 scanned with team B selected: moved A -> B and joined dome B
+PASS  D3 now in dome B labor only
+PASS  D3 on team B only (temporary move)
+PASS  dome A labor ends exactly when dome B labor starts (no overlap, no gap)
+PASS  D3 default team (team_members) unchanged
+PASS  rescan on the same team: no duplicate
+PASS  dome A keeps running with 2, dome B now 3
+== Employee Out / move-out stops an empty dome
+PASS  Employee Out D4: labor closed, dome B continues
+PASS  D3 moved back to team A and rejoins dome A
+PASS  dome A 3, dome B 1 (D5)
+== Lunch / Resume per team card
+PASS  Lunch on team A pauses only dome A
+PASS  team B keeps working through team A lunch
+PASS  only card A shows Lunch
+PASS  D5 moved to team A on lunch: dome B left empty -> stopped
+PASS  dome B stopped (Start Dome to continue)
+PASS  team on lunch cannot start a dome
+PASS  Resume on team A restarts dome A
+PASS  Resume = prior workers still on the team + D5 who joined during lunch
+PASS  Resume on a team not on lunch is harmless
+PASS  team B has nobody on shift -> cannot start dome B
+== Stop Dome
+PASS  Stop Dome A
+PASS  team A switches to dome C
+PASS  Stop Dome C
+PASS  team A back on dome A
+== No double-counted labor
+PASS  no employee has overlapping dome labor intervals
+PASS  no dome has overlapping production sessions
+== End Shift per team (Assembly rule)
+PASS  End Shift team A pauses dome A
+PASS  dome A paused for the next shift
+PASS  card A closed, team B card stays
+PASS  team A's domes listed under Other Domes
+PASS  temporary moves into team A ended (D3, D5)
+PASS  default-roster shift rows stay (Assembly End Shift behavior)
+PASS  End Shift team B
+PASS  no cards left, assignment cleared (cards do not come back)
+== Next shift: default rosters return, old moves expire
+PASS  team B scanned again
+PASS  D5 back on default team B
+PASS  D1 moved to team B
+PASS  a move from an earlier day expires (new workday)
+PASS  End Shift team B
+== Dome Complete -> inventory
+PASS  Dome Complete requires weight
+PASS  negative weight rejected
+PASS  dome A completed -> available, 1234.5 lb
+PASS  cannot complete twice
+PASS  dome A labor closed
+== Fabrication Dome Install
+PASS  create two test tanks
+PASS  dome API rejects Fabrication kiosk session
+PASS  normal Fabrication tank still goes to Select Piece (unchanged)
+PASS  tank scan on Ready for Dome Install -> tank-level Dome Install (no Select Piece)
+PASS  config keeps the tank in Dome Install mode (reload / poll)
+PASS  other phases blocked on dome tank
+PASS  FAB Tank Complete blocked on dome tank (no auto-complete)
+PASS  Dome Install (no piece) opens picker: completed dome A listed, in-production B not
+PASS  diameter filter (10') excludes 8' dome A
+PASS  double-tap Start Install: exactly one install
+PASS  reserved dome cannot go on another tank
+PASS  dome A reserved while installing
+PASS  winding config lists the running Dome Install
+PASS  config: running install shown as production, not the Dome Install picker
+PASS  one Dome Install per tank
+PASS  phase change blocked during Dome Install
+PASS  part_complete blocked during Dome Install
+PASS  manager Complete Tank blocked while install in progress
+PASS  FAB Lunch pauses the install session
+PASS  FAB Resume restarts it
+PASS  FAB End Shift keeps tank Ready for Dome Install
+PASS  install stays in progress across End Shift
+PASS  RESUME after End Shift reopens the Dome Install
+PASS  new install session running
+PASS  Finish Install
+PASS  Finish Install: tank status = dome_installed, NOT completed/archived
+PASS  dome A installed on the tank
+PASS  install labor kept as 2 Fabrication sessions (before/after End Shift)
+PASS  install sessions carry the Fabrication team labor
+PASS  after Finish Install the kiosk returns to Scan Tank
+PASS  rescan: Dome Installed, waiting for next phase (no phase started)
+PASS  PHASE:WIND on a Dome Installed tank is refused (no next phase invented)
+PASS  PHASE:TANK_COMPLETE on a Dome Installed tank is refused (no next phase invented)
+PASS  PHASE:DOME_INSTALL on a Dome Installed tank is refused (no next phase invented)
+PASS  no session opened on the Dome Installed tank
+PASS  Dome Installed tank stays in the Active tanks list
+PASS  Dome Installed tank is NOT in the Completed list
+PASS  tank report status: Dome Installed
+PASS  manager Edit (blank status) keeps Dome Installed
+PASS  manager Edit (status=dome_installed) keeps Dome Installed
+PASS  complete dome B
+PASS  second dome on the same tank refused (tank-level)
+PASS  tank 2 scan -> Dome Install (no piece)
+PASS  start install of dome B on tank 2
+PASS  rescan during install: shows the install in progress
+PASS  Cancel Install returns dome B to available
+== Dome Install on a tank that went through rework and passed QA/QC
+PASS  available dome for the rework tank
+PASS  rework tank (QA/QC passed) -> tank-level Dome Install, not rework
+PASS  rework tank: dome picker opens
+PASS  rework tank: Start Install
+PASS  rework tank: status Dome Installed, not completed
+PASS  rework tank: Finish Install records the dome on the tank
+== Manager Dome Inventory
+PASS  search by dome number
+PASS  status filter: installed
+PASS  type + diameter filters
+PASS  manual add requires weight
+PASS  manual add rejects duplicate number
+PASS  manual add (number + diameter + weight) -> available
+PASS  manual dome has no manufacturing time/history
+PASS  dome details: install history, per-employee labor, events
+PASS  manager edits a dome (audited)
+PASS  Dome Inventory API requires manager login
+== Tank report + list
+PASS  tank report shows installed dome
+PASS  tank list includes dome summary
+== Complete Tank gate
+PASS  Complete Tank succeeds with an installed dome
+PASS  manual Complete Tank from Dome Installed archives it
+PASS  Complete Tank without a dome is blocked (override allowed)
+PASS  too-short override reason rejected
+PASS  blocked completion rolled back (status unchanged)
+PASS  override with reason completes the tank
+PASS  override reason recorded with manager name
+== Dome labor in unified employee hours
+PASS  dome labor participant intervals recorded for D1
+== Cleanup (deactivate test machines/teams only; rows are kept)
+PASS  complete dome C (no open dome work left on the test machine)
+PASS  dome machine with history is deactivated, not deleted
+   test stamp 991479: domes ZZP3-D991479A, ZZP3-D991479B, ZZP3-E991479C, ZZP3-M991479; tanks ZZP3T991479, ZZP3U991479
+
+ALL CHECKS PASSED

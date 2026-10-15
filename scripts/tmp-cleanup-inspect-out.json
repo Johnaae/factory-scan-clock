@@ -1,0 +1,2221 @@
+{
+  "connection": {
+    "host": "localhost",
+    "port": "5432",
+    "database": "factory_scan_clock",
+    "user": "postgres",
+    "is_neon": false,
+    "is_local": true,
+    "internal_lan_mode": "true"
+  },
+  "server": {
+    "db": "factory_scan_clock",
+    "addr": "::1/128",
+    "port": 5432,
+    "version": "PostgreSQL 18.4 on x86_64-windows, compiled by msvc-19.44.35226, 64-bit"
+  },
+  "table_counts": {
+    "alert_email_recipients": 2,
+    "alert_events": 12,
+    "assembly_kiosk_teams": 15,
+    "downtime_intervals": 0,
+    "employee_team_memberships": 59,
+    "employees": 44,
+    "job_finish_events": 17,
+    "kiosk_sync_events": 16,
+    "machine_session_edits": 1,
+    "machine_sessions": 34,
+    "machines": 24,
+    "part_complete_events": 25,
+    "production_notes": 2,
+    "scan_logs": 281,
+    "session": 7,
+    "session_team_members": 97,
+    "stage_labor_participants": 37,
+    "stage_labor_sessions": 20,
+    "tank_admin_audit": 80,
+    "tank_admin_phase2_audit": 9,
+    "tank_pieces": 12,
+    "tanks": 43,
+    "team_members": 17,
+    "teams": 27,
+    "test_attempt_notes": 4,
+    "test_attempts": 62,
+    "users": 9
+  },
+  "foreign_keys": [
+    {
+      "child_table": "employee_team_memberships",
+      "child_column": "employee_id",
+      "parent_table": "employees",
+      "parent_column": "id",
+      "delete_rule": "CASCADE"
+    },
+    {
+      "child_table": "job_finish_events",
+      "child_column": "employee_id",
+      "parent_table": "employees",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "part_complete_events",
+      "child_column": "confirmed_by_employee_id",
+      "parent_table": "employees",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "scan_logs",
+      "child_column": "employee_id",
+      "parent_table": "employees",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "session_team_members",
+      "child_column": "employee_id",
+      "parent_table": "employees",
+      "parent_column": "id",
+      "delete_rule": "CASCADE"
+    },
+    {
+      "child_table": "stage_labor_participants",
+      "child_column": "employee_id",
+      "parent_table": "employees",
+      "parent_column": "id",
+      "delete_rule": "RESTRICT"
+    },
+    {
+      "child_table": "stage_labor_sessions",
+      "child_column": "stopped_by_employee_id",
+      "parent_table": "employees",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "stage_labor_sessions",
+      "child_column": "started_by_employee_id",
+      "parent_table": "employees",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "team_members",
+      "child_column": "employee_id",
+      "parent_table": "employees",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "team_members",
+      "child_column": "employee_id",
+      "parent_table": "employees",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "test_attempt_notes",
+      "child_column": "author_employee_id",
+      "parent_table": "employees",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "test_attempts",
+      "child_column": "tester_employee_id",
+      "parent_table": "employees",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "alert_events",
+      "child_column": "session_id",
+      "parent_table": "machine_sessions",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "downtime_intervals",
+      "child_column": "session_id",
+      "parent_table": "machine_sessions",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "machine_session_edits",
+      "child_column": "session_id",
+      "parent_table": "machine_sessions",
+      "parent_column": "id",
+      "delete_rule": "CASCADE"
+    },
+    {
+      "child_table": "part_complete_events",
+      "child_column": "session_id",
+      "parent_table": "machine_sessions",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "production_notes",
+      "child_column": "session_id",
+      "parent_table": "machine_sessions",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "session_team_members",
+      "child_column": "session_id",
+      "parent_table": "machine_sessions",
+      "parent_column": "id",
+      "delete_rule": "CASCADE"
+    },
+    {
+      "child_table": "alert_events",
+      "child_column": "machine_id",
+      "parent_table": "machines",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "assembly_kiosk_teams",
+      "child_column": "machine_id",
+      "parent_table": "machines",
+      "parent_column": "id",
+      "delete_rule": "CASCADE"
+    },
+    {
+      "child_table": "downtime_intervals",
+      "child_column": "machine_id",
+      "parent_table": "machines",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "machine_sessions",
+      "child_column": "machine_id",
+      "parent_table": "machines",
+      "parent_column": "id",
+      "delete_rule": "RESTRICT"
+    },
+    {
+      "child_table": "production_notes",
+      "child_column": "machine_id",
+      "parent_table": "machines",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "stage_labor_sessions",
+      "child_column": "machine_id",
+      "parent_table": "machines",
+      "parent_column": "id",
+      "delete_rule": "RESTRICT"
+    },
+    {
+      "child_table": "tank_pieces",
+      "child_column": "machine_id",
+      "parent_table": "machines",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "tanks",
+      "child_column": "wip_machine_id",
+      "parent_table": "machines",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "tanks",
+      "child_column": "wip_machine_id",
+      "parent_table": "machines",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "test_attempts",
+      "child_column": "machine_id",
+      "parent_table": "machines",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "stage_labor_participants",
+      "child_column": "session_id",
+      "parent_table": "stage_labor_sessions",
+      "parent_column": "id",
+      "delete_rule": "CASCADE"
+    },
+    {
+      "child_table": "test_attempts",
+      "child_column": "labor_session_id",
+      "parent_table": "stage_labor_sessions",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "alert_events",
+      "child_column": "tank_id",
+      "parent_table": "tanks",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "downtime_intervals",
+      "child_column": "tank_id",
+      "parent_table": "tanks",
+      "parent_column": "id",
+      "delete_rule": "CASCADE"
+    },
+    {
+      "child_table": "job_finish_events",
+      "child_column": "tank_id",
+      "parent_table": "tanks",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "machine_sessions",
+      "child_column": "tank_id",
+      "parent_table": "tanks",
+      "parent_column": "id",
+      "delete_rule": "RESTRICT"
+    },
+    {
+      "child_table": "part_complete_events",
+      "child_column": "tank_id",
+      "parent_table": "tanks",
+      "parent_column": "id",
+      "delete_rule": "RESTRICT"
+    },
+    {
+      "child_table": "production_notes",
+      "child_column": "tank_id",
+      "parent_table": "tanks",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "stage_labor_sessions",
+      "child_column": "tank_id",
+      "parent_table": "tanks",
+      "parent_column": "id",
+      "delete_rule": "RESTRICT"
+    },
+    {
+      "child_table": "tank_pieces",
+      "child_column": "tank_id",
+      "parent_table": "tanks",
+      "parent_column": "id",
+      "delete_rule": "CASCADE"
+    },
+    {
+      "child_table": "test_attempt_notes",
+      "child_column": "tank_id",
+      "parent_table": "tanks",
+      "parent_column": "id",
+      "delete_rule": "RESTRICT"
+    },
+    {
+      "child_table": "test_attempts",
+      "child_column": "tank_id",
+      "parent_table": "tanks",
+      "parent_column": "id",
+      "delete_rule": "RESTRICT"
+    },
+    {
+      "child_table": "session_team_members",
+      "child_column": "team_member_id",
+      "parent_table": "team_members",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "alert_events",
+      "child_column": "team_id",
+      "parent_table": "teams",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "assembly_kiosk_teams",
+      "child_column": "team_id",
+      "parent_table": "teams",
+      "parent_column": "id",
+      "delete_rule": "CASCADE"
+    },
+    {
+      "child_table": "downtime_intervals",
+      "child_column": "team_id",
+      "parent_table": "teams",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "employee_team_memberships",
+      "child_column": "team_id",
+      "parent_table": "teams",
+      "parent_column": "id",
+      "delete_rule": "CASCADE"
+    },
+    {
+      "child_table": "machine_sessions",
+      "child_column": "team_id",
+      "parent_table": "teams",
+      "parent_column": "id",
+      "delete_rule": "RESTRICT"
+    },
+    {
+      "child_table": "machines",
+      "child_column": "assigned_team_id",
+      "parent_table": "teams",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "machines",
+      "child_column": "assigned_team_id",
+      "parent_table": "teams",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "part_complete_events",
+      "child_column": "team_id",
+      "parent_table": "teams",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "production_notes",
+      "child_column": "team_id",
+      "parent_table": "teams",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "stage_labor_participants",
+      "child_column": "team_id",
+      "parent_table": "teams",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "stage_labor_sessions",
+      "child_column": "team_id",
+      "parent_table": "teams",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "tank_pieces",
+      "child_column": "team_id",
+      "parent_table": "teams",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "tanks",
+      "child_column": "wip_team_id",
+      "parent_table": "teams",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "tanks",
+      "child_column": "wip_team_id",
+      "parent_table": "teams",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "team_members",
+      "child_column": "team_id",
+      "parent_table": "teams",
+      "parent_column": "id",
+      "delete_rule": "CASCADE"
+    },
+    {
+      "child_table": "test_attempts",
+      "child_column": "team_id",
+      "parent_table": "teams",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    },
+    {
+      "child_table": "test_attempt_notes",
+      "child_column": "test_attempt_id",
+      "parent_table": "test_attempts",
+      "parent_column": "id",
+      "delete_rule": "CASCADE"
+    },
+    {
+      "child_table": "machine_session_edits",
+      "child_column": "edited_by_user_id",
+      "parent_table": "users",
+      "parent_column": "id",
+      "delete_rule": "SET NULL"
+    }
+  ],
+  "id_columns": [
+    {
+      "table_name": "alert_events",
+      "column_name": "machine_id"
+    },
+    {
+      "table_name": "alert_events",
+      "column_name": "session_id"
+    },
+    {
+      "table_name": "alert_events",
+      "column_name": "tank_id"
+    },
+    {
+      "table_name": "alert_events",
+      "column_name": "team_id"
+    },
+    {
+      "table_name": "assembly_kiosk_teams",
+      "column_name": "machine_id"
+    },
+    {
+      "table_name": "assembly_kiosk_teams",
+      "column_name": "team_id"
+    },
+    {
+      "table_name": "downtime_intervals",
+      "column_name": "machine_id"
+    },
+    {
+      "table_name": "downtime_intervals",
+      "column_name": "session_id"
+    },
+    {
+      "table_name": "downtime_intervals",
+      "column_name": "tank_id"
+    },
+    {
+      "table_name": "downtime_intervals",
+      "column_name": "team_id"
+    },
+    {
+      "table_name": "employee_team_memberships",
+      "column_name": "employee_id"
+    },
+    {
+      "table_name": "employee_team_memberships",
+      "column_name": "team_id"
+    },
+    {
+      "table_name": "job_finish_events",
+      "column_name": "employee_id"
+    },
+    {
+      "table_name": "job_finish_events",
+      "column_name": "tank_id"
+    },
+    {
+      "table_name": "machine_session_edits",
+      "column_name": "session_id"
+    },
+    {
+      "table_name": "machine_session_edits",
+      "column_name": "tank_id"
+    },
+    {
+      "table_name": "machine_sessions",
+      "column_name": "machine_id"
+    },
+    {
+      "table_name": "machine_sessions",
+      "column_name": "tank_id"
+    },
+    {
+      "table_name": "machine_sessions",
+      "column_name": "team_id"
+    },
+    {
+      "table_name": "machines",
+      "column_name": "active_tank_id"
+    },
+    {
+      "table_name": "machines",
+      "column_name": "assigned_team_id"
+    },
+    {
+      "table_name": "part_complete_events",
+      "column_name": "session_id"
+    },
+    {
+      "table_name": "part_complete_events",
+      "column_name": "tank_id"
+    },
+    {
+      "table_name": "part_complete_events",
+      "column_name": "team_id"
+    },
+    {
+      "table_name": "production_notes",
+      "column_name": "machine_id"
+    },
+    {
+      "table_name": "production_notes",
+      "column_name": "session_id"
+    },
+    {
+      "table_name": "production_notes",
+      "column_name": "tank_id"
+    },
+    {
+      "table_name": "production_notes",
+      "column_name": "team_id"
+    },
+    {
+      "table_name": "scan_logs",
+      "column_name": "employee_id"
+    },
+    {
+      "table_name": "session_team_members",
+      "column_name": "employee_id"
+    },
+    {
+      "table_name": "session_team_members",
+      "column_name": "session_id"
+    },
+    {
+      "table_name": "stage_labor_participants",
+      "column_name": "employee_id"
+    },
+    {
+      "table_name": "stage_labor_participants",
+      "column_name": "session_id"
+    },
+    {
+      "table_name": "stage_labor_participants",
+      "column_name": "team_id"
+    },
+    {
+      "table_name": "stage_labor_sessions",
+      "column_name": "machine_id"
+    },
+    {
+      "table_name": "stage_labor_sessions",
+      "column_name": "tank_id"
+    },
+    {
+      "table_name": "stage_labor_sessions",
+      "column_name": "team_id"
+    },
+    {
+      "table_name": "tank_admin_audit",
+      "column_name": "tank_id"
+    },
+    {
+      "table_name": "tank_admin_phase2_audit",
+      "column_name": "tank_id"
+    },
+    {
+      "table_name": "tank_pieces",
+      "column_name": "machine_id"
+    },
+    {
+      "table_name": "tank_pieces",
+      "column_name": "tank_id"
+    },
+    {
+      "table_name": "tank_pieces",
+      "column_name": "team_id"
+    },
+    {
+      "table_name": "tanks",
+      "column_name": "assembly_machine_id"
+    },
+    {
+      "table_name": "tanks",
+      "column_name": "assembly_team_id"
+    },
+    {
+      "table_name": "tanks",
+      "column_name": "qa_machine_id"
+    },
+    {
+      "table_name": "tanks",
+      "column_name": "qa_user_id"
+    },
+    {
+      "table_name": "tanks",
+      "column_name": "testing_machine_id"
+    },
+    {
+      "table_name": "tanks",
+      "column_name": "wip_machine_id"
+    },
+    {
+      "table_name": "tanks",
+      "column_name": "wip_team_id"
+    },
+    {
+      "table_name": "team_members",
+      "column_name": "employee_id"
+    },
+    {
+      "table_name": "team_members",
+      "column_name": "team_id"
+    },
+    {
+      "table_name": "test_attempt_notes",
+      "column_name": "tank_id"
+    },
+    {
+      "table_name": "test_attempt_notes",
+      "column_name": "test_attempt_id"
+    },
+    {
+      "table_name": "test_attempts",
+      "column_name": "machine_id"
+    },
+    {
+      "table_name": "test_attempts",
+      "column_name": "parent_attempt_id"
+    },
+    {
+      "table_name": "test_attempts",
+      "column_name": "tank_id"
+    },
+    {
+      "table_name": "test_attempts",
+      "column_name": "team_id"
+    },
+    {
+      "table_name": "test_attempts",
+      "column_name": "tester_user_id"
+    }
+  ],
+  "machines": [
+    {
+      "id": "1",
+      "name": "Winding Station 01",
+      "code": "WS-01",
+      "kiosk_slug": "winding-station-01",
+      "active": 0,
+      "created_at": "2026-06-30T18:49:26.384Z",
+      "updated_at": "2026-09-18T23:02:31.107Z",
+      "barcode": null,
+      "sort_order": 0,
+      "assigned_team_id": null,
+      "assigned_team_day": null,
+      "assigned_team_at": null,
+      "active_tank_id": null,
+      "pin_hash": null,
+      "workflow": "winding"
+    },
+    {
+      "id": "2",
+      "name": "Winding Station 02",
+      "code": "WS-02",
+      "kiosk_slug": "winding-station-02",
+      "active": 0,
+      "created_at": "2026-06-30T18:49:26.384Z",
+      "updated_at": "2026-09-18T23:02:31.107Z",
+      "barcode": null,
+      "sort_order": 0,
+      "assigned_team_id": null,
+      "assigned_team_day": null,
+      "assigned_team_at": null,
+      "active_tank_id": null,
+      "pin_hash": null,
+      "workflow": "winding"
+    },
+    {
+      "id": "5",
+      "name": "Winding Machine 01",
+      "code": "WM-01",
+      "kiosk_slug": "winding-machine-01",
+      "active": 1,
+      "created_at": "2026-06-30T22:02:56.989Z",
+      "updated_at": "2026-06-30T22:39:56.872Z",
+      "barcode": "WM-01",
+      "sort_order": 1,
+      "assigned_team_id": "7",
+      "assigned_team_day": "2026-09-20",
+      "assigned_team_at": "2026-09-21T04:08:09.121Z",
+      "active_tank_id": null,
+      "pin_hash": "[set]",
+      "workflow": "winding"
+    },
+    {
+      "id": "6",
+      "name": "Winding Machine 02",
+      "code": "WM-02",
+      "kiosk_slug": "winding-machine-02",
+      "active": 1,
+      "created_at": "2026-06-30T22:02:56.989Z",
+      "updated_at": "2026-06-30T22:39:56.872Z",
+      "barcode": "WM-02",
+      "sort_order": 2,
+      "assigned_team_id": "11",
+      "assigned_team_day": "2026-09-03",
+      "assigned_team_at": "2026-09-03T17:03:21.990Z",
+      "active_tank_id": null,
+      "pin_hash": "[set]",
+      "workflow": "winding"
+    },
+    {
+      "id": "7",
+      "name": "Winding Machine 03",
+      "code": "WM-03",
+      "kiosk_slug": "winding-machine-03",
+      "active": 1,
+      "created_at": "2026-06-30T22:02:56.989Z",
+      "updated_at": "2026-06-30T22:39:56.872Z",
+      "barcode": "WM-03",
+      "sort_order": 3,
+      "assigned_team_id": null,
+      "assigned_team_day": null,
+      "assigned_team_at": null,
+      "active_tank_id": null,
+      "pin_hash": "[set]",
+      "workflow": "winding"
+    },
+    {
+      "id": "77",
+      "name": "Winding Machine 04",
+      "code": "winding-machine-04",
+      "kiosk_slug": "winding-machine-04",
+      "active": 1,
+      "created_at": "2026-09-03T20:24:57.573Z",
+      "updated_at": "2026-09-13T22:15:08.638Z",
+      "barcode": null,
+      "sort_order": 4,
+      "assigned_team_id": null,
+      "assigned_team_day": null,
+      "assigned_team_at": null,
+      "active_tank_id": null,
+      "pin_hash": "[set]",
+      "workflow": "winding"
+    },
+    {
+      "id": "94",
+      "name": "005",
+      "code": "005",
+      "kiosk_slug": "005",
+      "active": 1,
+      "created_at": "2026-09-09T18:06:42.274Z",
+      "updated_at": "2026-09-19T03:42:57.401Z",
+      "barcode": null,
+      "sort_order": 100,
+      "assigned_team_id": "101",
+      "assigned_team_day": "2026-09-19",
+      "assigned_team_at": "2026-09-19T17:04:24.606Z",
+      "active_tank_id": "231",
+      "pin_hash": "[set]",
+      "workflow": "assembly_testing"
+    },
+    {
+      "id": "145",
+      "name": "ASM Test 683731",
+      "code": "ASM-T-683731",
+      "kiosk_slug": "asm-test-683731",
+      "active": 1,
+      "created_at": "2026-09-18T23:04:43.797Z",
+      "updated_at": "2026-09-21T04:04:21.737Z",
+      "barcode": "ASM-BC-683731",
+      "sort_order": 9990,
+      "assigned_team_id": "144",
+      "assigned_team_day": "2026-09-18",
+      "assigned_team_at": "2026-09-18T23:04:43.900Z",
+      "active_tank_id": "226",
+      "pin_hash": "[set]",
+      "workflow": "assembly_testing"
+    },
+    {
+      "id": "146",
+      "name": "ASM Test 741312",
+      "code": "ASM-T-741312",
+      "kiosk_slug": "asm-test-741312",
+      "active": 1,
+      "created_at": "2026-09-18T23:05:41.476Z",
+      "updated_at": "2026-09-21T04:04:21.737Z",
+      "barcode": "ASM-BC-741312",
+      "sort_order": 9990,
+      "assigned_team_id": "146",
+      "assigned_team_day": "2026-09-18",
+      "assigned_team_at": "2026-09-18T23:05:41.561Z",
+      "active_tank_id": "228",
+      "pin_hash": "[set]",
+      "workflow": "assembly_testing"
+    },
+    {
+      "id": "147",
+      "name": "ASM Test 759860",
+      "code": "ASM-T-759860",
+      "kiosk_slug": "asm-test-759860",
+      "active": 1,
+      "created_at": "2026-09-18T23:06:00.024Z",
+      "updated_at": "2026-09-21T04:04:21.737Z",
+      "barcode": "ASM-BC-759860",
+      "sort_order": 9990,
+      "assigned_team_id": "148",
+      "assigned_team_day": "2026-09-18",
+      "assigned_team_at": "2026-09-18T23:06:00.118Z",
+      "active_tank_id": null,
+      "pin_hash": "[set]",
+      "workflow": "assembly_testing"
+    },
+    {
+      "id": "149",
+      "name": "ASM Lunch 780645",
+      "code": "ASM-L-780645",
+      "kiosk_slug": "asm-lunch-780645",
+      "active": 1,
+      "created_at": "2026-09-19T00:13:00.721Z",
+      "updated_at": "2026-09-21T04:04:21.737Z",
+      "barcode": "ASM-LB-780645",
+      "sort_order": 9992,
+      "assigned_team_id": "153",
+      "assigned_team_day": "2026-09-18",
+      "assigned_team_at": "2026-09-19T00:13:00.809Z",
+      "active_tank_id": "233",
+      "pin_hash": "[set]",
+      "workflow": "assembly_testing"
+    },
+    {
+      "id": "150",
+      "name": "ASM Lunch 934950",
+      "code": "ASM-L-934950",
+      "kiosk_slug": "asm-lunch-934950",
+      "active": 1,
+      "created_at": "2026-09-19T00:15:35.065Z",
+      "updated_at": "2026-09-21T04:44:53.504Z",
+      "barcode": "ASM-LB-934950",
+      "sort_order": 9992,
+      "assigned_team_id": "155",
+      "assigned_team_day": "2026-09-18",
+      "assigned_team_at": "2026-09-19T00:15:35.152Z",
+      "active_tank_id": null,
+      "pin_hash": "[set]",
+      "workflow": "assembly_testing"
+    },
+    {
+      "id": "151",
+      "name": "ASM Test 065628",
+      "code": "ASM-T-065628",
+      "kiosk_slug": "asm-test-065628",
+      "active": 1,
+      "created_at": "2026-09-19T03:54:25.705Z",
+      "updated_at": "2026-09-21T04:04:21.737Z",
+      "barcode": "ASM-BC-065628",
+      "sort_order": 9990,
+      "assigned_team_id": "156",
+      "assigned_team_day": "2026-09-18",
+      "assigned_team_at": "2026-09-19T03:54:25.824Z",
+      "active_tank_id": null,
+      "pin_hash": "[set]",
+      "workflow": "assembly_testing"
+    },
+    {
+      "id": "152",
+      "name": "QA/QC Kiosk 065628",
+      "code": "QA-T-065628",
+      "kiosk_slug": "qa-qc-kiosk-065628",
+      "active": 1,
+      "created_at": "2026-09-19T03:54:26.105Z",
+      "updated_at": "2026-09-21T04:04:21.737Z",
+      "barcode": "QA-BC-065628",
+      "sort_order": 9991,
+      "assigned_team_id": null,
+      "assigned_team_day": null,
+      "assigned_team_at": null,
+      "active_tank_id": null,
+      "pin_hash": "[set]",
+      "workflow": "qa_testing"
+    },
+    {
+      "id": "155",
+      "name": "1414",
+      "code": "1414",
+      "kiosk_slug": "1414",
+      "active": 1,
+      "created_at": "2026-09-19T03:58:19.288Z",
+      "updated_at": "2026-09-21T04:04:21.737Z",
+      "barcode": null,
+      "sort_order": 9995,
+      "assigned_team_id": null,
+      "assigned_team_day": null,
+      "assigned_team_at": null,
+      "active_tank_id": null,
+      "pin_hash": "[set]",
+      "workflow": "winding"
+    },
+    {
+      "id": "156",
+      "name": "TEST FAB 202811",
+      "code": "test-fab-202811",
+      "kiosk_slug": "test-fab-202811",
+      "active": 1,
+      "created_at": "2026-09-19T13:56:43.015Z",
+      "updated_at": "2026-09-21T04:04:21.737Z",
+      "barcode": null,
+      "sort_order": 9996,
+      "assigned_team_id": null,
+      "assigned_team_day": null,
+      "assigned_team_at": null,
+      "active_tank_id": null,
+      "pin_hash": "[set]",
+      "workflow": "winding"
+    },
+    {
+      "id": "157",
+      "name": "TEST ASSEMBLY 202811",
+      "code": "test-assembly-202811",
+      "kiosk_slug": "test-assembly-202811",
+      "active": 1,
+      "created_at": "2026-09-19T13:56:43.041Z",
+      "updated_at": "2026-09-21T04:04:21.737Z",
+      "barcode": null,
+      "sort_order": 9997,
+      "assigned_team_id": null,
+      "assigned_team_day": null,
+      "assigned_team_at": null,
+      "active_tank_id": null,
+      "pin_hash": "[set]",
+      "workflow": "assembly_testing"
+    },
+    {
+      "id": "158",
+      "name": "TEST QAQC 202811",
+      "code": "test-qaqc-202811",
+      "kiosk_slug": "test-qaqc-202811",
+      "active": 1,
+      "created_at": "2026-09-19T13:56:43.045Z",
+      "updated_at": "2026-09-21T04:04:21.737Z",
+      "barcode": null,
+      "sort_order": 9998,
+      "assigned_team_id": null,
+      "assigned_team_day": null,
+      "assigned_team_at": null,
+      "active_tank_id": null,
+      "pin_hash": "[set]",
+      "workflow": "qa_testing"
+    },
+    {
+      "id": "159",
+      "name": "TEST FAB HTTP 287202",
+      "code": "test-fab-http-287202",
+      "kiosk_slug": "test-fab-http-287202",
+      "active": 1,
+      "created_at": "2026-09-19T13:58:07.214Z",
+      "updated_at": "2026-09-21T04:04:21.737Z",
+      "barcode": null,
+      "sort_order": 9999,
+      "assigned_team_id": null,
+      "assigned_team_day": null,
+      "assigned_team_at": null,
+      "active_tank_id": null,
+      "pin_hash": "[set]",
+      "workflow": "winding"
+    },
+    {
+      "id": "160",
+      "name": "TEST ASSEMBLY HTTP 287202",
+      "code": "test-assembly-http-287202",
+      "kiosk_slug": "test-assembly-http-287202",
+      "active": 1,
+      "created_at": "2026-09-19T13:58:07.233Z",
+      "updated_at": "2026-09-21T04:04:21.737Z",
+      "barcode": null,
+      "sort_order": 10000,
+      "assigned_team_id": null,
+      "assigned_team_day": null,
+      "assigned_team_at": null,
+      "active_tank_id": null,
+      "pin_hash": "[set]",
+      "workflow": "assembly_testing"
+    },
+    {
+      "id": "161",
+      "name": "TEST QAQC HTTP 287202",
+      "code": "test-qaqc-http-287202",
+      "kiosk_slug": "test-qaqc-http-287202",
+      "active": 1,
+      "created_at": "2026-09-19T13:58:07.244Z",
+      "updated_at": "2026-09-21T04:04:21.737Z",
+      "barcode": null,
+      "sort_order": 10001,
+      "assigned_team_id": null,
+      "assigned_team_day": null,
+      "assigned_team_at": null,
+      "active_tank_id": null,
+      "pin_hash": "[set]",
+      "workflow": "qa_testing"
+    },
+    {
+      "id": "162",
+      "name": "1212",
+      "code": "1212",
+      "kiosk_slug": "1212",
+      "active": 1,
+      "created_at": "2026-09-19T14:53:02.585Z",
+      "updated_at": "2026-09-19T14:54:44.864Z",
+      "barcode": null,
+      "sort_order": 10002,
+      "assigned_team_id": null,
+      "assigned_team_day": null,
+      "assigned_team_at": null,
+      "active_tank_id": null,
+      "pin_hash": "[set]",
+      "workflow": "qa_testing"
+    },
+    {
+      "id": "163",
+      "name": "QA Fail UX 412626",
+      "code": "QAF-412626",
+      "kiosk_slug": "qa-fail-ux-412626",
+      "active": 1,
+      "created_at": "2026-09-19T17:20:12.716Z",
+      "updated_at": "2026-09-21T04:04:21.737Z",
+      "barcode": "QAF-BC-412626",
+      "sort_order": 9980,
+      "assigned_team_id": null,
+      "assigned_team_day": null,
+      "assigned_team_at": null,
+      "active_tank_id": null,
+      "pin_hash": "[set]",
+      "workflow": "qa_testing"
+    },
+    {
+      "id": "164",
+      "name": "QA Test Flow 585909",
+      "code": "QTF-585909",
+      "kiosk_slug": "qa-test-flow-585909",
+      "active": 1,
+      "created_at": "2026-09-19T17:39:45.992Z",
+      "updated_at": "2026-09-21T04:04:21.737Z",
+      "barcode": "QTF-BC-585909",
+      "sort_order": 9981,
+      "assigned_team_id": null,
+      "assigned_team_day": null,
+      "assigned_team_at": null,
+      "active_tank_id": null,
+      "pin_hash": "[set]",
+      "workflow": "qa_testing"
+    }
+  ],
+  "teams": [
+    {
+      "id": "1",
+      "name": "Team A",
+      "barcode": "TEAM-01",
+      "active": 0,
+      "created_at": "2026-06-30T18:49:26.379Z",
+      "updated_at": "2026-07-01T14:08:26.113Z"
+    },
+    {
+      "id": "2",
+      "name": "Team B",
+      "barcode": "TEAM-02",
+      "active": 0,
+      "created_at": "2026-06-30T18:49:26.379Z",
+      "updated_at": "2026-07-01T14:08:35.527Z"
+    },
+    {
+      "id": "3",
+      "name": "Team C",
+      "barcode": "TEAM-03",
+      "active": 0,
+      "created_at": "2026-06-30T18:49:26.379Z",
+      "updated_at": "2026-07-01T14:08:38.134Z"
+    },
+    {
+      "id": "7",
+      "name": "Winder 1",
+      "barcode": "TEAM-WINDER-1",
+      "active": 1,
+      "created_at": "2026-06-30T22:02:56.986Z",
+      "updated_at": "2026-06-30T22:39:56.870Z"
+    },
+    {
+      "id": "11",
+      "name": "10' water",
+      "barcode": "10'-WATER",
+      "active": 0,
+      "created_at": "2026-08-04T21:07:17.104Z",
+      "updated_at": "2026-09-14T03:05:16.768Z"
+    },
+    {
+      "id": "95",
+      "name": "Tap Ctx Team 191262",
+      "barcode": "TEAM-TAP-191262",
+      "active": 0,
+      "created_at": "2026-09-08T18:13:11.335Z",
+      "updated_at": "2026-09-14T03:05:28.501Z"
+    },
+    {
+      "id": "101",
+      "name": "test-1",
+      "barcode": "TEST_1",
+      "active": 1,
+      "created_at": "2026-09-09T18:26:39.577Z",
+      "updated_at": "2026-09-09T18:26:39.577Z"
+    },
+    {
+      "id": "129",
+      "name": "P2 Team 644479",
+      "barcode": "TEAM-P2-644479",
+      "active": 0,
+      "created_at": "2026-09-13T23:20:44.497Z",
+      "updated_at": "2026-09-14T03:05:23.932Z"
+    },
+    {
+      "id": "130",
+      "name": "P2 Team 799154",
+      "barcode": "TEAM-P2-799154",
+      "active": 0,
+      "created_at": "2026-09-13T23:23:19.164Z",
+      "updated_at": "2026-09-14T03:05:26.065Z"
+    },
+    {
+      "id": "131",
+      "name": "P2 Team 156277",
+      "barcode": "TEAM-P2-156277",
+      "active": 0,
+      "created_at": "2026-09-14T02:15:56.289Z",
+      "updated_at": "2026-09-14T03:05:19.233Z"
+    },
+    {
+      "id": "132",
+      "name": "P2 Team 558963",
+      "barcode": "TEAM-P2-558963",
+      "active": 0,
+      "created_at": "2026-09-14T02:39:18.972Z",
+      "updated_at": "2026-09-14T03:05:21.666Z"
+    },
+    {
+      "id": "142",
+      "name": "Team1-654786",
+      "barcode": "T1-654786",
+      "active": 1,
+      "created_at": "2026-09-18T23:04:14.954Z",
+      "updated_at": "2026-09-18T23:04:14.954Z"
+    },
+    {
+      "id": "143",
+      "name": "Team2-654786",
+      "barcode": "T2-654786",
+      "active": 1,
+      "created_at": "2026-09-18T23:04:14.954Z",
+      "updated_at": "2026-09-18T23:04:14.954Z"
+    },
+    {
+      "id": "144",
+      "name": "Team1-683731",
+      "barcode": "T1-683731",
+      "active": 1,
+      "created_at": "2026-09-18T23:04:43.797Z",
+      "updated_at": "2026-09-18T23:04:43.797Z"
+    },
+    {
+      "id": "145",
+      "name": "Team2-683731",
+      "barcode": "T2-683731",
+      "active": 1,
+      "created_at": "2026-09-18T23:04:43.797Z",
+      "updated_at": "2026-09-18T23:04:43.797Z"
+    },
+    {
+      "id": "146",
+      "name": "Team1-741312",
+      "barcode": "T1-741312",
+      "active": 1,
+      "created_at": "2026-09-18T23:05:41.476Z",
+      "updated_at": "2026-09-18T23:05:41.476Z"
+    },
+    {
+      "id": "147",
+      "name": "Team2-741312",
+      "barcode": "T2-741312",
+      "active": 1,
+      "created_at": "2026-09-18T23:05:41.476Z",
+      "updated_at": "2026-09-18T23:05:41.476Z"
+    },
+    {
+      "id": "148",
+      "name": "Team1-759860",
+      "barcode": "T1-759860",
+      "active": 1,
+      "created_at": "2026-09-18T23:06:00.024Z",
+      "updated_at": "2026-09-18T23:06:00.024Z"
+    },
+    {
+      "id": "149",
+      "name": "Team2-759860",
+      "barcode": "T2-759860",
+      "active": 1,
+      "created_at": "2026-09-18T23:06:00.024Z",
+      "updated_at": "2026-09-18T23:06:00.024Z"
+    },
+    {
+      "id": "150",
+      "name": "SyncTeam-125211",
+      "barcode": "ST-125211",
+      "active": 1,
+      "created_at": "2026-09-19T00:02:05.300Z",
+      "updated_at": "2026-09-19T00:02:05.300Z"
+    },
+    {
+      "id": "151",
+      "name": "SyncTeam2-125211",
+      "barcode": "ST2-125211",
+      "active": 1,
+      "created_at": "2026-09-19T00:02:05.429Z",
+      "updated_at": "2026-09-19T00:02:05.429Z"
+    },
+    {
+      "id": "152",
+      "name": "TeamA-780645",
+      "barcode": "TA-780645",
+      "active": 1,
+      "created_at": "2026-09-19T00:13:00.721Z",
+      "updated_at": "2026-09-19T00:13:00.721Z"
+    },
+    {
+      "id": "153",
+      "name": "TeamB-780645",
+      "barcode": "TB-780645",
+      "active": 1,
+      "created_at": "2026-09-19T00:13:00.721Z",
+      "updated_at": "2026-09-19T00:13:00.721Z"
+    },
+    {
+      "id": "154",
+      "name": "TeamA-934950",
+      "barcode": "TA-934950",
+      "active": 1,
+      "created_at": "2026-09-19T00:15:35.065Z",
+      "updated_at": "2026-09-19T00:15:35.065Z"
+    },
+    {
+      "id": "155",
+      "name": "TeamB-934950",
+      "barcode": "TB-934950",
+      "active": 1,
+      "created_at": "2026-09-19T00:15:35.065Z",
+      "updated_at": "2026-09-19T00:15:35.065Z"
+    },
+    {
+      "id": "156",
+      "name": "Team1-065628",
+      "barcode": "T1-065628",
+      "active": 1,
+      "created_at": "2026-09-19T03:54:25.705Z",
+      "updated_at": "2026-09-19T03:54:25.705Z"
+    },
+    {
+      "id": "157",
+      "name": "Team2-065628",
+      "barcode": "T2-065628",
+      "active": 1,
+      "created_at": "2026-09-19T03:54:25.705Z",
+      "updated_at": "2026-09-19T03:54:25.705Z"
+    }
+  ],
+  "employees": [
+    {
+      "id": "1",
+      "code": "EMP001",
+      "name": "John Truong",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-05-28T23:16:16.333Z",
+      "updated_at": "2026-06-03T17:27:01.904Z",
+      "badge_role": "Fabrication Team Member"
+    },
+    {
+      "id": "2",
+      "code": "EMP002",
+      "name": "Mike Davis",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-05-28T23:16:16.333Z",
+      "updated_at": "2026-05-28T23:16:16.333Z",
+      "badge_role": null
+    },
+    {
+      "id": "3",
+      "code": "EMP003",
+      "name": "Alex Turner",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-05-28T23:16:16.333Z",
+      "updated_at": "2026-06-03T15:42:06.225Z",
+      "badge_role": "Fabrication Team Member"
+    },
+    {
+      "id": "4",
+      "code": "EMP004",
+      "name": "David Brooks",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-05-28T23:16:16.333Z",
+      "updated_at": "2026-05-28T23:16:16.333Z",
+      "badge_role": null
+    },
+    {
+      "id": "5",
+      "code": "EMP005",
+      "name": "Chris Miller",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-05-28T23:16:16.333Z",
+      "updated_at": "2026-05-28T23:16:16.333Z",
+      "badge_role": null
+    },
+    {
+      "id": "6",
+      "code": "EMP006",
+      "name": "Ethan Scott",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-05-28T23:16:16.333Z",
+      "updated_at": "2026-05-28T23:16:16.333Z",
+      "badge_role": null
+    },
+    {
+      "id": "13",
+      "code": "EMP007",
+      "name": "Employee 007",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-06-30T18:49:26.391Z",
+      "updated_at": "2026-06-30T18:49:26.391Z",
+      "badge_role": null
+    },
+    {
+      "id": "14",
+      "code": "EMP008",
+      "name": "Employee 008",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-06-30T18:49:26.391Z",
+      "updated_at": "2026-06-30T18:49:26.391Z",
+      "badge_role": null
+    },
+    {
+      "id": "15",
+      "code": "EMP009",
+      "name": "Employee 009",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-06-30T18:49:26.391Z",
+      "updated_at": "2026-06-30T18:49:26.391Z",
+      "badge_role": null
+    },
+    {
+      "id": "16",
+      "code": "EMP010",
+      "name": "Employee 010",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-06-30T18:49:26.391Z",
+      "updated_at": "2026-06-30T18:49:26.391Z",
+      "badge_role": null
+    },
+    {
+      "id": "17",
+      "code": "EMP011",
+      "name": "Employee 011",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-06-30T18:49:26.391Z",
+      "updated_at": "2026-06-30T18:49:26.391Z",
+      "badge_role": null
+    },
+    {
+      "id": "18",
+      "code": "EMP012",
+      "name": "Employee 012",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-06-30T18:49:26.391Z",
+      "updated_at": "2026-06-30T18:49:26.391Z",
+      "badge_role": null
+    },
+    {
+      "id": "19",
+      "code": "EMP013",
+      "name": "Employee 013",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-06-30T18:49:26.391Z",
+      "updated_at": "2026-06-30T18:49:26.391Z",
+      "badge_role": null
+    },
+    {
+      "id": "20",
+      "code": "EMP014",
+      "name": "Employee 014",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-06-30T18:49:26.391Z",
+      "updated_at": "2026-06-30T18:49:26.391Z",
+      "badge_role": null
+    },
+    {
+      "id": "21",
+      "code": "EMP015",
+      "name": "Employee 015",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-06-30T18:49:26.391Z",
+      "updated_at": "2026-06-30T18:49:26.391Z",
+      "badge_role": null
+    },
+    {
+      "id": "22",
+      "code": "EMP016",
+      "name": "Employee 016",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-06-30T18:49:26.391Z",
+      "updated_at": "2026-06-30T18:49:26.391Z",
+      "badge_role": null
+    },
+    {
+      "id": "23",
+      "code": "EMP017",
+      "name": "Employee 017",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-06-30T18:49:26.391Z",
+      "updated_at": "2026-06-30T18:49:26.391Z",
+      "badge_role": null
+    },
+    {
+      "id": "24",
+      "code": "EMP018",
+      "name": "Employee 018",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-06-30T18:49:26.391Z",
+      "updated_at": "2026-06-30T18:49:26.391Z",
+      "badge_role": null
+    },
+    {
+      "id": "25",
+      "code": "EMP019",
+      "name": "Employee 019",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-06-30T18:49:26.391Z",
+      "updated_at": "2026-06-30T18:49:26.391Z",
+      "badge_role": null
+    },
+    {
+      "id": "26",
+      "code": "EMP020",
+      "name": "Employee 020",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-06-30T18:49:26.391Z",
+      "updated_at": "2026-06-30T18:49:26.391Z",
+      "badge_role": null
+    },
+    {
+      "id": "241",
+      "code": "P2A644479",
+      "name": "P2 Emp A 644479",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-09-13T23:20:44.500Z",
+      "updated_at": "2026-09-13T23:20:44.500Z",
+      "badge_role": null
+    },
+    {
+      "id": "242",
+      "code": "P2B644479",
+      "name": "P2 Emp B 644479",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-09-13T23:20:44.505Z",
+      "updated_at": "2026-09-13T23:20:44.505Z",
+      "badge_role": null
+    },
+    {
+      "id": "243",
+      "code": "P2A799154",
+      "name": "P2 Emp A 799154",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-09-13T23:23:19.168Z",
+      "updated_at": "2026-09-13T23:23:19.168Z",
+      "badge_role": null
+    },
+    {
+      "id": "244",
+      "code": "P2B799154",
+      "name": "P2 Emp B 799154",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-09-13T23:23:19.172Z",
+      "updated_at": "2026-09-13T23:23:19.172Z",
+      "badge_role": null
+    },
+    {
+      "id": "245",
+      "code": "P2A156277",
+      "name": "P2 Emp A 156277",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-09-14T02:15:56.291Z",
+      "updated_at": "2026-09-14T02:15:56.291Z",
+      "badge_role": null
+    },
+    {
+      "id": "246",
+      "code": "P2B156277",
+      "name": "P2 Emp B 156277",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-09-14T02:15:56.294Z",
+      "updated_at": "2026-09-14T02:15:56.294Z",
+      "badge_role": null
+    },
+    {
+      "id": "247",
+      "code": "P2A558963",
+      "name": "P2 Emp A 558963",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-09-14T02:39:18.974Z",
+      "updated_at": "2026-09-14T02:39:18.974Z",
+      "badge_role": null
+    },
+    {
+      "id": "248",
+      "code": "P2B558963",
+      "name": "P2 Emp B 558963",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-09-14T02:39:18.977Z",
+      "updated_at": "2026-09-14T02:39:18.977Z",
+      "badge_role": null
+    },
+    {
+      "id": "258",
+      "code": "E1-654786",
+      "name": "Emp One 654786",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-09-18T23:04:14.954Z",
+      "updated_at": "2026-09-18T23:04:14.954Z",
+      "badge_role": null
+    },
+    {
+      "id": "259",
+      "code": "E2-654786",
+      "name": "Emp Two 654786",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-09-18T23:04:14.954Z",
+      "updated_at": "2026-09-18T23:04:14.954Z",
+      "badge_role": null
+    },
+    {
+      "id": "260",
+      "code": "E1-683731",
+      "name": "Emp One 683731",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-09-18T23:04:43.797Z",
+      "updated_at": "2026-09-18T23:04:43.797Z",
+      "badge_role": null
+    },
+    {
+      "id": "261",
+      "code": "E2-683731",
+      "name": "Emp Two 683731",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-09-18T23:04:43.797Z",
+      "updated_at": "2026-09-18T23:04:43.797Z",
+      "badge_role": null
+    },
+    {
+      "id": "262",
+      "code": "E1-741312",
+      "name": "Emp One 741312",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-09-18T23:05:41.476Z",
+      "updated_at": "2026-09-18T23:05:41.476Z",
+      "badge_role": null
+    },
+    {
+      "id": "263",
+      "code": "E2-741312",
+      "name": "Emp Two 741312",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-09-18T23:05:41.476Z",
+      "updated_at": "2026-09-18T23:05:41.476Z",
+      "badge_role": null
+    },
+    {
+      "id": "264",
+      "code": "E1-759860",
+      "name": "Emp One 759860",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-09-18T23:06:00.024Z",
+      "updated_at": "2026-09-18T23:06:00.024Z",
+      "badge_role": null
+    },
+    {
+      "id": "265",
+      "code": "E2-759860",
+      "name": "Emp Two 759860",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-09-18T23:06:00.024Z",
+      "updated_at": "2026-09-18T23:06:00.024Z",
+      "badge_role": null
+    },
+    {
+      "id": "266",
+      "code": "A1-780645",
+      "name": "A1 Emp 780645",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-09-19T00:13:00.721Z",
+      "updated_at": "2026-09-19T00:13:00.721Z",
+      "badge_role": null
+    },
+    {
+      "id": "267",
+      "code": "A2-780645",
+      "name": "A2 Emp 780645",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-09-19T00:13:00.721Z",
+      "updated_at": "2026-09-19T00:13:00.721Z",
+      "badge_role": null
+    },
+    {
+      "id": "268",
+      "code": "B1-780645",
+      "name": "B1 Emp 780645",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-09-19T00:13:00.721Z",
+      "updated_at": "2026-09-19T00:13:00.721Z",
+      "badge_role": null
+    },
+    {
+      "id": "269",
+      "code": "A1-934950",
+      "name": "A1 Emp 934950",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-09-19T00:15:35.065Z",
+      "updated_at": "2026-09-19T00:15:35.065Z",
+      "badge_role": null
+    },
+    {
+      "id": "270",
+      "code": "A2-934950",
+      "name": "A2 Emp 934950",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-09-19T00:15:35.065Z",
+      "updated_at": "2026-09-19T00:15:35.065Z",
+      "badge_role": null
+    },
+    {
+      "id": "271",
+      "code": "B1-934950",
+      "name": "B1 Emp 934950",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-09-19T00:15:35.065Z",
+      "updated_at": "2026-09-19T00:15:35.065Z",
+      "badge_role": null
+    },
+    {
+      "id": "272",
+      "code": "E1-065628",
+      "name": "Emp One 065628",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-09-19T03:54:25.705Z",
+      "updated_at": "2026-09-19T03:54:25.705Z",
+      "badge_role": null
+    },
+    {
+      "id": "273",
+      "code": "E2-065628",
+      "name": "Emp Two 065628",
+      "is_active": 1,
+      "hourly_rate": "20.00",
+      "created_at": "2026-09-19T03:54:25.705Z",
+      "updated_at": "2026-09-19T03:54:25.705Z",
+      "badge_role": null
+    }
+  ],
+  "users": [
+    {
+      "id": "1",
+      "username": "manager",
+      "password_hash": "[set]",
+      "pin_hash": null,
+      "role": "MANAGER",
+      "station_name": "Office Manager",
+      "area_name": "Office",
+      "is_active": 1,
+      "created_at": "2026-05-28T23:16:16.342Z",
+      "updated_at": "2026-06-20T15:11:53.658Z"
+    },
+    {
+      "id": "2",
+      "username": "owner",
+      "password_hash": "[set]",
+      "pin_hash": null,
+      "role": "MANAGER",
+      "station_name": "Backup Owner Account",
+      "area_name": "Office",
+      "is_active": 1,
+      "created_at": "2026-05-28T23:16:16.342Z",
+      "updated_at": "2026-06-20T15:11:53.580Z"
+    },
+    {
+      "id": "3",
+      "username": "kiosk_area_a",
+      "password_hash": "[set]",
+      "pin_hash": "[set]",
+      "role": "KIOSK",
+      "station_name": "Fabrication Kiosk",
+      "area_name": "Fabrication",
+      "is_active": 1,
+      "created_at": "2026-05-28T23:16:16.342Z",
+      "updated_at": "2026-06-30T19:04:01.342Z"
+    },
+    {
+      "id": "4",
+      "username": "kiosk_area_b",
+      "password_hash": "[set]",
+      "pin_hash": "[set]",
+      "role": "KIOSK",
+      "station_name": "Assembly Kiosk",
+      "area_name": "Assembly",
+      "is_active": 1,
+      "created_at": "2026-05-28T23:16:16.342Z",
+      "updated_at": "2026-07-17T16:30:02.600Z"
+    },
+    {
+      "id": "5",
+      "username": "kiosk_area_c",
+      "password_hash": "[set]",
+      "pin_hash": "[set]",
+      "role": "KIOSK",
+      "station_name": "QA/QC Kiosk",
+      "area_name": "QA/QC",
+      "is_active": 1,
+      "created_at": "2026-05-28T23:16:16.342Z",
+      "updated_at": "2026-07-17T16:30:02.600Z"
+    },
+    {
+      "id": "31",
+      "username": "kiosk_area_d",
+      "password_hash": "[set]",
+      "pin_hash": "[set]",
+      "role": "KIOSK",
+      "station_name": "Shipping & Handling Kiosk",
+      "area_name": "Shipping & Handling",
+      "is_active": 1,
+      "created_at": "2026-05-29T22:10:56.585Z",
+      "updated_at": "2026-07-17T16:30:02.600Z"
+    },
+    {
+      "id": "1037",
+      "username": "kiosk_wm_1",
+      "password_hash": "[set]",
+      "pin_hash": "[set]",
+      "role": "KIOSK",
+      "station_name": "Winding Machine 01 Kiosk",
+      "area_name": "Winding Machine 01",
+      "is_active": 1,
+      "created_at": "2026-06-30T22:02:56.010Z",
+      "updated_at": "2026-07-17T16:30:02.600Z"
+    },
+    {
+      "id": "1038",
+      "username": "kiosk_wm_2",
+      "password_hash": "[set]",
+      "pin_hash": "[set]",
+      "role": "KIOSK",
+      "station_name": "Winding Machine 02 Kiosk",
+      "area_name": "Winding Machine 02",
+      "is_active": 1,
+      "created_at": "2026-06-30T22:02:56.010Z",
+      "updated_at": "2026-07-17T16:30:02.600Z"
+    },
+    {
+      "id": "1039",
+      "username": "kiosk_wm_3",
+      "password_hash": "[set]",
+      "pin_hash": "[set]",
+      "role": "KIOSK",
+      "station_name": "Winding Machine 03 Kiosk",
+      "area_name": "Winding Machine 03",
+      "is_active": 1,
+      "created_at": "2026-06-30T22:02:56.010Z",
+      "updated_at": "2026-07-17T16:30:02.600Z"
+    }
+  ],
+  "tanks": [
+    {
+      "id": "2",
+      "tank_number": "1006",
+      "status": "archived",
+      "created_at": "2026-05-28T23:19:24.554Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": null
+    },
+    {
+      "id": "3",
+      "tank_number": "1002",
+      "status": "archived",
+      "created_at": "2026-05-29T23:51:26.754Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": null
+    },
+    {
+      "id": "4",
+      "tank_number": "1001",
+      "status": "archived",
+      "created_at": "2026-05-29T23:51:55.806Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": null
+    },
+    {
+      "id": "5",
+      "tank_number": "1003",
+      "status": "archived",
+      "created_at": "2026-05-30T16:29:43.211Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": null
+    },
+    {
+      "id": "6",
+      "tank_number": "1004",
+      "status": "archived",
+      "created_at": "2026-05-30T16:30:56.580Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": null
+    },
+    {
+      "id": "7",
+      "tank_number": "1005",
+      "status": "archived",
+      "created_at": "2026-05-30T16:31:00.774Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": null
+    },
+    {
+      "id": "8",
+      "tank_number": "1234",
+      "status": "archived",
+      "created_at": "2026-06-03T23:53:30.379Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": null
+    },
+    {
+      "id": "9",
+      "tank_number": "TEST-1001",
+      "status": "archived",
+      "created_at": "2026-06-30T18:50:30.775Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": null
+    },
+    {
+      "id": "11",
+      "tank_number": "PC377681",
+      "status": "archived",
+      "created_at": "2026-08-04T22:59:37.686Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": null
+    },
+    {
+      "id": "23",
+      "tank_number": "4444",
+      "status": "archived",
+      "created_at": "2026-08-06T13:55:38.417Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": null
+    },
+    {
+      "id": "24",
+      "tank_number": "6666",
+      "status": "archived",
+      "created_at": "2026-08-06T14:24:51.566Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": null
+    },
+    {
+      "id": "135",
+      "tank_number": "TAPB191262",
+      "status": "in_progress",
+      "created_at": "2026-09-08T18:13:11.373Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": null
+    },
+    {
+      "id": "193",
+      "tank_number": "PH2H644479",
+      "status": "archived",
+      "created_at": "2026-09-13T23:20:44.481Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": null
+    },
+    {
+      "id": "194",
+      "tank_number": "P2T644479",
+      "status": "archived",
+      "created_at": "2026-09-13T23:20:44.526Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": null
+    },
+    {
+      "id": "196",
+      "tank_number": "PH2H799154",
+      "status": "archived",
+      "created_at": "2026-09-13T23:23:19.155Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": null
+    },
+    {
+      "id": "197",
+      "tank_number": "P2T799154",
+      "status": "archived",
+      "created_at": "2026-09-13T23:23:19.225Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": null
+    },
+    {
+      "id": "200",
+      "tank_number": "PH2H156277",
+      "status": "archived",
+      "created_at": "2026-09-14T02:15:56.279Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": null
+    },
+    {
+      "id": "201",
+      "tank_number": "P2T156277",
+      "status": "archived",
+      "created_at": "2026-09-14T02:15:56.306Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": null
+    },
+    {
+      "id": "206",
+      "tank_number": "PH2H558963",
+      "status": "archived",
+      "created_at": "2026-09-14T02:39:18.965Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": null
+    },
+    {
+      "id": "207",
+      "tank_number": "P2T558963",
+      "status": "archived",
+      "created_at": "2026-09-14T02:39:18.989Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": null
+    },
+    {
+      "id": "217",
+      "tank_number": "1111",
+      "status": "testing_in_progress",
+      "created_at": "2026-09-14T03:03:59.076Z",
+      "assembly_machine_id": "94",
+      "testing_machine_id": "162"
+    },
+    {
+      "id": "218",
+      "tank_number": "2222",
+      "status": "ready_for_assembly",
+      "created_at": "2026-09-14T03:14:41.139Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": null
+    },
+    {
+      "id": "224",
+      "tank_number": "2026-A-654786",
+      "status": "testing_in_progress",
+      "created_at": "2026-09-18T23:04:14.954Z",
+      "assembly_machine_id": "94",
+      "testing_machine_id": null
+    },
+    {
+      "id": "225",
+      "tank_number": "2026-B-654786",
+      "status": "ready_for_assembly",
+      "created_at": "2026-09-18T23:04:14.954Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": null
+    },
+    {
+      "id": "226",
+      "tank_number": "2026-A-683731",
+      "status": "ready_for_dome_install",
+      "created_at": "2026-09-18T23:04:43.797Z",
+      "assembly_machine_id": "145",
+      "testing_machine_id": "162"
+    },
+    {
+      "id": "227",
+      "tank_number": "2026-B-683731",
+      "status": "assembly_in_progress",
+      "created_at": "2026-09-18T23:04:43.797Z",
+      "assembly_machine_id": "145",
+      "testing_machine_id": null
+    },
+    {
+      "id": "228",
+      "tank_number": "2026-A-741312",
+      "status": "testing_in_progress",
+      "created_at": "2026-09-18T23:05:41.476Z",
+      "assembly_machine_id": "146",
+      "testing_machine_id": "162"
+    },
+    {
+      "id": "229",
+      "tank_number": "2026-B-741312",
+      "status": "assembly_in_progress",
+      "created_at": "2026-09-18T23:05:41.476Z",
+      "assembly_machine_id": "146",
+      "testing_machine_id": null
+    },
+    {
+      "id": "230",
+      "tank_number": "2026-A-759860",
+      "status": "archived",
+      "created_at": "2026-09-18T23:06:00.024Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": null
+    },
+    {
+      "id": "231",
+      "tank_number": "2026-B-759860",
+      "status": "testing_in_progress",
+      "created_at": "2026-09-18T23:06:00.024Z",
+      "assembly_machine_id": "94",
+      "testing_machine_id": "162"
+    },
+    {
+      "id": "232",
+      "tank_number": "2026-A-780645",
+      "status": "assembly_in_progress",
+      "created_at": "2026-09-19T00:13:00.721Z",
+      "assembly_machine_id": "149",
+      "testing_machine_id": null
+    },
+    {
+      "id": "233",
+      "tank_number": "2026-B-780645",
+      "status": "assembly_in_progress",
+      "created_at": "2026-09-19T00:13:00.721Z",
+      "assembly_machine_id": "149",
+      "testing_machine_id": null
+    },
+    {
+      "id": "234",
+      "tank_number": "2026-A-934950",
+      "status": "assembly_in_progress",
+      "created_at": "2026-09-19T00:15:35.065Z",
+      "assembly_machine_id": "150",
+      "testing_machine_id": null
+    },
+    {
+      "id": "235",
+      "tank_number": "2026-B-934950",
+      "status": "removed_from_assembly",
+      "created_at": "2026-09-19T00:15:35.065Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": null
+    },
+    {
+      "id": "236",
+      "tank_number": "2026-A-065628",
+      "status": "archived",
+      "created_at": "2026-09-19T03:54:25.705Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": "152"
+    },
+    {
+      "id": "237",
+      "tank_number": "2026-B-065628",
+      "status": "testing_in_progress",
+      "created_at": "2026-09-19T03:54:25.705Z",
+      "assembly_machine_id": "151",
+      "testing_machine_id": "152"
+    },
+    {
+      "id": "238",
+      "tank_number": "2026-D-412626",
+      "status": "ready_for_testing",
+      "created_at": "2026-09-19T17:20:12.728Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": null
+    },
+    {
+      "id": "239",
+      "tank_number": "2026-A-412626",
+      "status": "ready_for_dome_install",
+      "created_at": "2026-09-19T17:20:12.844Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": "163"
+    },
+    {
+      "id": "240",
+      "tank_number": "2026-B-412626",
+      "status": "ready_for_dome_install",
+      "created_at": "2026-09-19T17:20:12.870Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": "163"
+    },
+    {
+      "id": "241",
+      "tank_number": "2026-C-412626",
+      "status": "ready_for_dome_install",
+      "created_at": "2026-09-19T17:20:12.921Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": "163"
+    },
+    {
+      "id": "242",
+      "tank_number": "2026-L-412626",
+      "status": "rework_required",
+      "created_at": "2026-09-19T17:20:12.958Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": null
+    },
+    {
+      "id": "243",
+      "tank_number": "2026-A-585909",
+      "status": "ready_for_dome_install",
+      "created_at": "2026-09-19T17:39:46.012Z",
+      "assembly_machine_id": null,
+      "testing_machine_id": "162"
+    },
+    {
+      "id": "252",
+      "tank_number": "7777",
+      "status": "assembly_in_progress",
+      "created_at": "2026-09-21T04:07:46.951Z",
+      "assembly_machine_id": "150",
+      "testing_machine_id": null
+    }
+  ]
+}

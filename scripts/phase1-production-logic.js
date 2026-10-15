@@ -176,12 +176,14 @@ const MACHINE_WORKFLOWS = Object.freeze({
   WINDING: 'winding',
   ASSEMBLY_TESTING: 'assembly_testing',
   QA_TESTING: 'qa_testing',
+  DOME: 'dome',
 });
 
 const MACHINE_WORKFLOW_LABELS = Object.freeze({
   winding: 'Winding (FAB)',
   assembly_testing: 'Assembly + Testing',
   qa_testing: 'QA/QC',
+  dome: 'Dome Shop',
 });
 
 /**
@@ -203,6 +205,7 @@ function parseMachineWorkflow(raw, opts = {}) {
   if (w === 'qa_testing' || w === 'qa_qc' || w === 'qaqc' || w === 'qa') {
     return MACHINE_WORKFLOWS.QA_TESTING;
   }
+  if (w === 'dome' || w === 'dome_shop') return MACHINE_WORKFLOWS.DOME;
   return null;
 }
 
@@ -1577,7 +1580,8 @@ function createPhase1ProductionLogic(deps) {
         st === 'assembly_in_progress' ||
         st === 'ready_for_testing' ||
         st === 'testing_in_progress' ||
-        st === 'ready_for_dome_install';
+        st === 'ready_for_dome_install' ||
+        st === 'dome_installed';
       if (fabDone && !rework) {
         return {
           ok: false,
@@ -3483,7 +3487,9 @@ function createPhase1ProductionLogic(deps) {
                  ELSE $4::bigint
                END,
                updated_at = $5::timestamptz
-           WHERE id = $6`,
+           WHERE id = $6
+             AND LOWER(TRIM(COALESCE(status, ''))) NOT IN
+               ('ready_for_dome_install', 'ready_for_final_completion', 'ready_to_ship', 'final_ready', 'dome_installed')`,
           [
             Number(session.team_id),
             String(session.activity_code || ''),

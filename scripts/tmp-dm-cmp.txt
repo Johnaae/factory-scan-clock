@@ -1,0 +1,22 @@
+DB host: localhost
+DB name: factory_scan_clock
+[db] INTERNAL_LAN_MODE=true — local PostgreSQL, SSL off
+PASS  employees: 102 pre-existing rows unchanged
+PASS  teams: 69 pre-existing rows unchanged
+PASS  team_members: 98 pre-existing rows unchanged
+PASS  employee_team_memberships: 193 pre-existing rows unchanged
+PASS  scan_logs: 0 pre-existing rows unchanged
+PASS  machines: 51 pre-existing rows unchanged
+PASS  machine_sessions: 53 pre-existing rows unchanged
+PASS  session_team_members: 89 pre-existing rows unchanged
+PASS  stage_labor_sessions: 20 pre-existing rows unchanged
+PASS  stage_labor_participants: 50 pre-existing rows unchanged
+PASS  downtime_intervals: 0 pre-existing rows unchanged
+PASS  job_finish_events: 0 pre-existing rows unchanged
+PASS  assembly_kiosk_teams: 45 pre-existing rows unchanged
+PASS  assembly_tank_teams: 15 pre-existing rows unchanged
+PASS  tanks: 48 pre-existing rows unchanged
+PASS  tank_pieces: 58 pre-existing rows unchanged
+PASS  test_attempts: 44 pre-existing rows unchanged
+
+ALL CHECKS PASSED
