@@ -10,7 +10,13 @@ const els = {
   qaProgressList: document.getElementById('qaProgressList'),
   qaFailedList: document.getElementById('qaFailedList'),
   readyTestList: document.getElementById('readyTestList'),
+  readyTestLockedList: document.getElementById('readyTestLockedList'),
+  lockedTestingSection: document.getElementById('lockedTestingSection'),
+  lockedTestingToggle: document.getElementById('lockedTestingToggle'),
+  lockedTestingCount: document.getElementById('lockedTestingCount'),
   testingList: document.getElementById('testingList'),
+  tankSearch: document.getElementById('tankSearch'),
+  searchEmpty: document.getElementById('searchEmpty'),
   logoutBtn: document.getElementById('logoutBtn'),
   inputModal: document.getElementById('inputModal'),
   inputTitle: document.getElementById('inputTitle'),
@@ -24,10 +30,17 @@ const els = {
   resultFail: document.getElementById('resultFail'),
 };
 
+const TAB_IDS = ['ready_test', 'testing', 'ready_qa', 'qa_progress', 'failed'];
+
 let board = null;
 let machineId = null;
 let busy = false;
 let inputResolve = null;
+/** Active category tab — UI only; board data and actions are unchanged. */
+let activeTab = 'ready_test';
+/** Persist expanded cards across 10s board refreshes. */
+const expandedTankIds = new Set();
+let lockedSectionOpen = false;
 /** Per-tank open attempt ids by type — never mix Vacuum/Brine/TESTING ids. */
 const openByTank = {};
 
@@ -152,11 +165,42 @@ function emptyHtml(msg) {
   return `<p class="qa2-empty">${escapeHtml(msg)}</p>`;
 }
 
-function tankCard(tank, metaHtml, actionsHtml) {
-  return `<article class="qa2-card" data-tank-id="${Number(tank.id)}">
-    <h3 class="qa2-title">Tank ${escapeHtml(tank.tank_number || '—')}</h3>
-    ${metaHtml}
-    <div class="qa2-actions">${actionsHtml}</div>
+function chipHtml(label, kind) {
+  if (!label) return '';
+  return `<span class="qa2-chip qa2-chip--${escapeHtml(kind || 'stage')}">${escapeHtml(label)}</span>`;
+}
+
+function assemblyChip(t) {
+  if (t.locked || t.locked_by === 'assembly') {
+    return chipHtml('Assembly: In progress', 'assembly-pending');
+  }
+  if (t.assembly_pending || t.assembly_done === false) {
+    return chipHtml('Assembly: Pending', 'assembly-pending');
+  }
+  if (t.assembly_completed_at || t.assembly_done === true) {
+    return chipHtml('Assembly: Complete', 'assembly');
+  }
+  return chipHtml('Assembly: —', 'assembly');
+}
+
+function tankCard(tank, metaHtml, actionsHtml, extraClass = '', chips = []) {
+  const tid = Number(tank.id);
+  const expanded = expandedTankIds.has(tid);
+  const chipBits = (chips || []).filter(Boolean).join('');
+  return `<article class="qa2-card${extraClass ? ` ${extraClass}` : ''}${
+    expanded ? ' is-expanded' : ''
+  }" data-tank-id="${tid}" data-tank-number="${escapeHtml(String(tank.tank_number || ''))}">
+    <button type="button" class="qa2-card-summary" data-qa2-toggle="${tid}" aria-expanded="${expanded ? 'true' : 'false'}">
+      <div class="qa2-card-summary-main">
+        <h3 class="qa2-title">Tank ${escapeHtml(tank.tank_number || '—')}</h3>
+        <div class="qa2-chips">${chipBits}</div>
+      </div>
+      <span class="qa2-expand-hint" aria-hidden="true">▾</span>
+    </button>
+    <div class="qa2-card-body">
+      ${metaHtml}
+      <div class="qa2-actions">${actionsHtml}</div>
+    </div>
   </article>`;
 }
 
@@ -167,6 +211,78 @@ function renderList(el, tanks, builder) {
     return;
   }
   el.innerHTML = tanks.map(builder).join('');
+}
+
+function searchQuery() {
+  return els.tankSearch ? String(els.tankSearch.value || '').trim().toLowerCase() : '';
+}
+
+function applySearchFilter() {
+  const q = searchQuery();
+  const panel = document.querySelector(`.qa2-panel[data-panel="${activeTab}"]`);
+  if (!panel) return;
+  const cards = panel.querySelectorAll('.qa2-card');
+  let visible = 0;
+  cards.forEach((card) => {
+    const num = String(card.getAttribute('data-tank-number') || '').toLowerCase();
+    const match = !q || num.includes(q);
+    card.classList.toggle('is-filtered-out', !match);
+    if (match) visible += 1;
+  });
+  if (els.searchEmpty) {
+    const show = Boolean(q) && visible === 0 && cards.length > 0;
+    els.searchEmpty.classList.toggle('is-visible', show);
+  }
+}
+
+function updateCounts() {
+  if (!board) return;
+  const readyAll = board.ready_for_testing || [];
+  const locked = readyAll.filter((t) => t.locked).length;
+  const counts = {
+    ready_test: readyAll.length,
+    testing: (board.testing || []).length,
+    ready_qa: (board.ready_for_qa || []).length,
+    qa_progress: (board.qa_in_progress || []).length,
+    failed: (board.failed_hold || board.qa_failed || []).length,
+  };
+  document.querySelectorAll('[data-count]').forEach((el) => {
+    const key = el.getAttribute('data-count');
+    if (key && Object.prototype.hasOwnProperty.call(counts, key)) {
+      el.textContent = String(counts[key]);
+    }
+  });
+  if (els.lockedTestingCount) els.lockedTestingCount.textContent = String(locked);
+}
+
+function setActiveTab(tabId) {
+  if (!TAB_IDS.includes(tabId)) return;
+  activeTab = tabId;
+  document.querySelectorAll('.qa2-tab').forEach((btn) => {
+    const on = btn.getAttribute('data-tab') === tabId;
+    btn.classList.toggle('is-active', on);
+    btn.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  document.querySelectorAll('.qa2-stat').forEach((btn) => {
+    btn.classList.toggle('is-active', btn.getAttribute('data-tab') === tabId);
+  });
+  document.querySelectorAll('.qa2-panel').forEach((panel) => {
+    const on = panel.getAttribute('data-panel') === tabId;
+    panel.classList.toggle('is-active', on);
+    panel.hidden = !on;
+  });
+  applySearchFilter();
+}
+
+function syncLockedSection() {
+  if (!els.lockedTestingSection) return;
+  const hasCards =
+    els.readyTestLockedList && els.readyTestLockedList.querySelector('.qa2-card');
+  els.lockedTestingSection.hidden = !hasCards;
+  els.lockedTestingSection.classList.toggle('is-open', Boolean(hasCards) && lockedSectionOpen);
+  if (els.lockedTestingToggle) {
+    els.lockedTestingToggle.setAttribute('aria-expanded', lockedSectionOpen && hasCards ? 'true' : 'false');
+  }
 }
 
 function syncOpenFromTank(t) {
@@ -193,6 +309,32 @@ function restoreButton(t) {
 }
 
 function readyTestingCard(t) {
+  if (t.locked) {
+    return tankCard(
+      t,
+      `<p class="qa2-meta"><strong>LOCKED — IN ASSEMBLY</strong></p>
+       <p class="qa2-meta qa2-lock-reason">${escapeHtml(t.lock_reason || 'In Assembly. Testing can start after Assembly finishes.')}</p>`,
+      `<button type="button" class="btn-primary btn-touch" disabled aria-disabled="true">START TESTING</button>`,
+      'qa2-card--locked',
+      [
+        chipHtml('Ready for Testing', 'stage'),
+        assemblyChip(t),
+        chipHtml('Locked', 'lock'),
+      ]
+    );
+  }
+  if (t.assembly_pending) {
+    // RT tank fresh from FAB: Testing may go first; Assembly is locked once Testing starts.
+    return tankCard(
+      t,
+      `<p class="qa2-meta">FAB Complete — Ready for Testing (Assembly not started)</p>
+       <p class="qa2-meta">FAB completed: ${escapeHtml(formatTs(t.fab_completed_at))}</p>
+       <p class="qa2-meta">Assembly is still required before QA/QC.</p>`,
+      `<button type="button" class="btn-primary btn-touch" data-qa="begin_testing" data-tank-id="${Number(t.id)}">START TESTING</button>`,
+      '',
+      [chipHtml('Ready for Testing', 'stage'), assemblyChip(t)]
+    );
+  }
   let meta = `<p class="qa2-meta">Assembly Complete — Ready for Testing</p>
      <p class="qa2-meta">Assembly completed: ${escapeHtml(formatTs(t.assembly_completed_at))}</p>`;
   if (String(t.qa_result || '').toUpperCase() === 'PASS') {
@@ -202,7 +344,9 @@ function readyTestingCard(t) {
     t,
     meta,
     `<button type="button" class="btn-primary btn-touch" data-qa="begin_testing" data-tank-id="${Number(t.id)}">START TESTING</button>
-     ${restoreButton(t)}`
+     ${restoreButton(t)}`,
+    '',
+    [chipHtml('Ready for Testing', 'stage'), assemblyChip(t)]
   );
 }
 
@@ -239,6 +383,10 @@ function testingCard(t) {
     <p class="qa2-meta">Started: ${escapeHtml(formatTs(t.testing_started_at))}</p>`;
   if (t.testing_attempt_number) {
     meta += `<p class="qa2-meta">Attempt #${Number(t.testing_attempt_number)}</p>`;
+  }
+  const assemblyPending = t.assembly_done === false;
+  if (assemblyPending) {
+    meta += `<p class="qa2-meta">Assembly not done yet — Assembly is locked while Testing is open.</p>`;
   }
 
   const actions = [];
@@ -284,7 +432,9 @@ function testingCard(t) {
       meta += `<p class="qa2-meta"><strong>BRINE</strong> ✓ PASS</p>${brineSummaryHtml(t.current_brine)}`;
     }
     actions.push(
-      `<button type="button" class="btn-primary btn-touch" data-qa="ready_for_qa" data-tank-id="${tid}">READY FOR QA/QC</button>`
+      `<button type="button" class="btn-primary btn-touch" data-qa="ready_for_qa" data-tank-id="${tid}">${
+        assemblyPending ? 'TESTING DONE — SEND TO ASSEMBLY' : 'READY FOR QA/QC'
+      }</button>`
     );
   } else if (selected === 'VACUUM') {
     meta += `<p class="qa2-meta"><strong>VACUUM TEST</strong> (selected)</p>`;
@@ -311,7 +461,10 @@ function testingCard(t) {
   );
   actions.push(restoreButton(t));
 
-  return tankCard(t, meta, actions.join('\n'));
+  const stageChip = t.is_testing_retest
+    ? chipHtml('Testing — Retest', 'stage')
+    : chipHtml('In Testing', 'stage');
+  return tankCard(t, meta, actions.join('\n'), '', [stageChip, assemblyChip(t)]);
 }
 
 function failedHoldCard(t) {
@@ -324,7 +477,9 @@ function failedHoldCard(t) {
        <p class="qa2-meta">Failed: ${escapeHtml(formatTs(t.qa_completed_at))}</p>`,
       `<button type="button" class="btn-primary btn-touch" data-qa="start_qa" data-tank-id="${Number(t.id)}">RESTART QA</button>
        <button type="button" class="btn-touch btn-fail" data-qa="send_to_fab_rework" data-tank-id="${Number(t.id)}">SEND BACK TO FAB REWORK</button>
-       ${restoreButton(t)}`
+       ${restoreButton(t)}`,
+      '',
+      [chipHtml('QA Failed', 'fail'), assemblyChip(t)]
     );
   }
   const vacFail = t.failure_source === 'vacuum' ? t.latest_failed_vacuum || null : null;
@@ -341,15 +496,25 @@ function failedHoldCard(t) {
   }
   meta += `<p class="qa2-meta">Reason: ${escapeHtml(fail.failure_note || '—')}</p>
     <p class="qa2-meta">Failed: ${escapeHtml(formatTs(fail.completed_at))}</p>`;
+  if (t.assembly_done === false) {
+    meta += `<p class="qa2-meta">Assembly blocked until Retest passes or FAB Rework is complete.</p>`;
+  }
   if (vacFail) meta += vacuumSummaryHtml(vacFail);
   if (brineFail) meta += brineSummaryHtml(brineFail);
+  const failChip = vacFail
+    ? chipHtml('Vacuum Failed', 'fail')
+    : brineFail
+      ? chipHtml('Brine Failed', 'fail')
+      : chipHtml('Testing Failed', 'fail');
   return tankCard(
     t,
     meta,
     `<button type="button" class="btn-primary btn-touch" data-qa="testing_retest" data-tank-id="${Number(t.id)}">RETEST</button>
      <button type="button" class="btn-touch btn-fail" data-qa="send_to_fab_rework" data-tank-id="${Number(t.id)}">SEND BACK TO FAB REWORK</button>
      <button type="button" class="btn-secondary btn-touch" data-qa="add_note" data-tank-id="${Number(t.id)}" data-attempt-id="${noteId}">ADD NOTE</button>
-     ${restoreButton(t)}`
+     ${restoreButton(t)}`,
+    '',
+    [failChip, assemblyChip(t)]
   );
 }
 
@@ -362,13 +527,23 @@ function readyQaCard(t) {
     t,
     meta,
     `<button type="button" class="btn-primary btn-touch" data-qa="start_qa" data-tank-id="${Number(t.id)}">START QA</button>
-     ${restoreButton(t)}`
+     ${restoreButton(t)}`,
+    '',
+    [chipHtml('Ready for QA/QC', 'stage'), assemblyChip(t)]
   );
 }
 
 function renderAll() {
   if (!board) return;
-  renderList(els.readyTestList, board.ready_for_testing, readyTestingCard);
+  const readyAll = board.ready_for_testing || [];
+  const readyOpen = readyAll.filter((t) => !t.locked);
+  const readyLocked = readyAll.filter((t) => t.locked);
+  renderList(els.readyTestList, readyOpen, readyTestingCard);
+  if (els.readyTestLockedList) {
+    if (!readyLocked.length) els.readyTestLockedList.innerHTML = '';
+    else renderList(els.readyTestLockedList, readyLocked, readyTestingCard);
+  }
+  syncLockedSection();
   renderList(els.testingList, board.testing, testingCard);
   (board.testing || []).forEach(syncOpenFromTank);
   renderList(els.readyQaList, board.ready_for_qa, readyQaCard);
@@ -379,11 +554,15 @@ function renderAll() {
        <p class="qa2-meta">Started: ${escapeHtml(formatTs(t.qa_started_at))}</p>`,
       `<button type="button" class="btn-touch btn-pass" data-qa="qa_pass" data-tank-id="${Number(t.id)}">PASS</button>
        <button type="button" class="btn-touch btn-fail" data-qa="qa_fail" data-tank-id="${Number(t.id)}">FAIL</button>
-       ${restoreButton(t)}`
+       ${restoreButton(t)}`,
+      '',
+      [chipHtml('QA/QC In Progress', 'stage'), assemblyChip(t)]
     )
   );
   const failed = board.failed_hold || board.qa_failed || [];
   renderList(els.qaFailedList, failed, failedHoldCard);
+  updateCounts();
+  applySearchFilter();
 }
 
 async function loadBoard() {
@@ -864,7 +1043,42 @@ if (els.resultPass) {
 if (els.resultFail) {
   els.resultFail.addEventListener('click', () => submitTestResult('FAIL'));
 }
-document.addEventListener('click', (ev) => void handleClick(ev));
+
+document.addEventListener('click', (ev) => {
+  const toggle = ev.target.closest('[data-qa2-toggle]');
+  if (toggle) {
+    ev.preventDefault();
+    const tid = Number(toggle.getAttribute('data-qa2-toggle'));
+    if (!Number.isFinite(tid)) return;
+    if (expandedTankIds.has(tid)) expandedTankIds.delete(tid);
+    else expandedTankIds.add(tid);
+    const card = toggle.closest('.qa2-card');
+    if (card) {
+      const open = expandedTankIds.has(tid);
+      card.classList.toggle('is-expanded', open);
+      toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+    return;
+  }
+  const tabBtn = ev.target.closest('[data-tab]');
+  if (tabBtn && (tabBtn.classList.contains('qa2-tab') || tabBtn.classList.contains('qa2-stat'))) {
+    ev.preventDefault();
+    setActiveTab(tabBtn.getAttribute('data-tab'));
+    return;
+  }
+  if (els.lockedTestingToggle && els.lockedTestingToggle.contains(ev.target)) {
+    ev.preventDefault();
+    lockedSectionOpen = !lockedSectionOpen;
+    syncLockedSection();
+    return;
+  }
+  void handleClick(ev);
+});
+
+if (els.tankSearch) {
+  els.tankSearch.addEventListener('input', () => applySearchFilter());
+}
+
 if (els.logoutBtn) {
   els.logoutBtn.addEventListener('click', async () => {
     if (IS_MACHINE_KIOSK) {
@@ -876,6 +1090,8 @@ if (els.logoutBtn) {
     window.location.href = '/manager-login';
   });
 }
+
+setActiveTab(activeTab);
 
 void loadBoard().then(() => {
   setInterval(() => void loadBoard(), 10000);

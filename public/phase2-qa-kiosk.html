@@ -8,33 +8,380 @@
     <link rel="stylesheet" href="/scan.css" />
     <link rel="stylesheet" href="/status-styles.css" />
     <style>
-      .qa2-brand { margin: 0; font-size: 1.05rem; font-weight: 800; letter-spacing: 0.04em; color: #64748b; }
+      :root {
+        --qa2-ink: #0f172a;
+        --qa2-muted: #64748b;
+        --qa2-line: #dbe3ee;
+        --qa2-panel: #ffffff;
+        --qa2-soft: #f4f7fb;
+        --qa2-test: #0284c7;
+        --qa2-qa: #059669;
+        --qa2-fail: #dc2626;
+        --qa2-warn: #b45309;
+        --qa2-locked: #94a3b8;
+      }
+
+      .qa2-brand { margin: 0; font-size: 0.95rem; font-weight: 800; letter-spacing: 0.04em; color: var(--qa2-muted); }
       .qa2-sub { margin: 0.15rem 0 0; font-weight: 700; color: #1e3a5f; }
-      .qa2-grid { display: grid; gap: 16px; margin-top: 14px; }
-      .qa2-section { border: 2px solid #cbd5e1; border-radius: 14px; padding: 14px; background: #fff; }
-      .qa2-section h2 { margin: 0 0 10px; font-size: 1.05rem; letter-spacing: 0.06em; text-transform: uppercase; }
-      .qa2-section--qa { border-color: #a7f3d0; }
-      .qa2-section--test { border-color: #7dd3fc; }
-      .qa2-section--fail { border-color: #fca5a5; }
-      .qa2-card { border: 2px solid #e2e8f0; border-radius: 12px; padding: 12px; display: grid; gap: 10px; margin-top: 10px; }
-      .qa2-title { margin: 0; font-size: 1.25rem; font-weight: 900; }
-      .qa2-meta { margin: 0; font-weight: 700; color: #475569; }
-      .qa2-actions { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; }
+
+      .qa2-dash {
+        display: grid;
+        gap: 12px;
+        margin-top: 10px;
+        min-width: 0;
+      }
+
+      .qa2-summary {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 8px;
+      }
+      .qa2-stat {
+        display: grid;
+        gap: 2px;
+        min-width: 0;
+        padding: 10px 12px;
+        border: 1px solid var(--qa2-line);
+        border-radius: 12px;
+        background: var(--qa2-soft);
+        cursor: pointer;
+        text-align: left;
+        transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+      }
+      .qa2-stat:hover { border-color: #94a3b8; }
+      .qa2-stat.is-active {
+        background: #fff;
+        border-color: #334155;
+        box-shadow: 0 0 0 2px rgba(15, 23, 42, 0.08);
+      }
+      .qa2-stat-count {
+        font-size: 1.45rem;
+        font-weight: 900;
+        line-height: 1.1;
+        color: var(--qa2-ink);
+      }
+      .qa2-stat-label {
+        font-size: 0.72rem;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--qa2-muted);
+        overflow-wrap: anywhere;
+      }
+      .qa2-stat[data-tab="ready_test"] .qa2-stat-count,
+      .qa2-stat[data-tab="testing"] .qa2-stat-count { color: var(--qa2-test); }
+      .qa2-stat[data-tab="ready_qa"] .qa2-stat-count,
+      .qa2-stat[data-tab="qa_progress"] .qa2-stat-count { color: var(--qa2-qa); }
+      .qa2-stat[data-tab="failed"] .qa2-stat-count { color: var(--qa2-fail); }
+
+      .qa2-toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: stretch;
+        min-width: 0;
+      }
+      .qa2-search {
+        flex: 1 1 220px;
+        min-width: 0;
+        min-height: 52px;
+        font-size: 1.05rem;
+        font-weight: 700;
+        border: 2px solid #94a3b8;
+        border-radius: 12px;
+        padding: 10px 14px;
+        background: #fff;
+        color: var(--qa2-ink);
+      }
+      .qa2-search:focus {
+        outline: none;
+        border-color: #1e3a5f;
+        box-shadow: 0 0 0 3px rgba(30, 58, 95, 0.15);
+      }
+
+      .qa2-tabs {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        min-width: 0;
+      }
+      .qa2-tab {
+        flex: 1 1 auto;
+        min-height: 52px;
+        min-width: min(100%, 140px);
+        padding: 8px 12px;
+        border: 2px solid var(--qa2-line);
+        border-radius: 12px;
+        background: #fff;
+        color: var(--qa2-ink);
+        font-size: 0.88rem;
+        font-weight: 800;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+      }
+      .qa2-tab.is-active {
+        border-color: #1e3a5f;
+        background: #1e3a5f;
+        color: #fff;
+      }
+      .qa2-tab-count {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 1.6rem;
+        height: 1.6rem;
+        padding: 0 6px;
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.08);
+        font-size: 0.8rem;
+        font-weight: 900;
+      }
+      .qa2-tab.is-active .qa2-tab-count { background: rgba(255, 255, 255, 0.2); }
+
+      .qa2-panel { display: none; min-width: 0; }
+      .qa2-panel.is-active { display: grid; gap: 12px; }
+
+      .qa2-panel-head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .qa2-panel-head h2 {
+        margin: 0;
+        font-size: 1rem;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--qa2-ink);
+      }
+      .qa2-panel-note {
+        margin: 0;
+        font-size: 0.9rem;
+        font-weight: 700;
+        color: var(--qa2-muted);
+      }
+
+      .qa2-card-grid {
+        display: grid;
+        gap: 10px;
+        min-width: 0;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .qa2-card {
+        min-width: 0;
+        border: 1px solid var(--qa2-line);
+        border-radius: 14px;
+        background: var(--qa2-panel);
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        overflow: hidden;
+        transition: border-color 0.15s ease, box-shadow 0.15s ease;
+      }
+      .qa2-card.is-expanded {
+        border-color: #94a3b8;
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+      }
+      .qa2-card--locked {
+        background: #f8fafc;
+        border-style: dashed;
+        border-color: #cbd5e1;
+        opacity: 0.92;
+      }
+      .qa2-card--locked .qa2-title { color: var(--qa2-muted); }
+      .qa2-card.is-filtered-out { display: none !important; }
+
+      .qa2-card-summary {
+        width: 100%;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 10px;
+        align-items: start;
+        padding: 12px 14px;
+        border: 0;
+        background: transparent;
+        text-align: left;
+        cursor: pointer;
+        min-height: 64px;
+        color: inherit;
+        font: inherit;
+      }
+      .qa2-card-summary:focus-visible {
+        outline: 3px solid rgba(30, 58, 95, 0.25);
+        outline-offset: -3px;
+      }
+      .qa2-card-summary-main { min-width: 0; display: grid; gap: 8px; }
+      .qa2-title {
+        margin: 0;
+        font-size: 1.15rem;
+        font-weight: 900;
+        color: var(--qa2-ink);
+        overflow-wrap: anywhere;
+      }
+      .qa2-chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        min-width: 0;
+      }
+      .qa2-chip {
+        display: inline-flex;
+        align-items: center;
+        max-width: 100%;
+        padding: 4px 8px;
+        border-radius: 999px;
+        border: 1px solid transparent;
+        font-size: 0.72rem;
+        font-weight: 800;
+        letter-spacing: 0.02em;
+        line-height: 1.2;
+        overflow-wrap: anywhere;
+      }
+      .qa2-chip--stage { background: #eff6ff; color: #1e40af; border-color: #bfdbfe; }
+      .qa2-chip--assembly { background: #ecfdf5; color: #065f46; border-color: #a7f3d0; }
+      .qa2-chip--assembly-pending { background: #fff7ed; color: #9a3412; border-color: #fdba74; }
+      .qa2-chip--lock { background: #f1f5f9; color: #475569; border-color: #cbd5e1; }
+      .qa2-chip--fail { background: #fef2f2; color: #991b1b; border-color: #fecaca; }
+      .qa2-expand-hint {
+        margin-top: 4px;
+        color: var(--qa2-muted);
+        font-size: 0.85rem;
+        font-weight: 900;
+        line-height: 1;
+        transition: transform 0.15s ease;
+      }
+      .qa2-card.is-expanded .qa2-expand-hint { transform: rotate(180deg); }
+
+      .qa2-card-body {
+        display: none;
+        gap: 10px;
+        padding: 0 14px 14px;
+        border-top: 1px solid var(--qa2-line);
+        padding-top: 12px;
+        margin: 0 0 0;
+        min-width: 0;
+      }
+      .qa2-card.is-expanded .qa2-card-body { display: grid; }
+
+      .qa2-meta { margin: 0; font-weight: 700; color: #475569; font-size: 0.92rem; }
+      .qa2-lock-reason { color: var(--qa2-warn); }
+      .qa2-actions {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+        gap: 8px;
+        min-width: 0;
+      }
       .qa2-actions .btn-touch { min-height: 52px; font-weight: 800; border-radius: 12px; }
+      .qa2-actions .btn-touch:disabled { cursor: not-allowed; filter: grayscale(1); opacity: 0.6; }
+
+      .qa2-locked {
+        border: 2px dashed #94a3b8;
+        border-radius: 14px;
+        background: #f8fafc;
+        overflow: hidden;
+      }
+      .qa2-locked[hidden] { display: none !important; }
+      .qa2-locked-toggle {
+        width: 100%;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        min-height: 52px;
+        padding: 10px 14px;
+        border: 0;
+        background: transparent;
+        cursor: pointer;
+        font: inherit;
+        font-weight: 800;
+        color: #475569;
+        text-align: left;
+      }
+      .qa2-locked-body {
+        display: none;
+        gap: 10px;
+        padding: 0 12px 12px;
+        min-width: 0;
+      }
+      .qa2-locked.is-open .qa2-locked-body { display: grid; }
+      .qa2-locked.is-open .qa2-locked-chevron { transform: rotate(180deg); }
+      .qa2-locked-chevron { transition: transform 0.15s ease; }
+
+      .qa2-empty {
+        margin: 0;
+        padding: 18px 14px;
+        border: 1px dashed #cbd5e1;
+        border-radius: 12px;
+        font-weight: 700;
+        color: var(--qa2-muted);
+        background: var(--qa2-soft);
+        grid-column: 1 / -1;
+      }
+      .qa2-search-empty {
+        margin: 0;
+        padding: 14px;
+        border-radius: 12px;
+        font-weight: 700;
+        color: var(--qa2-muted);
+        background: var(--qa2-soft);
+        display: none;
+      }
+      .qa2-search-empty.is-visible { display: block; }
+
       #resultChoice[hidden] { display: none !important; }
       .btn-pass { background: #ecfdf5; border-color: #6ee7b7; color: #065f46; }
       .btn-fail { background: #fef2f2; border-color: #fca5a5; color: #991b1b; }
       .btn-vac { background: #eff6ff; border-color: #93c5fd; color: #1e40af; }
       .btn-brine { background: #f0f9ff; border-color: #7dd3fc; color: #075985; }
-      .qa2-empty { margin: 0; padding: 12px; border: 1px dashed #cbd5e1; border-radius: 10px; font-weight: 700; color: #64748b; }
-      .modal-note { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: none; align-items: center; justify-content: center; z-index: 80; padding: 16px; }
+
+      .modal-note {
+        position: fixed;
+        inset: 0;
+        background: rgba(15, 23, 42, 0.45);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        z-index: 80;
+        padding: 16px;
+      }
       .modal-note.show { display: flex; }
-      .modal-note-card { background: #fff; border-radius: 14px; padding: 18px; width: min(480px, 100%); display: grid; gap: 10px; }
-      .modal-note-card input, .modal-note-card textarea {
-        min-height: 48px; font-size: 1.1rem; font-weight: 700; border: 2px solid #94a3b8; border-radius: 10px; padding: 10px;
+      .modal-note-card {
+        background: #fff;
+        border-radius: 14px;
+        padding: 18px;
+        width: min(480px, 100%);
+        display: grid;
+        gap: 10px;
+      }
+      .modal-note-card input,
+      .modal-note-card textarea {
+        min-height: 48px;
+        font-size: 1.1rem;
+        font-weight: 700;
+        border: 2px solid #94a3b8;
+        border-radius: 10px;
+        padding: 10px;
       }
       .modal-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }
       .modal-actions button { min-height: 48px; font-weight: 800; }
+
+      @media (max-width: 1100px) {
+        .qa2-card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .qa2-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      }
+      @media (max-width: 720px) {
+        .qa2-card-grid { grid-template-columns: minmax(0, 1fr); }
+        .qa2-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .qa2-stat-count { font-size: 1.25rem; }
+      }
+      @media (max-width: 480px) {
+        .qa2-summary { grid-template-columns: minmax(0, 1fr); }
+      }
     </style>
   </head>
   <body class="scan-kiosk">
@@ -43,34 +390,118 @@
         <div class="kiosk-header-row">
           <div>
             <p class="qa2-brand">Factory Scan Clock</p>
-            <h1>QA/QC</h1>
+            <h1>QA/QC Operations</h1>
             <p id="userLabel" class="qa2-sub">Authorized QA/QC only — no labor tracking</p>
           </div>
           <button id="logoutBtn" type="button" class="btn-secondary">Exit</button>
         </div>
       </header>
+
       <section class="kiosk-card">
         <p id="scanWarning" class="scan-warning" role="alert" hidden></p>
-        <div class="qa2-grid">
-          <section class="qa2-section qa2-section--test">
-            <h2>Ready for Testing</h2>
-            <div id="readyTestList"></div>
+
+        <div class="qa2-dash">
+          <div class="qa2-summary" id="qaSummary" aria-label="Category counts">
+            <button type="button" class="qa2-stat is-active" data-tab="ready_test" data-count-for="ready_test">
+              <span class="qa2-stat-count" data-count="ready_test">0</span>
+              <span class="qa2-stat-label">Ready for Testing</span>
+            </button>
+            <button type="button" class="qa2-stat" data-tab="testing" data-count-for="testing">
+              <span class="qa2-stat-count" data-count="testing">0</span>
+              <span class="qa2-stat-label">In Testing</span>
+            </button>
+            <button type="button" class="qa2-stat" data-tab="ready_qa" data-count-for="ready_qa">
+              <span class="qa2-stat-count" data-count="ready_qa">0</span>
+              <span class="qa2-stat-label">Ready for QA/QC</span>
+            </button>
+            <button type="button" class="qa2-stat" data-tab="qa_progress" data-count-for="qa_progress">
+              <span class="qa2-stat-count" data-count="qa_progress">0</span>
+              <span class="qa2-stat-label">QA/QC In Progress</span>
+            </button>
+            <button type="button" class="qa2-stat" data-tab="failed" data-count-for="failed">
+              <span class="qa2-stat-count" data-count="failed">0</span>
+              <span class="qa2-stat-label">Failed / Hold</span>
+            </button>
+          </div>
+
+          <div class="qa2-toolbar">
+            <input
+              id="tankSearch"
+              class="qa2-search"
+              type="search"
+              enterkeyhint="search"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Search tank number…"
+              aria-label="Search tanks by tank number"
+            />
+          </div>
+
+          <div class="qa2-tabs" role="tablist" aria-label="QA/QC categories">
+            <button type="button" class="qa2-tab is-active" role="tab" aria-selected="true" data-tab="ready_test">
+              Ready for Testing <span class="qa2-tab-count" data-count="ready_test">0</span>
+            </button>
+            <button type="button" class="qa2-tab" role="tab" aria-selected="false" data-tab="testing">
+              In Testing <span class="qa2-tab-count" data-count="testing">0</span>
+            </button>
+            <button type="button" class="qa2-tab" role="tab" aria-selected="false" data-tab="ready_qa">
+              Ready for QA/QC <span class="qa2-tab-count" data-count="ready_qa">0</span>
+            </button>
+            <button type="button" class="qa2-tab" role="tab" aria-selected="false" data-tab="qa_progress">
+              QA/QC In Progress <span class="qa2-tab-count" data-count="qa_progress">0</span>
+            </button>
+            <button type="button" class="qa2-tab" role="tab" aria-selected="false" data-tab="failed">
+              Failed / Hold <span class="qa2-tab-count" data-count="failed">0</span>
+            </button>
+          </div>
+
+          <p id="searchEmpty" class="qa2-search-empty">No tanks match that number in this category.</p>
+
+          <section class="qa2-panel is-active" data-panel="ready_test" role="tabpanel">
+            <div class="qa2-panel-head">
+              <h2>Ready for Testing</h2>
+              <p class="qa2-panel-note">Tap a tank to expand actions</p>
+            </div>
+            <div id="readyTestList" class="qa2-card-grid"></div>
+            <div id="lockedTestingSection" class="qa2-locked" hidden>
+              <button type="button" class="qa2-locked-toggle" id="lockedTestingToggle" aria-expanded="false">
+                <span>Locked — In Assembly (<span id="lockedTestingCount">0</span>)</span>
+                <span class="qa2-locked-chevron" aria-hidden="true">▾</span>
+              </button>
+              <div id="readyTestLockedList" class="qa2-locked-body qa2-card-grid"></div>
+            </div>
           </section>
-          <section class="qa2-section qa2-section--test">
-            <h2>Testing</h2>
-            <div id="testingList"></div>
+
+          <section class="qa2-panel" data-panel="testing" role="tabpanel" hidden>
+            <div class="qa2-panel-head">
+              <h2>In Testing</h2>
+              <p class="qa2-panel-note">Vacuum / Brine workflow</p>
+            </div>
+            <div id="testingList" class="qa2-card-grid"></div>
           </section>
-          <section class="qa2-section qa2-section--qa">
-            <h2>Ready for QA/QC</h2>
-            <div id="readyQaList"></div>
+
+          <section class="qa2-panel" data-panel="ready_qa" role="tabpanel" hidden>
+            <div class="qa2-panel-head">
+              <h2>Ready for QA/QC</h2>
+              <p class="qa2-panel-note">All required stages complete</p>
+            </div>
+            <div id="readyQaList" class="qa2-card-grid"></div>
           </section>
-          <section class="qa2-section qa2-section--qa">
-            <h2>QA/QC In Progress</h2>
-            <div id="qaProgressList"></div>
+
+          <section class="qa2-panel" data-panel="qa_progress" role="tabpanel" hidden>
+            <div class="qa2-panel-head">
+              <h2>QA/QC In Progress</h2>
+              <p class="qa2-panel-note">Pass or Fail inspection</p>
+            </div>
+            <div id="qaProgressList" class="qa2-card-grid"></div>
           </section>
-          <section class="qa2-section qa2-section--fail">
-            <h2>Failed / Hold</h2>
-            <div id="qaFailedList"></div>
+
+          <section class="qa2-panel" data-panel="failed" role="tabpanel" hidden>
+            <div class="qa2-panel-head">
+              <h2>Failed / Hold</h2>
+              <p class="qa2-panel-note">Retest or send to FAB Rework</p>
+            </div>
+            <div id="qaFailedList" class="qa2-card-grid"></div>
           </section>
         </div>
       </section>
@@ -92,6 +523,6 @@
         </div>
       </div>
     </div>
-    <script src="/phase2-qa-kiosk.js?v=workflow-order-3"></script>
+    <script src="/phase2-qa-kiosk.js?v=ops-dash-1"></script>
   </body>
 </html>
