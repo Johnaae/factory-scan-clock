@@ -2084,6 +2084,7 @@ const PHASE2_TANK_STATUSES = [
   'removed_from_assembly',
   'ready_for_dome_install',
   'ready_for_final_completion',
+  'dome_installed',
   'rework_required',
 ];
 
@@ -2107,6 +2108,7 @@ function normalizeTankStatus(raw) {
   ) {
     return 'ready_for_dome_install';
   }
+  if (s === 'dome_installed') return 'dome_installed';
   if (PHASE2_TANK_STATUSES.includes(s)) return s;
   if (s === 'active') return 'active';
   return 'active';
@@ -2130,7 +2132,8 @@ function tankFabRestartBlocked(tankRow) {
     st === 'assembly_in_progress' ||
     st === 'ready_for_testing' ||
     st === 'testing_in_progress' ||
-    st === 'ready_for_dome_install'
+    st === 'ready_for_dome_install' ||
+    st === 'dome_installed'
   );
 }
 
@@ -3080,6 +3083,14 @@ function tankProductionBlockBody(tankRow) {
       ok: false,
       error: 'tank_archived',
       message: 'This tank is completed. Restore it in Tank Management before resuming work.',
+    };
+  }
+  if (normalizeTankStatus(tankRow.status) === 'dome_installed') {
+    return {
+      ok: false,
+      error: 'dome_installed_waiting',
+      tank_number: tankRow.tank_number,
+      message: `Tank ${tankRow.tank_number} — Dome Installed. Waiting for the next Fabrication phase.`,
     };
   }
   const fabBlock = tankFabRestartBlockBody(tankRow);
@@ -5036,6 +5047,15 @@ const phase2 = createPhase2AssemblyTesting(pool, {
   },
 });
 
+/** Phase 3 Dome Shop + Dome Inventory + Fabrication Dome Install */
+const { createPhase3Dome } = require('./scripts/phase3-dome');
+const phase3 = createPhase3Dome(pool, {
+  nowIso,
+  phase1,
+  phase2,
+  isEmployeeShopsReady: () => isEmployeeShopsReady(),
+});
+
 /** Unified Phase1 + Phase2 (+ scan) employee labor for Team/Employee details */
 const { createUnifiedEmployeeLabor } = require('./scripts/unified-employee-labor');
 
@@ -5093,6 +5113,7 @@ const unifiedLabor = createUnifiedEmployeeLabor(pool, {
       ? phase1.collectEmployeeMembershipProductionIntervals(employeeId, bounds, closeMs)
       : Promise.resolve([]),
   collectScanIntervals: collectScanLaborIntervalsForUnified,
+  collectDomeIntervals: (...args) => phase3.collectDomeLaborIntervals(...args),
   formatXhYmFromMs: (ms) => {
     const totalMin = Math.round(Math.max(0, Number(ms) || 0) / 60000);
     return `${Math.floor(totalMin / 60)}h ${totalMin % 60}m`;
@@ -5137,6 +5158,10 @@ function isAssemblyTestingMachine(machine) {
 
 function isQaTestingMachine(machine) {
   return machineWorkflow(machine) === 'qa_testing';
+}
+
+function isDomeMachine(machine) {
+  return machineWorkflow(machine) === 'dome';
 }
 
 async function assemblyMachineFromRequest(req) {
@@ -5187,6 +5212,24 @@ function rejectWrongKioskWorkflow(res, machine, expected) {
         wf === 'assembly_testing'
           ? 'This machine is Assembly/Testing. Open the assembly kiosk.'
           : 'This machine is Winding. Open the winding kiosk.',
+      workflow: wf || 'winding',
+    });
+    return true;
+  }
+  if (expected === 'winding' && wf === 'dome') {
+    res.status(409).json({
+      ok: false,
+      error: 'wrong_workflow',
+      message: 'This machine is the Dome Shop. Open the Dome Shop kiosk.',
+      workflow: wf,
+    });
+    return true;
+  }
+  if (expected === 'dome' && wf !== 'dome') {
+    res.status(409).json({
+      ok: false,
+      error: 'wrong_workflow',
+      message: 'This machine is not a Dome Shop machine.',
       workflow: wf || 'winding',
     });
     return true;
@@ -5271,6 +5314,136 @@ async function resolvePhaseTargetSession(machine, pending, openRows) {
     return null;
   }
   return (await phase1.getOpenSession(machine.id)) || openRows[0] || null;
+}
+
+/**
+ * Fabrication scan of a tank that passed Assembly/Testing/QA: Dome Install only, at tank level
+ * (no piece selection). A tank with a dome already installed has no Fabrication work left.
+ */
+async function domeInstallTankSelected(machine, tankRow, assignment) {
+  const live = await phase3.tankLiveInstallStatus(tankRow.id);
+  if (live && live.status === 'installed') {
+    return {
+      ok: false,
+      status: 409,
+      body: {
+        ok: false,
+        error: 'dome_already_installed',
+        tank_number: tankRow.tank_number,
+        dome_number: live.dome_number,
+        message: `Dome ${live.dome_number} is already installed on Tank ${tankRow.tank_number}.`,
+      },
+    };
+  }
+  const pieceCount = Math.min(8, Math.max(1, Number(tankRow.piece_count) || 1));
+  await phase1.ensureTankPieces(tankRow.id, pieceCount);
+  const pieces = (await phase1.getTankPieces(tankRow.id)).filter((p) => Number(p.piece_number) <= pieceCount);
+  await phase1.setMachineActiveTank(machine.id, tankRow.id);
+  const openRows = await phase1.getOpenSessionsForMachine(machine.id);
+  const tankSessions = openRows.filter((r) => Number(r.tank_id) === Number(tankRow.id));
+  const inProgress = live && live.status === 'in_progress' ? { dome_number: live.dome_number } : null;
+  return {
+    ok: true,
+    status: 200,
+    body: {
+      ok: true,
+      action: 'tank_selected',
+      dome_install_mode: true,
+      dome_install_tank_level: true,
+      dome_install_in_progress: inProgress,
+      assignment,
+      pending: { tank: tankRow.tank_number, piece: null },
+      pieces,
+      piece_count: pieceCount,
+      tank_id: Number(tankRow.id),
+      tank_number: tankRow.tank_number,
+      tank_status: normalizeTankStatus(tankRow.status),
+      rework_required: false,
+      dome_state: await phase3.getTankDomeState(tankRow.id),
+      open_sessions: await Promise.all(openRows.map((r) => phase1.mapSession(r))),
+      tank_open_sessions: await Promise.all(tankSessions.map((r) => phase1.mapSession(r))),
+      message: inProgress
+        ? `Dome Install in progress on Tank ${tankRow.tank_number} (Dome ${inProgress.dome_number}). Tap Finish Install or Cancel Install.`
+        : `Tank ${tankRow.tank_number} is Ready for Dome Install — tap Dome Install to choose a completed dome.`,
+    },
+  };
+}
+
+/**
+ * Phase scan guard for Dome Install. Returns null to continue the normal Fabrication flow.
+ * A running Dome Install session only accepts Finish/Cancel Install; a Ready for Dome Install
+ * tank only accepts the Dome Install phase (which opens the dome picker); a Dome Installed tank
+ * accepts no phase.
+ */
+async function domeInstallPhaseIntercept(machine, ph, pending, focusedSession, body) {
+  if (focusedSession && String(focusedSession.activity_code || '').toUpperCase() === 'DOME_INSTALL') {
+    const inst = await phase3.installForSession(focusedSession.id);
+    if (inst) {
+      return {
+        ok: false,
+        status: 409,
+        body: {
+          ok: false,
+          error: 'dome_install_active',
+          message: `Dome Install in progress (Dome ${inst.dome_number}). Tap Finish Install or Cancel Install.`,
+          installation: inst,
+        },
+      };
+    }
+  }
+  let tankRow = null;
+  if (pending.tank) {
+    tankRow = await validateTankExists(pending.tank);
+  } else if (machine.active_tank_id) {
+    const r = await pool.query(`SELECT * FROM tanks WHERE id = $1`, [Number(machine.active_tank_id)]);
+    tankRow = r.rows[0] || null;
+  }
+  if (!tankRow || isTankDeleted(tankRow)) return null;
+  if (focusedSession && Number(focusedSession.tank_id) === Number(tankRow.id)) return null;
+  // The phase after Dome Installed is not defined yet: refuse every phase (incl. Tank Complete).
+  if (normalizeTankStatus(tankRow.status) === 'dome_installed') {
+    return { ok: false, status: 409, body: tankProductionBlockBody(tankRow) };
+  }
+  if (!phase3.isDomeTankStatus(tankRow.status)) return null;
+  if (ph.code !== 'DOME_INSTALL') {
+    return {
+      ok: false,
+      status: 409,
+      body: {
+        ok: false,
+        error: 'dome_install_only',
+        tank_number: tankRow.tank_number,
+        message: `Tank ${tankRow.tank_number} is Ready for Dome Install. Tap Dome Install.`,
+      },
+    };
+  }
+  const blocked = await phase3.tankInstallBlock(tankRow);
+  if (blocked) return blocked;
+  const available = await phase3.listAvailableDomes({});
+  if (!available.ok) return available;
+  return {
+    ok: true,
+    status: 200,
+    body: {
+      ok: true,
+      action: 'dome_install_select',
+      tank_id: Number(tankRow.id),
+      tank_number: tankRow.tank_number,
+      piece_number: null,
+      domes: available.body.domes,
+      diameters: available.body.diameters,
+      pending: { tank: tankRow.tank_number, piece: null },
+      message: available.body.domes.length
+        ? 'Select the dome to install.'
+        : 'No completed domes are available in Dome Inventory.',
+    },
+  };
+}
+
+async function focusedDomeInstallForMachine(machine) {
+  const s = await phase1.getOpenSession(machine.id);
+  if (!s || String(s.activity_code || '').toUpperCase() !== 'DOME_INSTALL') return null;
+  return phase3.installForSession(s.id);
 }
 
 async function mapOpenSessionsPayload(machineId, activeTankIdOptional) {
@@ -5442,6 +5615,22 @@ async function handleWindingScanAction(machine, body) {
     if (!assignment) {
       return { ok: false, status: 409, body: { ok: false, error: 'need_team', message: NEED_TEAM_MESSAGE } };
     }
+    const domeResumed = await phase3.resumeEndShiftInstalls(machine, assignment);
+    const domeResumeMsg = domeResumed.resumed.length
+      ? `Dome Install resumed on Tank ${domeResumed.resumed.join(', ')}.`
+      : null;
+    const domeResumeOnly = () => ({
+      ok: true,
+      status: 200,
+      body: {
+        ok: true,
+        action: 'resume',
+        dome_install_resumed: domeResumed.resumed,
+        message: domeResumeMsg,
+        assignment,
+        pending: { tank: null },
+      },
+    });
     // After End Shift: resume all WIP tanks on this Winder together.
     if (body.resume_all_wip === true || !pending.tank) {
       const allWip = await phase1.resumeAllEndShiftWipTanks(
@@ -5455,9 +5644,19 @@ async function handleWindingScanAction(machine, body) {
         {}
       );
       if (allWip.ok) {
-        return { ok: true, status: 200, body: { ok: true, ...allWip.body, assignment, pending: { tank: null } } };
+        const merged = { ok: true, ...allWip.body, assignment, pending: { tank: null } };
+        if (domeResumeMsg) {
+          merged.dome_install_resumed = domeResumed.resumed;
+          merged.message = [allWip.body.message, domeResumeMsg].filter(Boolean).join(' ');
+        }
+        return { ok: true, status: 200, body: merged };
       }
+      if (domeResumeMsg) return domeResumeOnly();
       if (!pending.tank) return allWip;
+    }
+    if (domeResumeMsg) {
+      const pausedTankRow = await phase1.getPausedTankByNumber(pending.tank);
+      if (!pausedTankRow) return domeResumeOnly();
     }
     if (!pending.tank) {
       return {
@@ -5490,6 +5689,9 @@ async function handleWindingScanAction(machine, body) {
     }
     // Persistent rework_required must survive End Shift; heal if a prior shift wiped it.
     const tankRow = (await phase1.ensurePersistentReworkStatus(tankRowRaw)) || tankRowRaw;
+    if (!isTankDeleted(tankRow) && phase3.isDomeTankStatus(tankRow.status)) {
+      return domeInstallTankSelected(machine, tankRow, assignment);
+    }
     const tankBlock = tankProductionBlockBody(tankRow);
     if (tankBlock) {
       if (tankBlock.error === 'tank_archived') {
@@ -5599,7 +5801,8 @@ async function handleWindingScanAction(machine, body) {
     tankRow = (await phase1.ensurePersistentReworkStatus(tankRow)) || tankRow;
     const resolved = await phase1.resolvePieceForTank(tankRow.id, pieceNum);
     if (!resolved.ok) return resolved;
-    const reworkAllowed = normalizeTankStatus(tankRow.status) === 'rework_required';
+    const domeInstallMode = !isTankDeleted(tankRow) && phase3.isDomeTankStatus(tankRow.status);
+    const reworkAllowed = normalizeTankStatus(tankRow.status) === 'rework_required' || domeInstallMode;
     if (String(resolved.piece.status) === 'completed' && !reworkAllowed) {
       return {
         ok: false,
@@ -5648,9 +5851,12 @@ async function handleWindingScanAction(machine, body) {
         assignment,
         pending,
         open_sessions: await Promise.all(openRows.map((r) => phase1.mapSession(r))),
+        ...(domeInstallMode ? { dome_install_mode: true, tank_id: Number(tankRow.id) } : {}),
         message: existingOnMachine
           ? `Piece ${pieceNum} selected — ${existingOnMachine.activity_name || existingOnMachine.activity_code} in progress. Scan a phase to change.`
-          : `Piece ${pieceNum} selected. Scan a phase to begin.`,
+          : domeInstallMode
+            ? `Piece ${pieceNum} selected. Tap Dome Install.`
+            : `Piece ${pieceNum} selected. Scan a phase to begin.`,
       },
     };
   }
@@ -5702,6 +5908,8 @@ async function handleWindingScanAction(machine, body) {
     }
     // Piece Complete / Tank Complete / Part Complete
     const focusedSession = await resolvePhaseTargetSession(machine, pending, openRows);
+    const domeIntercept = await domeInstallPhaseIntercept(machine, ph, pending, focusedSession, body);
+    if (domeIntercept) return domeIntercept;
     if (ph.piece_complete || ph.completes) {
       if (!focusedSession) {
         // Tank Complete after all pieces are done (no open session).
@@ -6016,12 +6224,22 @@ app.get('/api/kiosk/winding/config', async (req, res) => {
     let pieces = piecesTankId ? await phase1.getTankPieces(piecesTankId) : [];
     let piece_count = 0;
     let active_tank_number = null;
+    let active_tank_dome_install = false;
     if (piecesTankId) {
       const tankMeta = await pool.query(
-        `SELECT tank_number, piece_count FROM tanks WHERE id = $1`,
+        `SELECT tank_number, piece_count, status, deleted_at FROM tanks WHERE id = $1`,
         [piecesTankId]
       );
       if (tankMeta.rows[0]) {
+        const meta = tankMeta.rows[0];
+        if (
+          !meta.deleted_at &&
+          phase3.isDomeTankStatus(meta.status) &&
+          !openRows.some((r) => Number(r.tank_id) === Number(piecesTankId))
+        ) {
+          const live = await phase3.tankLiveInstallStatus(piecesTankId);
+          active_tank_dome_install = !live || live.status !== 'installed';
+        }
         piece_count = Math.min(8, Math.max(1, Number(tankMeta.rows[0].piece_count) || 1));
         active_tank_number = tankMeta.rows[0].tank_number;
         await phase1.ensureTankPieces(piecesTankId, piece_count);
@@ -6081,11 +6299,28 @@ app.get('/api/kiosk/winding/config', async (req, res) => {
       piece_count,
       active_tank_id: activeTankId,
       active_tank_number,
+      active_tank_dome_install,
       phase_time_summary: phaseTimeSummary,
+      dome_installs: await phase3.listMachineInstalls(machine.id),
     });
   } catch (err) {
     console.error('[winding config]', err);
     return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load winding kiosk.' });
+  }
+});
+
+app.get('/api/kiosk/winding/domes/available', async (req, res) => {
+  try {
+    const machine = await windingMachineFromRequest(req);
+    if (!machine || !Number(machine.active)) {
+      return res.status(403).json({ ok: false, error: 'forbidden', message: 'Open a machine kiosk URL to use this screen.' });
+    }
+    if (rejectWrongKioskWorkflow(res, machine, 'winding')) return;
+    const result = await phase3.listAvailableDomes({ search: req.query.search, diameter: req.query.diameter });
+    return res.status(result.status).json(result.body);
+  } catch (err) {
+    console.error('[winding domes available]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load available domes.' });
   }
 });
 
@@ -6168,6 +6403,36 @@ app.post('/api/kiosk/winding/action', async (req, res) => {
         tankNumber: body.tank_number,
         phaseRaw: body.phase,
         pieceNumber: body.piece_number != null ? Number(body.piece_number) : null,
+      });
+    } else if (action === 'dome_install_start') {
+      const assignment = await phase1.getMachineAssignment(machine.id);
+      result = await phase3.startInstall(machine, assignment, body);
+      if (result.ok) {
+        Object.assign(result.body, await mapOpenSessionsPayload(machine.id, result.body.tank_id), { assignment });
+      }
+    } else if (action === 'dome_install_finish' || action === 'dome_install_cancel') {
+      result =
+        action === 'dome_install_finish'
+          ? await phase3.finishInstall(machine, body)
+          : await phase3.cancelInstall(machine, body);
+      if (result.ok) {
+        await pool.query(
+          `UPDATE machines SET active_tank_id = NULL
+           WHERE id = $1 AND active_tank_id = (SELECT tank_id FROM dome_installations WHERE id = $2)
+             AND NOT EXISTS (SELECT 1 FROM machine_sessions ms
+                             WHERE ms.machine_id = $1 AND ms.tank_id = machines.active_tank_id AND ms.status IN ('running', 'stopped'))`,
+          [machine.id, Number(body.installation_id)]
+        );
+        Object.assign(result.body, await mapOpenSessionsPayload(machine.id, null));
+      }
+    } else if (
+      (action === 'change_phase' || action === 'part_complete') &&
+      (await focusedDomeInstallForMachine(machine))
+    ) {
+      return res.status(409).json({
+        ok: false,
+        error: 'dome_install_active',
+        message: 'Dome Install in progress. Tap Finish Install or Cancel Install.',
       });
     } else if (action === 'change_phase') {
       const confirmer = confirmerFromBody(body);
@@ -6309,6 +6574,127 @@ app.post('/api/kiosk/winding/action', async (req, res) => {
     return res.json(result.body);
   } catch (err) {
     console.error('[winding action]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not process action.' });
+  }
+});
+
+async function domeKioskMachine(req, res) {
+  const machine = await windingMachineFromRequest(req);
+  if (!machine || !Number(machine.active)) {
+    res.status(403).json({ ok: false, error: 'forbidden', message: 'Open a machine kiosk URL to use this screen.' });
+    return null;
+  }
+  if (rejectWrongKioskWorkflow(res, machine, 'dome')) return null;
+  return machine;
+}
+
+/**
+ * Dome Shop scan input — same rules as the Assembly kiosk: TEAM adds / focuses a team card,
+ * an EMPLOYEE badge joins or moves to the selected team card (temporary, this shift).
+ * Lunch / Resume / End Shift are team-card buttons, not scans.
+ */
+async function handleDomeScanAction(machine, body) {
+  const barcode = String(body.barcode || '').trim();
+  if (!barcode) {
+    return { ok: false, status: 400, body: { ok: false, error: 'validation', message: 'Barcode required.' } };
+  }
+  const keyword = barcode.toLowerCase().replace(/[\s-]+/g, '_');
+  const parsed = phase1.parseScan(barcode);
+  const forbidden = new Set(['start', 'stop', 'finish', 'complete', 'lunch', 'resume', 'end_shift', 'pause', 'break']);
+  if (forbidden.has(keyword) || parsed.type === 'pause' || parsed.type === 'resume' || parsed.type === 'end_shift') {
+    return {
+      ok: false,
+      status: 400,
+      body: {
+        ok: false,
+        error: 'use_buttons',
+        message: 'Use the buttons on the Team card for Lunch, Resume and End Shift. Scan only a TEAM or EMPLOYEE barcode.',
+      },
+    };
+  }
+  if (parsed.type === 'unknown' || parsed.type === 'team') {
+    let team = await phase1.getTeamByBarcode(parsed.type === 'team' ? parsed.value : barcode);
+    if (!team && typeof phase1.normalizeTeamBarcode === 'function') {
+      const normalized = phase1.normalizeTeamBarcode(barcode);
+      if (normalized && normalized !== barcode) team = await phase1.getTeamByBarcode(normalized);
+    }
+    if (team && Number(team.active)) {
+      const { rows } = await pool.query(`SELECT department FROM teams WHERE id = $1`, [team.id]);
+      return phase3.assignTeam(machine, { ...team, department: rows[0] ? rows[0].department : null });
+    }
+    if (parsed.type === 'team') {
+      return { ok: false, status: 404, body: { ok: false, error: 'unknown_team', message: 'Unknown team barcode.' } };
+    }
+  }
+
+  const employee = await lookupActiveEmployeeByScan(barcode);
+  if (employee) {
+    const assignment = await phase1.getMachineAssignment(machine.id);
+    const selectedTeamId = Number(body.team_id != null ? body.team_id : body.teamId);
+    const teamId = Number.isInteger(selectedTeamId) && selectedTeamId > 0 ? selectedTeamId : assignment ? assignment.team_id : null;
+    if (!teamId) {
+      return { ok: false, status: 409, body: { ok: false, error: 'need_team', message: 'Scan your Team barcode first.' } };
+    }
+    if (body.employee_out === true) {
+      return phase3.employeeOut(machine, { employee_id: employee.id, team_id: teamId });
+    }
+    const moved = await phase2.moveEmployeeToAssemblyTeam(machine, {
+      employee_id: employee.id,
+      team_id: teamId,
+      dome_kiosk: true,
+      onMoved: (client, ctx) => phase3.handleEmployeeTeamMove(client, ctx),
+    });
+    if (!moved.ok) return moved;
+    return { ok: true, status: 200, body: { ...moved.body, assignment } };
+  }
+  return {
+    ok: false,
+    status: 400,
+    body: {
+      ok: false,
+      error: 'unknown_barcode',
+      message: 'Unrecognized barcode. Scan a Team or employee badge.',
+    },
+  };
+}
+
+app.get('/api/kiosk/dome/config', async (req, res) => {
+  try {
+    const machine = await domeKioskMachine(req, res);
+    if (!machine) return;
+    const result = await phase3.getKioskConfig(machine);
+    return res.status(result.status).json(result.body);
+  } catch (err) {
+    console.error('[dome config]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load the Dome Shop kiosk.' });
+  }
+});
+
+app.post('/api/kiosk/dome/action', async (req, res) => {
+  try {
+    const machine = await domeKioskMachine(req, res);
+    if (!machine) return;
+    const body = req.body || {};
+    const action = String(body.action || '').trim().toLowerCase();
+    const handlers = {
+      scan: () => handleDomeScanAction(machine, body),
+      create_dome: () => phase3.createDome(machine, body),
+      start_dome: () => phase3.startDome(machine, body),
+      stop_dome: () => phase3.stopDome(machine, body),
+      lunch: () => phase3.lunch(machine, body),
+      resume: () => phase3.resume(machine, body),
+      end_shift: () => phase3.endShift(machine, body),
+      complete_dome: () => phase3.completeDome(machine, body),
+      set_fabricators: () => phase3.setFabricators(machine, body),
+      employee_out: () => phase3.employeeOut(machine, body),
+    };
+    if (!handlers[action]) {
+      return res.status(400).json({ ok: false, error: 'validation', message: 'Unknown action.' });
+    }
+    const result = await handlers[action]();
+    return res.status(result.status || (result.ok ? 200 : 400)).json(result.body);
+  } catch (err) {
+    console.error('[dome action]', err);
     return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not process action.' });
   }
 });
@@ -6930,6 +7316,41 @@ app.post('/api/manager/tanks/:id/remove-from-assembly', async (req, res) => {
     return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not remove tank from Assembly.' });
   }
 });
+
+/** Phase 3 Dome Inventory (manager). */
+function domeManagerRoute(label, handler) {
+  return async (req, res) => {
+    const auth = currentManagerFromSession(req);
+    if (!auth) {
+      return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Manager login required.' });
+    }
+    try {
+      const result = await handler(req, auth);
+      return res.status(result.status || (result.ok ? 200 : 400)).json(result.body);
+    } catch (err) {
+      console.error(`[manager domes ${label}]`, err);
+      return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not process Dome Inventory request.' });
+    }
+  };
+}
+
+app.get(
+  '/api/manager/domes',
+  domeManagerRoute('list', (req) =>
+    phase3.listDomes({
+      search: req.query.search,
+      diameter: req.query.diameter,
+      type: req.query.type,
+      status: req.query.status,
+    })
+  )
+);
+app.post('/api/manager/domes', domeManagerRoute('add', (req, auth) => phase3.addManualDome(req.body || {}, auth.username)));
+app.get('/api/manager/domes/:id', domeManagerRoute('details', (req) => phase3.getDomeDetails(req.params.id)));
+app.patch(
+  '/api/manager/domes/:id',
+  domeManagerRoute('edit', (req, auth) => phase3.updateDome(req.params.id, req.body || {}, auth.username))
+);
 
 app.get('/api/manager/machines', async (req, res) => {
   const auth = currentManagerFromSession(req);
@@ -7841,7 +8262,8 @@ app.put('/api/manager/machine-areas/:id', async (req, res) => {
     }
     if (active === 0 && Number(existing[0].active) !== 0) {
       const usage = await phase1.getMachineUsageSummary(id);
-      if (usage.has_open_production) {
+      const domeUsage = await phase3.machineDomeUsage(id);
+      if (usage.has_open_production || domeUsage.has_open_production) {
         return res.status(409).json({
           ok: false,
           error: 'active_production',
@@ -7889,6 +8311,9 @@ app.post('/api/manager/machine-areas/:id/remove', async (req, res) => {
     }
     const machine = existing[0];
     const usage = await phase1.getMachineUsageSummary(id);
+    const domeUsage = await phase3.machineDomeUsage(id);
+    if (domeUsage.has_open_production) usage.has_open_production = true;
+    if (domeUsage.has_history) usage.has_history = true;
     if (usage.has_open_production) {
       return res.status(409).json({
         ok: false,
@@ -7953,6 +8378,9 @@ app.use((req, res, next) => {
   if (p === '/teams' || p === '/teams.html' || p === '/teams.js' || p === '/machine-areas' || p === '/machine-areas.html' || p === '/machine-areas.js' || p === '/alert-email-settings' || p === '/alert-email-settings.html' || p === '/alert-email-settings.js') {
     return requireManager(req, res, next);
   }
+  if (p === '/dome-inventory' || p === '/dome-inventory.html' || p === '/dome-inventory.js') {
+    return requireManager(req, res, next);
+  }
   if (
     p === '/scan' ||
     p === '/scan/' ||
@@ -7983,6 +8411,9 @@ app.use((req, res, next) => {
     return next();
   }
   if (p.startsWith('/api/kiosk/assembly/')) {
+    return next();
+  }
+  if (p.startsWith('/api/kiosk/dome/')) {
     return next();
   }
   if (p.startsWith('/api/kiosk/')) {
@@ -9383,14 +9814,14 @@ app.get('/api/tanks', async (req, res) => {
   } else {
     sql += ` AND ${tankNotDeletedClause()}`;
     if (statusFilter === 'active') {
-      sql += ` AND LOWER(TRIM(COALESCE(status, ''))) IN ('active', 'paused', 'waiting', '', 'ready_for_assembly', 'assembly_in_progress', 'ready_for_qa', 'qa_in_progress', 'qa_failed', 'ready_for_testing', 'testing_in_progress', 'testing_failed', 'removed_from_assembly', 'ready_for_dome_install', 'ready_for_final_completion', 'rework_required')`;
+      sql += ` AND LOWER(TRIM(COALESCE(status, ''))) IN ('active', 'paused', 'waiting', '', 'ready_for_assembly', 'assembly_in_progress', 'ready_for_qa', 'qa_in_progress', 'qa_failed', 'ready_for_testing', 'testing_in_progress', 'testing_failed', 'removed_from_assembly', 'ready_for_dome_install', 'ready_for_final_completion', 'dome_installed', 'rework_required')`;
     } else if (statusFilter === 'waiting') {
       sql += ` AND LOWER(TRIM(COALESCE(status, ''))) = 'waiting'`;
     } else if (statusFilter === 'archived') {
       sql += ` AND LOWER(TRIM(status)) = 'archived'`;
     } else if (statusFilter === 'all') {
       if (activeOnly) {
-        sql += ` AND (LOWER(TRIM(COALESCE(status, ''))) IN ('active', 'waiting', 'paused', 'ready_for_assembly', 'assembly_in_progress', 'ready_for_qa', 'qa_in_progress', 'qa_failed', 'ready_for_testing', 'testing_in_progress', 'testing_failed', 'removed_from_assembly', 'ready_for_dome_install', 'ready_for_final_completion', 'rework_required') OR TRIM(COALESCE(status, '')) = '')`;
+        sql += ` AND (LOWER(TRIM(COALESCE(status, ''))) IN ('active', 'waiting', 'paused', 'ready_for_assembly', 'assembly_in_progress', 'ready_for_qa', 'qa_in_progress', 'qa_failed', 'ready_for_testing', 'testing_in_progress', 'testing_failed', 'removed_from_assembly', 'ready_for_dome_install', 'ready_for_final_completion', 'dome_installed', 'rework_required') OR TRIM(COALESCE(status, '')) = '')`;
       }
     } else {
       return res.status(400).json({
@@ -9408,7 +9839,7 @@ app.get('/api/tanks', async (req, res) => {
   if (statusFilter === 'trash') {
     sql += ` ORDER BY deleted_at DESC NULLS LAST, tank_number ASC`;
   } else {
-    sql += ` ORDER BY CASE WHEN LOWER(TRIM(COALESCE(status, ''))) IN ('active', '', 'ready_for_assembly', 'assembly_in_progress', 'ready_for_qa', 'qa_in_progress', 'qa_failed', 'ready_for_testing', 'testing_in_progress', 'testing_failed', 'removed_from_assembly', 'ready_for_dome_install', 'ready_for_final_completion', 'rework_required', 'paused', 'waiting') THEN 0 ELSE 1 END, updated_at DESC, tank_number ASC`;
+    sql += ` ORDER BY CASE WHEN LOWER(TRIM(COALESCE(status, ''))) IN ('active', '', 'ready_for_assembly', 'assembly_in_progress', 'ready_for_qa', 'qa_in_progress', 'qa_failed', 'ready_for_testing', 'testing_in_progress', 'testing_failed', 'removed_from_assembly', 'ready_for_dome_install', 'ready_for_final_completion', 'dome_installed', 'rework_required', 'paused', 'waiting') THEN 0 ELSE 1 END, updated_at DESC, tank_number ASC`;
   }
   const { rows } = await pool.query(sql, params);
   const trashCount = await getTrashTankCount();
@@ -9442,6 +9873,15 @@ app.get('/api/tanks', async (req, res) => {
       }
     }
     tanks.push(mapped);
+  }
+  try {
+    const domeMap = await phase3.tankDomeSummaries(tanks.map((t) => t.id));
+    for (const t of tanks) {
+      const d = domeMap.get(Number(t.id));
+      if (d) t.dome_summary = d;
+    }
+  } catch (err) {
+    console.warn('[tanks list] dome summaries (noncritical):', err.message);
   }
   res.json({ ok: true, tanks, trash_count: trashCount });
 });
@@ -9553,7 +9993,10 @@ app.put('/api/tanks/:id', async (req, res) => {
     const becomingActive =
       (status === 'active' || status === 'waiting') && normalizeTankStatus(current.rows[0].status) === 'archived';
     if (becomingArchived) {
-      const fin = await phase2.finalizeTankCompletion(id, { at: ts });
+      const fin = await phase2.finalizeTankCompletion(id, {
+        at: ts,
+        beforeComplete: phase3.makeCompletionGate(req.body && req.body.dome_override_reason, managerAuditName(req)),
+      });
       if (!fin.ok) {
         return res.status(fin.status || 409).json(fin.body || { ok: false, error: 'not_ready_for_final' });
       }
@@ -9635,7 +10078,10 @@ app.patch('/api/tanks/:id/archive', async (req, res) => {
     return res.status(409).json({ ok: false, error: 'tank_in_trash', message: 'This tank is in Trash.' });
   }
   // Manager "Complete Tank" = final factory completion (distinct from Winding FAB Tank Complete).
-  const result = await phase2.finalizeTankCompletion(id, { at: nowIso() });
+  const result = await phase2.finalizeTankCompletion(id, {
+    at: nowIso(),
+    beforeComplete: phase3.makeCompletionGate(req.body && req.body.dome_override_reason, managerAuditName(req)),
+  });
   if (!result.ok) {
     return res.status(result.status || 400).json(result.body || { ok: false, error: 'complete_failed' });
   }
@@ -9918,6 +10364,8 @@ async function buildTankDailySummary(date) {
     let production_status = 'Waiting';
     if (tankStatus === 'archived') {
       production_status = 'Completed';
+    } else if (tankStatus === 'dome_installed' && !r.open_session_id) {
+      production_status = 'Dome Installed';
     } else if (completedPieces >= pieceCount && pieceCount > 0) {
       production_status = 'Ready to Complete';
     } else if (r.open_session_id) {
@@ -10523,6 +10971,7 @@ async function getTankReportPayload(id) {
         'removed_from_assembly',
         'ready_for_dome_install',
         'ready_for_final_completion',
+        'dome_installed',
         'rework_required',
       ]);
       if (!postFab.has(st) && !tank.fab_completed_at) {
@@ -10539,6 +10988,7 @@ async function getTankReportPayload(id) {
           removed_from_assembly: 'Removed from Assembly',
           ready_for_dome_install: 'Ready for Dome Install',
           ready_for_final_completion: 'Ready for Dome Install',
+          dome_installed: 'Dome Installed',
           rework_required: 'Rework Required',
         };
         reportMeta.production_status = labels[st] || reportMeta.production_status;
@@ -10637,9 +11087,24 @@ async function getTankReportPayload(id) {
     assembly_testing = null;
   }
 
+  let domeState = null;
+  try {
+    domeState = await phase3.getTankDomeState(id);
+  } catch (err) {
+    console.error('[tank report] dome_state:', err.message);
+    domeState = null;
+  }
+  const installedDomes = domeState ? domeState.installs.filter((i) => i.status === 'installed') : [];
+
   return {
     ok: true,
+    dome_state: domeState,
     tank: {
+      domes_installed_display: installedDomes.length
+        ? installedDomes
+            .map((i) => `${i.dome_number} (${[i.dome_type, i.diameter_label].filter(Boolean).join(' ')}) · Piece ${i.piece_number}`)
+            .join('; ')
+        : '',
       id: tank.id,
       tank_number: tank.tank_number,
       description: tank.description,
@@ -11482,6 +11947,27 @@ app.get('/assembly-kiosk.js', (_req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'assembly-kiosk.js'));
 });
 
+app.get('/dome-kiosk.html', (_req, res) => {
+  scanKioskCacheHeaders(res);
+  res.type('html');
+  res.sendFile(path.join(PUBLIC_DIR, 'dome-kiosk.html'));
+});
+
+app.get('/dome-kiosk.js', (_req, res) => {
+  scanKioskCacheHeaders(res);
+  res.type('application/javascript');
+  res.sendFile(path.join(PUBLIC_DIR, 'dome-kiosk.js'));
+});
+
+app.get('/dome-inventory', (_req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'dome-inventory.html'));
+});
+
+app.get('/dome-inventory.js', (_req, res) => {
+  res.type('application/javascript');
+  res.sendFile(path.join(PUBLIC_DIR, 'dome-inventory.js'));
+});
+
 app.get('/phase2-qa-kiosk.html', (req, res) => {
   const auth = qaUserFromSession(req) || currentMachineKioskFromSession(req);
   if (!auth) return res.redirect('/manager-login');
@@ -11521,6 +12007,7 @@ app.get('/kiosk/machine/:slug', async (req, res) => {
     let htmlFile = 'machine-kiosk.html';
     if (isAssemblyTestingMachine(machine)) htmlFile = 'assembly-kiosk.html';
     else if (isQaTestingMachine(machine)) htmlFile = 'phase2-qa-kiosk.html';
+    else if (isDomeMachine(machine)) htmlFile = 'dome-kiosk.html';
     req.session.save((err) => {
       if (err) console.error('[machine kiosk session]', err);
       scanKioskCacheHeaders(res);

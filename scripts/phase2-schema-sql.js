@@ -236,7 +236,7 @@ const PHASE2_BACKFILL_SQL = `
 UPDATE machines SET workflow = 'winding' WHERE workflow IS NULL OR TRIM(workflow) = '';
 UPDATE machines
 SET workflow = 'winding'
-WHERE LOWER(TRIM(COALESCE(workflow, ''))) NOT IN ('assembly_testing', 'qa_testing')
+WHERE LOWER(TRIM(COALESCE(workflow, ''))) NOT IN ('assembly_testing', 'qa_testing', 'dome')
   AND (
     name ILIKE 'Winding%'
     OR UPPER(TRIM(code)) LIKE 'WM-%'

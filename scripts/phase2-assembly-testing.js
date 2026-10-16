@@ -53,6 +53,8 @@ const ASSEMBLY_STATUSES = Object.freeze({
   READY_FOR_DOME_INSTALL: 'ready_for_dome_install',
   /** @deprecated alias — normalize to ready_for_dome_install */
   READY_FOR_FINAL_COMPLETION: 'ready_for_dome_install',
+  /** Dome installed (Phase 3); tank stays active until the next phase / Manager Complete Tank. */
+  DOME_INSTALLED: 'dome_installed',
   REWORK_REQUIRED: 'rework_required',
   /** Schedule change after CONFIRM TANK — not QA, not deleted, not complete. */
   REMOVED_FROM_ASSEMBLY: 'removed_from_assembly',
@@ -485,19 +487,25 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
    * Assembly team for this shift. Moves them off any other Assembly team (no
    * duplicate), leaves their old team's labor and joins the new team's active
    * Assembly labor. Does not touch team_members (default team).
+   *
+   * The Dome Shop kiosk reuses this with opts.dome_kiosk = true: moves stay between
+   * teams present on Dome kiosks, and opts.onMoved(client, ctx) moves dome labor in
+   * the same transaction (return an error result to roll back, or extra body fields).
    */
   async function moveEmployeeToAssemblyTeam(machine, opts = {}) {
     const mid = Number(machine && machine.id);
     if (!Number.isInteger(mid) || mid <= 0) {
       return errResult(400, 'validation', 'Machine is required.');
     }
+    const domeKiosk = opts.dome_kiosk === true;
+    const kioskLabel = domeKiosk ? 'Dome' : 'Assembly';
     const employeeId = Number(opts.employee_id != null ? opts.employee_id : opts.employeeId);
     const teamId = Number(opts.team_id != null ? opts.team_id : opts.teamId);
     if (!Number.isInteger(employeeId) || employeeId <= 0) {
       return errResult(400, 'validation', 'employee_id is required.');
     }
     if (!Number.isInteger(teamId) || teamId <= 0) {
-      return errResult(409, 'need_team', 'Select an Assembly team card first.');
+      return errResult(409, 'need_team', `Select ${domeKiosk ? 'a Dome' : 'an Assembly'} team card first.`);
     }
     await closeStaleAssemblyMoves();
 
@@ -522,18 +530,24 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         [mid, teamId]
       );
       if (!teamRows.length) {
-        return errResult(409, 'team_not_on_kiosk', 'The selected team is not on this Assembly kiosk.');
+        return errResult(409, 'team_not_on_kiosk', `The selected team is not on this ${kioskLabel} kiosk.`);
       }
       const destTeam = { id: Number(teamRows[0].id), name: teamRows[0].name };
 
+      // Dome teams share assembly_kiosk_teams; moves never cross between Assembly and Dome kiosks.
       const { rows: openRows } = await client.query(
         `SELECT m.id, m.team_id, t.name AS team_name,
-                EXISTS (SELECT 1 FROM assembly_kiosk_teams a WHERE a.team_id = m.team_id) AS is_assembly_team
+                EXISTS (
+                  SELECT 1 FROM assembly_kiosk_teams a
+                  JOIN machines km ON km.id = a.machine_id
+                  WHERE a.team_id = m.team_id
+                    AND (LOWER(TRIM(COALESCE(km.workflow, ''))) = 'dome') = $2
+                ) AS is_assembly_team
          FROM employee_team_memberships m
          JOIN teams t ON t.id = m.team_id
          WHERE m.employee_id = $1 AND m.left_at IS NULL
          ORDER BY m.joined_at DESC, m.id DESC`,
-        [employeeId]
+        [employeeId, domeKiosk]
       );
       const onDest = openRows.some((r) => Number(r.team_id) === destTeam.id);
       const others = openRows.filter((r) => Number(r.team_id) !== destTeam.id);
@@ -553,7 +567,8 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         return errResult(
           409,
           'not_assembly_team',
-          `${employee.name} is on shift with ${nonAssembly.team_name}, which is not an Assembly team. Use Employee Out there first.`
+          `${employee.name} is on shift with ${nonAssembly.team_name}, which is not ${domeKiosk ? 'a Dome' : 'an Assembly'} team. Use Employee Out there first.`,
+          { team_name: nonAssembly.team_name, employee }
         );
       }
 
@@ -640,7 +655,13 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       const fromTeam = others[0]
         ? { id: Number(others[0].team_id), name: others[0].team_name }
         : null;
+      let hookExtra = null;
+      if (typeof opts.onMoved === 'function') {
+        hookExtra = await opts.onMoved(client, { employee, destTeam, fromTeam, machineId: mid, ts });
+        if (hookExtra && hookExtra.ok === false) return hookExtra;
+      }
       return okResult({
+        ...(hookExtra || {}),
         action: 'employee_moved',
         employee,
         confirmer: employee,
@@ -3334,7 +3355,10 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
           message: 'Tank is already completed / archived.',
         });
       }
-      if (status !== ASSEMBLY_STATUSES.READY_FOR_DOME_INSTALL) {
+      if (
+        status !== ASSEMBLY_STATUSES.READY_FOR_DOME_INSTALL &&
+        status !== ASSEMBLY_STATUSES.DOME_INSTALLED
+      ) {
         return errResult(
           409,
           'not_ready_for_final',
@@ -3344,6 +3368,11 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
             required_status: ASSEMBLY_STATUSES.READY_FOR_DOME_INSTALL,
           }
         );
+      }
+
+      if (typeof opts.beforeComplete === 'function') {
+        const gate = await opts.beforeComplete(client, tank);
+        if (gate && gate.ok === false) return gate;
       }
 
       const ts = opts.at || nowIso();

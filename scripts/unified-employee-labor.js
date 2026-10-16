@@ -2,7 +2,7 @@
 
 /**
  * Unified employee labor across Phase 1 (winding) + Phase 2 (assembly/testing)
- * + optional scan-clock intervals. Overlaps are merged (union), never summed.
+ * + Phase 3 (dome shop) + optional scan-clock intervals. Overlaps are merged (union), never summed.
  */
 
 function createUnifiedEmployeeLabor(pool, helpers = {}) {
@@ -72,6 +72,9 @@ function createUnifiedEmployeeLabor(pool, helpers = {}) {
     (async () => []);
   const collectScanIntervals =
     helpers.collectScanIntervals ||
+    (async () => []);
+  const collectDomeIntervals =
+    helpers.collectDomeIntervals ||
     (async () => []);
   const displayMachineName = helpers.displayMachineName || ((n) => n);
 
@@ -146,7 +149,8 @@ function createUnifiedEmployeeLabor(pool, helpers = {}) {
     const phase1 = await collectPhase1Intervals(employeeId, bounds, closeMs);
     const phase2 = await collectPhase2LaborIntervals(employeeId, bounds, closeMs);
     const scan = await collectScanIntervals(employeeId, bounds, closeMs);
-    return [...phase1, ...phase2, ...scan];
+    const dome = await collectDomeIntervals(employeeId, bounds, closeMs);
+    return [...phase1, ...phase2, ...scan, ...dome];
   }
 
   async function getEmployeeUnifiedLaborIntervals(employeeId, fromIso, toIso, opts = {}) {

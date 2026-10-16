@@ -432,6 +432,7 @@
           const wf = String((m && m.workflow) || 'winding').toLowerCase();
           if (wf === 'qa_testing') return ' (QA/QC)';
           if (wf === 'assembly_testing') return ' (Assembly / Testing)';
+          if (wf === 'dome') return ' (Dome Shop)';
           return ' (Winding)';
         }
         const opts = ['<option value="">Select kiosk...</option>'].concat(

@@ -28,6 +28,7 @@
         <nav class="nav">
           <a href="/manager-dashboard" class="active">Manager</a>
           <a href="/">Main Dashboard</a>
+          <a href="/dome-inventory" data-i18n="di.nav">Dome Inventory</a>
           <a href="/scan">iPad Scan</a>
         </nav>
         <button id="logoutBtn" class="btn btn-sm" type="button">Logout</button>
@@ -226,6 +227,7 @@
             <a class="btn btn-primary" href="/manager/command-print?type=alerts" target="_blank" rel="noopener">Print Alert Barcodes</a>
             <a class="btn" href="/teams">Manage Teams</a>
             <a class="btn" href="/machine-areas">Manage Machines</a>
+            <a class="btn" href="/dome-inventory" data-i18n="di.nav">Dome Inventory</a>
             <a class="btn" href="/manager/command-print?type=reasons" target="_blank" rel="noopener">Print Stop / End Shift</a>
           </div>
         </div>
@@ -489,6 +491,7 @@
 
     <script src="/manager-session.js?v=1"></script>
     <script src="/i18n.js"></script>
+    <script src="/dome-i18n.js?v=4"></script>
     <script src="/status-styles.js"></script>
     <script src="/tank-activity.js?v=2"></script>
     <script src="/session-details.js?v=5"></script>
@@ -498,7 +501,7 @@
     <script src="/machine-dashboard.js?v=13"></script>
     <script src="/team-dashboard.js?v=7"></script>
     <script src="/alert-sound.js?v=session-1"></script>
-    <script src="/manager.js?v=25"></script>
+    <script src="/manager.js?v=27"></script>
     <script>
       document.addEventListener('DOMContentLoaded', () => {
         if (window.FactoryI18n) {
