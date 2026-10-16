@@ -47,6 +47,14 @@
     'ak.optInAssembly': 'Tank {tank} — In Assembly',
     'ak.optRestored': 'Tank {tank} — Restored, Ready for Assembly',
     'ak.optReady': 'Tank {tank} — Ready for Assembly',
+    'ak.optTestingPassed': 'Tank {tank} — Testing Passed, Ready for Assembly',
+    'ak.optLockedTesting': 'Tank {tank} — LOCKED: In Testing',
+    'ak.optLockedTestingFailed': 'Tank {tank} — LOCKED: Failed Testing',
+    'ak.lockedTestingTitle': 'In Testing — Assembly Locked',
+    'ak.lockedBadge': 'Locked',
+    'ak.lockedTestingReason': 'In Testing (QA/QC). Assembly can start after Testing finishes.',
+    'ak.lockedTestingFailedReason':
+      'Failed Testing — on hold. Assembly is blocked until Retest passes or FAB Rework is complete.',
     'ak.badge.lunch': 'LUNCH',
     'ak.badge.working': 'WORKING',
     'ak.badge.active': 'ACTIVE',
@@ -98,6 +106,7 @@
     'ak.msg.finishOthers':
       "This finishes this team's work on {tank}.\n\nAssembly stays open until the other team(s) also finish: {teams}.",
     'ak.msg.finishLast': 'This ends Assembly for {tank} and sends the tank to Ready for Testing.',
+    'ak.msg.finishLastQa': 'This ends Assembly for {tank} and sends the tank to Ready for QA/QC.',
     'ak.msg.finishOk': 'Finish',
     'ak.msg.removeTitle': 'Remove Tank From Assembly?',
     'ak.msg.removeBody':
@@ -169,6 +178,14 @@
     'ak.optInAssembly': 'Tanque {tank} — En Ensamble',
     'ak.optRestored': 'Tanque {tank} — Restaurado, Listo para Ensamble',
     'ak.optReady': 'Tanque {tank} — Listo para Ensamble',
+    'ak.optTestingPassed': 'Tanque {tank} — Pruebas Aprobadas, Listo para Ensamble',
+    'ak.optLockedTesting': 'Tanque {tank} — BLOQUEADO: En Pruebas',
+    'ak.optLockedTestingFailed': 'Tanque {tank} — BLOQUEADO: Falló Pruebas',
+    'ak.lockedTestingTitle': 'En Pruebas — Ensamble Bloqueado',
+    'ak.lockedBadge': 'Bloqueado',
+    'ak.lockedTestingReason': 'En Pruebas (QA/QC). Ensamble puede iniciar cuando terminen las Pruebas.',
+    'ak.lockedTestingFailedReason':
+      'Falló Pruebas — en espera. Ensamble está bloqueado hasta que pase la Re-prueba o se complete el Retrabajo en FAB.',
     'ak.badge.lunch': 'ALMUERZO',
     'ak.badge.working': 'TRABAJANDO',
     'ak.badge.active': 'ACTIVO',
@@ -220,6 +237,7 @@
     'ak.msg.finishOthers':
       'Esto termina el trabajo de este equipo en {tank}.\n\nEl Ensamble sigue abierto hasta que los otros equipos también terminen: {teams}.',
     'ak.msg.finishLast': 'Esto termina el Ensamble de {tank} y envía el tanque a Listo para Pruebas.',
+    'ak.msg.finishLastQa': 'Esto termina el Ensamble de {tank} y envía el tanque a Listo para QA/QC.',
     'ak.msg.finishOk': 'Terminar',
     'ak.msg.removeTitle': '¿Retirar el tanque de Ensamble?',
     'ak.msg.removeBody':

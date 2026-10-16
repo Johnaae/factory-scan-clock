@@ -136,6 +136,25 @@ function tankRequiresTest(row) {
   return v === true || v === 1 || v === '1' || v === 't' || v === 'true' || v === 'yes';
 }
 
+/**
+ * Assembly stage done for the current cycle. Restore to Assembly keeps assembly_completed_at
+ * for history, so a restore at/after the finish means Assembly is pending again.
+ */
+function tankAssemblyDone(row) {
+  if (!row || !row.assembly_completed_at) return false;
+  const doneMs = toMs(row.assembly_completed_at);
+  const restoredMs = toMs(row.assembly_restored_at);
+  return restoredMs == null || doneMs == null || restoredMs < doneMs;
+}
+
+function tankTestingDone(row) {
+  return Boolean(row && row.testing_completed_at);
+}
+
+/** SQL twin of !tankAssemblyDone (column names unqualified). */
+const SQL_ASSEMBLY_NOT_DONE = `(assembly_completed_at IS NULL
+  OR (assembly_restored_at IS NOT NULL AND assembly_restored_at >= assembly_completed_at))`;
+
 function normalizeStageCode(raw) {
   const s = String(raw || '')
     .trim()
@@ -872,6 +891,9 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       assembly_duration_display: formatDurationXhYm(assemblyDurationMs),
       testing_elapsed_ms: testingElapsedMs,
       testing_elapsed_display: formatDurationXhYm(testingElapsedMs),
+      assembly_done: tankAssemblyDone(row),
+      testing_done: tankTestingDone(row),
+      testing_pending: requiresTest && !tankTestingDone(row),
       labor: laborSummary || null,
     };
   }
@@ -1410,9 +1432,10 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
     const out = new Map();
     if (!ids.length) return out;
     const { rows } = await pool.query(
-      `SELECT a.tank_id, a.team_id, a.machine_id, tm.name AS team_name
+      `SELECT a.tank_id, a.team_id, a.machine_id, tm.name AS team_name, m.name AS machine_name
        FROM assembly_tank_teams a
        LEFT JOIN teams tm ON tm.id = a.team_id
+       LEFT JOIN machines m ON m.id = a.machine_id
        WHERE a.tank_id = ANY($1::bigint[]) AND a.status = 'active'
        ORDER BY a.confirmed_at ASC, a.id ASC`,
       [ids]
@@ -1424,6 +1447,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         team_id: Number(r.team_id),
         team_name: r.team_name || null,
         machine_id: r.machine_id != null ? Number(r.machine_id) : null,
+        machine_name: r.machine_name || null,
       });
     }
     return out;
@@ -1635,6 +1659,12 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
                AND (
                  (LOWER(TRIM(status)) = 'ready_for_assembly' AND assembly_machine_id IS NULL)
                  OR LOWER(TRIM(status)) = 'assembly_in_progress'
+                 OR (
+                   LOWER(TRIM(status)) IN ('testing_in_progress', 'testing_failed')
+                   AND COALESCE(requires_test, FALSE) = TRUE
+                   AND fab_completed_at IS NOT NULL
+                   AND ${SQL_ASSEMBLY_NOT_DONE}
+                 )
                )
              ORDER BY tank_number ASC`;
       params = [];
@@ -1670,6 +1700,16 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       const summary = mapTankSummary(row, labor);
       if (forDropdown) {
         summary.assembly_active_teams = teamsByTank.get(Number(row.id)) || [];
+        if (summary.status === ASSEMBLY_STATUSES.TESTING_IN_PROGRESS) {
+          summary.locked = true;
+          summary.locked_by = 'testing';
+          summary.lock_reason = 'In Testing (QA/QC). Assembly can start after Testing finishes.';
+        } else if (summary.status === ASSEMBLY_STATUSES.TESTING_FAILED) {
+          summary.locked = true;
+          summary.locked_by = 'testing_failed';
+          summary.lock_reason =
+            'Failed Testing — on hold. Assembly is blocked until Retest passes or FAB Rework is complete.';
+        }
       }
       out.push(summary);
     }
@@ -1943,6 +1983,22 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       if (status === ASSEMBLY_STATUSES.ARCHIVED) {
         return errResult(403, 'tank_archived', 'Tank is completed/archived.');
       }
+      if (status === ASSEMBLY_STATUSES.TESTING_IN_PROGRESS) {
+        return errResult(
+          409,
+          'tank_in_testing',
+          `Tank ${tank.tank_number} is in Testing (QA/QC). Assembly can start after Testing finishes.`,
+          { tank_status: status, locked_by: 'testing' }
+        );
+      }
+      if (status === ASSEMBLY_STATUSES.TESTING_FAILED) {
+        return errResult(
+          409,
+          'tank_testing_failed',
+          `Tank ${tank.tank_number} failed Testing and is on FAILED / HOLD. Assembly is blocked until it passes Retest or FAB Rework is complete.`,
+          { tank_status: status, locked_by: 'testing_failed' }
+        );
+      }
       if (
         status !== ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY &&
         status !== ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS
@@ -1952,6 +2008,23 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
           'tank_status',
           `Tank status "${status}" cannot be confirmed for Assembly. Need ready_for_assembly or assembly_in_progress.`,
           { tank_status: status }
+        );
+      }
+      // Defensive: an open Testing attempt means QA/QC owns the tank even if status drifted.
+      const openTesting = await client.query(
+        `SELECT id FROM test_attempts
+         WHERE tank_id = $1
+           AND UPPER(TRIM(COALESCE(test_type, ''))) = 'TESTING'
+           AND LOWER(TRIM(COALESCE(attempt_status, ''))) = 'in_progress'
+         LIMIT 1`,
+        [tankId]
+      );
+      if (openTesting.rows.length) {
+        return errResult(
+          409,
+          'tank_in_testing',
+          `Tank ${tank.tank_number} has an open Testing session (QA/QC). Assembly can start after Testing finishes.`,
+          { tank_status: status, locked_by: 'testing' }
         );
       }
 
@@ -2146,10 +2219,15 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
            )
          )
          AND assembly_completed_at IS NOT NULL
-         AND testing_started_at IS NULL
-         AND testing_machine_id IS NULL
          AND qa_started_at IS NULL
-         AND LOWER(TRIM(status)) IN ($2, $3)
+         AND (
+           (testing_started_at IS NULL AND testing_machine_id IS NULL AND LOWER(TRIM(status)) IN ($2, $3))
+           OR (
+             LOWER(TRIM(status)) = $3
+             AND testing_completed_at IS NOT NULL
+             AND testing_completed_at <= assembly_completed_at
+           )
+         )
        ORDER BY assembly_completed_at DESC, tank_number ASC`,
       [mid, ASSEMBLY_STATUSES.READY_FOR_TESTING, ASSEMBLY_STATUSES.READY_FOR_QA]
     );
@@ -2789,10 +2867,13 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       // End Assembly Duration at assembly_completed_at. Never reset assembly_started_at.
       // Every tank goes through QA/QC; only Testing is skipped when requires_test is off.
       // Ready for Dome Install is reached only via QA/QC PASS.
+      // RT tanks may have passed Testing before Assembly started; then both stages are done.
       const requiresTest = tankRequiresTest(tank);
-      const nextStatus = requiresTest
-        ? ASSEMBLY_STATUSES.READY_FOR_TESTING
-        : ASSEMBLY_STATUSES.READY_FOR_QA;
+      const testingAlreadyPassed = requiresTest && tankTestingDone(tank);
+      const nextStatus =
+        requiresTest && !testingAlreadyPassed
+          ? ASSEMBLY_STATUSES.READY_FOR_TESTING
+          : ASSEMBLY_STATUSES.READY_FOR_QA;
       await client.query(
         `UPDATE tanks
          SET status = $1,
@@ -2817,9 +2898,13 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         team_id: teamId,
         tank: mapTankSummary(updated),
         requires_test: requiresTest,
-        message: requiresTest
-          ? `${allTeamsNote}Assembly complete — Ready for Testing. QA/QC reviews the tank after Testing.`
-          : `${allTeamsNote}Assembly complete — Ready for QA/QC (no testing required).`,
+        testing_already_passed: testingAlreadyPassed,
+        next_status: nextStatus,
+        message: !requiresTest
+          ? `${allTeamsNote}Assembly complete — Ready for QA/QC (no testing required).`
+          : testingAlreadyPassed
+            ? `${allTeamsNote}Assembly complete — Testing already passed. Tank moved to Ready for QA/QC.`
+            : `${allTeamsNote}Assembly complete — Ready for Testing. QA/QC reviews the tank after Testing.`,
       });
     });
   }
@@ -2932,17 +3017,61 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       return errResult(400, 'validation', 'tankId is required.');
     }
     return withTransaction(async (client) => {
+      // Same row lock as CONFIRM TANK so Assembly and Testing cannot both claim the tank.
+      await client.query('SELECT id FROM tanks WHERE id = $1 FOR UPDATE', [tankId]);
       const tank = await getTankById(tankId, client);
       if (!tank || tank.deleted_at) {
         return errResult(404, 'tank_not_found', 'Tank not found.');
       }
       const status = normalizeAssemblyTankStatus(tank.status);
+      if (status === ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS) {
+        const links = await listActiveAssemblyTeamLinks(tankId, client);
+        const who = links.length
+          ? ` (${links
+              .map((l) => `${l.team_name || `Team ${l.team_id}`}${l.machine_name ? ` — ${l.machine_name}` : ''}`)
+              .join(', ')})`
+          : '';
+        return errResult(
+          409,
+          'tank_in_assembly',
+          `Tank ${tank.tank_number} is in Assembly${who}. Testing can start after Assembly finishes.`,
+          { tank_status: status, locked_by: 'assembly', assembly_active_teams: links }
+        );
+      }
+      // RT tank fresh from FAB (or restored): Testing may go first while Assembly waits.
+      const testingBeforeAssembly =
+        status === ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY &&
+        tankRequiresTest(tank) &&
+        !tankTestingDone(tank) &&
+        !tankAssemblyDone(tank);
+      if (status === ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY && !testingBeforeAssembly) {
+        return errResult(
+          409,
+          tankRequiresTest(tank) ? 'testing_already_passed' : 'test_not_required',
+          tankRequiresTest(tank)
+            ? `Tank ${tank.tank_number} already passed Testing — it is waiting for Assembly.`
+            : `Tank ${tank.tank_number} does not require Testing.`,
+          { tank_status: status }
+        );
+      }
       if (
         status !== ASSEMBLY_STATUSES.READY_FOR_TESTING &&
         status !== ASSEMBLY_STATUSES.TESTING_IN_PROGRESS &&
+        !testingBeforeAssembly &&
         !isUntestedLegacyQaTank(tank)
       ) {
         return errResult(409, 'tank_status', `Cannot start Testing from "${status}".`);
+      }
+      if (testingBeforeAssembly) {
+        const active = await getActiveSessionForTank(tankId, null, client);
+        if (active && String(active.stage || '').toUpperCase() === STAGE_CODES.ASSEMBLY) {
+          return errResult(
+            409,
+            'tank_in_assembly',
+            `Tank ${tank.tank_number} has open Assembly labor. Testing can start after Assembly finishes.`,
+            { tank_status: status, locked_by: 'assembly' }
+          );
+        }
       }
       const ts = opts.at || nowIso();
       const user = opts.user || {};
@@ -3099,9 +3228,11 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
 
       let passNextStatus = null;
       if (result === 'PASS') {
-        // Testing PASS → Ready for QA/QC.
+        // Testing PASS → Ready for QA/QC, or back to Assembly when Testing ran first.
         // Clear Testing kiosk confirmation so tank leaves Testing section + dropdown.
-        passNextStatus = ASSEMBLY_STATUSES.READY_FOR_QA;
+        passNextStatus = tankAssemblyDone(tank)
+          ? ASSEMBLY_STATUSES.READY_FOR_QA
+          : ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY;
         await client.query(
           `UPDATE tanks
            SET status = $1,
@@ -3109,6 +3240,8 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
                testing_started_at = COALESCE(testing_started_at, $2::timestamptz),
                testing_machine_id = NULL,
                testing_confirmed_at = NULL,
+               assembly_machine_id = CASE WHEN $1::text = 'ready_for_assembly' THEN NULL ELSE assembly_machine_id END,
+               assembly_team_id = CASE WHEN $1::text = 'ready_for_assembly' THEN NULL ELSE assembly_team_id END,
                completed_at = NULL,
                updated_at = $2::timestamptz
            WHERE id = $3`,
@@ -3170,7 +3303,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         tank: mapTankSummary(updated),
         message:
           result === 'PASS'
-            ? testingPassMessage()
+            ? testingPassMessage(passNextStatus)
             : 'Testing FAIL recorded (legacy API) — FAILED / HOLD. Prefer TEST COMPLETE on QA/QC kiosk; use Send Back to FAB Rework explicitly.',
       });
     });
@@ -3859,7 +3992,14 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
           !tank.qa_started_at;
         const untouchedLegacyQa =
           status === ASSEMBLY_STATUSES.READY_FOR_QA && !tank.qa_started_at && !tank.testing_started_at;
-        if (!untouchedTesting && !untouchedLegacyQa) {
+        // Testing passed before Assembly; the FINISH moved it to QA/QC. The Testing pass is kept.
+        const untouchedQaTestedFirst =
+          status === ASSEMBLY_STATUSES.READY_FOR_QA &&
+          !tank.qa_started_at &&
+          tankTestingDone(tank) &&
+          tank.assembly_completed_at != null &&
+          toMs(tank.testing_completed_at) <= toMs(tank.assembly_completed_at);
+        if (!untouchedTesting && !untouchedLegacyQa && !untouchedQaTestedFirst) {
           return errResult(
             409,
             'downstream_started',
@@ -4949,18 +5089,28 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         selected_test: ctx.vacuum_passed ? 'VACUUM' : 'BRINE',
         next_status: nextStatus,
         tank: mapTankSummary(await getTankById(tankId, client)),
-        message: `Tank ${tank.tank_number} moved to Ready for QA/QC. Press START QA when ready.`,
+        message:
+          nextStatus === ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY
+            ? `Tank ${tank.tank_number} passed Testing — moved to Ready for Assembly. It goes to QA/QC after Assembly finishes.`
+            : `Tank ${tank.tank_number} moved to Ready for QA/QC. Press START QA when ready.`,
       });
     });
   }
 
-  /** Testing PASS → ready_for_qa (QA/QC next). Returns the new status. */
+  /**
+   * Testing PASS → ready_for_qa when Assembly is done; otherwise back to the Assembly queue
+   * (ready_for_assembly) with testing_completed_at kept. Returns the new status.
+   */
   async function markTankTestingPassed(tank, ts, client) {
-    const nextStatus = ASSEMBLY_STATUSES.READY_FOR_QA;
+    const nextStatus = tankAssemblyDone(tank)
+      ? ASSEMBLY_STATUSES.READY_FOR_QA
+      : ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY;
     await client.query(
       `UPDATE tanks
        SET status = $1,
            testing_completed_at = COALESCE(testing_completed_at, $2::timestamptz),
+           assembly_machine_id = CASE WHEN $1::text = 'ready_for_assembly' THEN NULL ELSE assembly_machine_id END,
+           assembly_team_id = CASE WHEN $1::text = 'ready_for_assembly' THEN NULL ELSE assembly_team_id END,
            updated_at = $2::timestamptz
        WHERE id = $3`,
       [nextStatus, ts, Number(tank.id)]
@@ -4968,7 +5118,10 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
     return nextStatus;
   }
 
-  function testingPassMessage() {
+  function testingPassMessage(nextStatus) {
+    if (nextStatus === ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY) {
+      return 'Testing PASS — Assembly still required. Tank moved to Ready for Assembly; it goes to QA/QC after Assembly finishes.';
+    }
     return 'Testing PASS — tank moved to Ready for QA/QC.';
   }
 
@@ -4992,6 +5145,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       return errResult(400, 'validation', 'A failure reason is required for Testing FAIL.');
     }
     return withTransaction(async (client) => {
+      await client.query('SELECT id FROM tanks WHERE id = $1 FOR UPDATE', [tankId]);
       const tank = await getTankById(tankId, client);
       if (!tank || tank.deleted_at) {
         return errResult(404, 'tank_not_found', 'Tank not found.');
@@ -5104,6 +5258,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       return errResult(400, 'validation', 'tankId is required.');
     }
     return withTransaction(async (client) => {
+      await client.query('SELECT id FROM tanks WHERE id = $1 FOR UPDATE', [tankId]);
       const tank = await getTankById(tankId, client);
       if (!tank || tank.deleted_at) {
         return errResult(404, 'tank_not_found', 'Tank not found.');
@@ -5382,9 +5537,18 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       `SELECT ${TANK_SELECT_CORE}
        FROM tanks
        WHERE deleted_at IS NULL
-         AND LOWER(TRIM(status)) IN (
-           'ready_for_qa', 'qa_in_progress', 'qa_failed',
-           'ready_for_testing', 'testing_in_progress', 'testing_failed'
+         AND (
+           LOWER(TRIM(status)) IN (
+             'ready_for_qa', 'qa_in_progress', 'qa_failed',
+             'ready_for_testing', 'testing_in_progress', 'testing_failed'
+           )
+           OR (
+             LOWER(TRIM(status)) IN ('ready_for_assembly', 'assembly_in_progress')
+             AND COALESCE(requires_test, FALSE) = TRUE
+             AND testing_completed_at IS NULL
+             AND fab_completed_at IS NOT NULL
+             AND completed_at IS NULL
+           )
          )
        ORDER BY
          CASE LOWER(TRIM(status))
@@ -5393,11 +5557,18 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
            WHEN 'qa_failed' THEN 2
            WHEN 'testing_failed' THEN 2
            WHEN 'ready_for_testing' THEN 3
+           WHEN 'ready_for_assembly' THEN 3
            WHEN 'testing_in_progress' THEN 4
+           WHEN 'assembly_in_progress' THEN 5
            ELSE 9
          END,
          updated_at DESC NULLS LAST,
          tank_number ASC`
+    );
+    const assemblyTeamsByTank = await mapActiveAssemblyTeamsByTank(
+      rows
+        .filter((r) => normalizeAssemblyTankStatus(r.status) === ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS)
+        .map((r) => r.id)
     );
     const ready_for_qa = [];
     const qa_in_progress = [];
@@ -5405,6 +5576,29 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
     const ready_for_testing = [];
     const testing = [];
     for (const row of rows) {
+      const rowStatus = normalizeAssemblyTankStatus(row.status);
+      if (rowStatus === ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY) {
+        // RT tank waiting on both stages — Testing may go first.
+        ready_for_testing.push({ ...mapTankSummary(row), assembly_pending: true });
+        continue;
+      }
+      if (rowStatus === ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS) {
+        const teams = assemblyTeamsByTank.get(Number(row.id)) || [];
+        const who = teams
+          .map((t) => `${t.team_name || `Team ${t.team_id}`}${t.machine_name ? ` — ${t.machine_name}` : ''}`)
+          .join(', ');
+        ready_for_testing.push({
+          ...mapTankSummary(row),
+          assembly_pending: true,
+          locked: true,
+          locked_by: 'assembly',
+          assembly_active_teams: teams,
+          lock_reason: who
+            ? `In Assembly (${who}). Testing can start after Assembly finishes.`
+            : 'In Assembly. Testing can start after Assembly finishes.',
+        });
+        continue;
+      }
       const labor = await computeStageLaborForTank(row.id);
       const summary = await enrichTankSummaryWithTestingFailure(mapTankSummary(row, labor));
       const st = normalizeAssemblyTankStatus(row.status);

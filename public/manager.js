@@ -371,8 +371,15 @@ function tankStatusLabel(t) {
   }
   if (st === 'archived') return 'Completed';
   if (st === 'rework_required') return 'Rework Required';
-  if (st === 'ready_for_assembly') return 'FAB Complete / Ready for Assembly';
-  if (st === 'assembly_in_progress') return 'Assembly Working';
+  if (st === 'ready_for_assembly') {
+    if (tankRequiresTestFlag(t) && t.testing_completed_at) return 'Testing Passed / Ready for Assembly';
+    if (tankRequiresTestFlag(t)) return 'FAB Complete / Ready for Assembly + Testing';
+    return 'FAB Complete / Ready for Assembly';
+  }
+  if (st === 'assembly_in_progress') {
+    if (tankRequiresTestFlag(t) && !t.testing_completed_at) return 'Assembly Working (Testing pending)';
+    return 'Assembly Working';
+  }
   if (st === 'removed_from_assembly') return 'Removed from Assembly';
   if (st === 'ready_for_qa') return 'Ready for QA';
   if (st === 'qa_in_progress') return 'QA In Progress';
@@ -394,7 +401,13 @@ function tankStatusBadge(t) {
   const st = String((t && t.status) || 'active').toLowerCase();
   if (st === 'archived') return '<span class="badge badge-muted">Completed</span>';
   if (st === 'rework_required') return '<span class="badge badge-warn">Rework Required</span>';
-  if (st === 'ready_for_assembly') return '<span class="badge badge-warn">Ready for Assembly</span>';
+  if (st === 'ready_for_assembly') {
+    if (tankRequiresTestFlag(t) && t.testing_completed_at) {
+      return '<span class="badge badge-warn">Testing Passed — Ready for Assembly</span>';
+    }
+    if (tankRequiresTestFlag(t)) return '<span class="badge badge-warn">Ready for Assembly + Testing</span>';
+    return '<span class="badge badge-warn">Ready for Assembly</span>';
+  }
   if (st === 'assembly_in_progress') return '<span class="badge badge-in">Assembly Working</span>';
   if (st === 'removed_from_assembly') {
     return '<span class="badge badge-removed">Removed from Assembly</span>';
@@ -1440,7 +1453,11 @@ function renderTankReport(data) {
     const st = String(tank.status || '').toLowerCase();
     if (st === 'removed_from_assembly') return 'Removed from Assembly';
     if (st === 'assembly_in_progress') return 'Assembly Working';
-    if (st === 'ready_for_assembly') return 'Ready for Assembly';
+    if (st === 'ready_for_assembly') {
+      if (tankRequiresTestFlag(tank) && tank.testing_completed_at) return 'Testing Passed / Ready for Assembly';
+      if (tankRequiresTestFlag(tank)) return 'Ready for Assembly + Testing';
+      return 'Ready for Assembly';
+    }
     if (st === 'ready_for_qa') return 'Ready for QA';
     if (st === 'qa_in_progress') return 'QA In Progress';
     if (st === 'qa_failed') return 'QA Failed / Hold';

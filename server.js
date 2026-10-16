@@ -6292,6 +6292,16 @@ app.post('/api/kiosk/winding/action', async (req, res) => {
       if (result.ok && result.body && result.body.alert && result.body.alert.id) {
         alertEmail.queueResolveAlertEmail(result.body.alert.id);
       }
+    } else if (action === 'restore_piece' || action === 'undo_piece_complete') {
+      const confirmer = confirmerFromBody(body);
+      result = await phase1.restorePiece(machine, {
+        tankId: body.tank_id != null ? Number(body.tank_id) : null,
+        tankNumber: body.tank_number || null,
+        pieceNumber: body.piece_number != null ? Number(body.piece_number) : null,
+        reason: body.reason || body.notes || null,
+        confirmedByEmployeeId: confirmer ? confirmer.id : null,
+        confirmedByEmployeeName: confirmer ? confirmer.name : null,
+      });
     } else {
       return res.status(400).json({ ok: false, error: 'validation', message: 'Unknown action.' });
     }

@@ -1927,6 +1927,323 @@ function createPhase1ProductionLogic(deps) {
     };
   }
 
+  /** Tank statuses still in FAB winding production (piece restore allowed). */
+  const FAB_PIECE_RESTORE_STATUSES = new Set(['active', 'paused', 'rework_required']);
+
+  /** Downstream / left-FAB statuses — restore piece is blocked (manager must return tank to FAB first). */
+  const FAB_PIECE_RESTORE_BLOCKED_STATUSES = new Set([
+    'ready_for_assembly',
+    'assembly_in_progress',
+    'ready_for_testing',
+    'testing_in_progress',
+    'testing_failed',
+    'ready_for_qa',
+    'qa_in_progress',
+    'qa_failed',
+    'ready_for_dome_install',
+    'archived',
+  ]);
+
+  function fabPieceRestoreBlockReason(tankRow) {
+    const st = normalizeTankStatus(tankRow && tankRow.status);
+    if (!st || FAB_PIECE_RESTORE_STATUSES.has(st)) return null;
+    if (FAB_PIECE_RESTORE_BLOCKED_STATUSES.has(st)) return st;
+    // Unknown post-FAB style status with fab_completed_at: block to be safe.
+    if (tankRow && tankRow.fab_completed_at) return st || 'fab_completed';
+    return null;
+  }
+
+  async function ensurePieceRestoreEventsTable() {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS piece_restore_events (
+        id BIGSERIAL PRIMARY KEY,
+        tank_id BIGINT NOT NULL REFERENCES tanks(id) ON DELETE RESTRICT,
+        tank_number TEXT,
+        piece_id BIGINT REFERENCES tank_pieces(id) ON DELETE SET NULL,
+        piece_number INTEGER NOT NULL,
+        previous_status TEXT NOT NULL,
+        new_status TEXT NOT NULL,
+        previous_completed_at TIMESTAMPTZ,
+        machine_id BIGINT REFERENCES machines(id) ON DELETE SET NULL,
+        team_id BIGINT REFERENCES teams(id) ON DELETE SET NULL,
+        team_name TEXT,
+        restored_by_employee_id BIGINT REFERENCES employees(id) ON DELETE SET NULL,
+        restored_by_employee_name TEXT,
+        reason TEXT,
+        restored_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`);
+    await pool.query(
+      `CREATE INDEX IF NOT EXISTS idx_piece_restore_events_tank ON piece_restore_events(tank_id, restored_at DESC)`
+    );
+  }
+
+  /**
+   * Undo accidental Piece Complete: mark one completed piece incomplete again.
+   * Preserves machine_sessions and part_complete_events labor/audit history.
+   * Blocks when the tank has already left FAB for Assembly / Testing / QA.
+   */
+  async function restorePiece(machine, opts = {}) {
+    const pieceNum = Number(opts.pieceNumber);
+    if (!Number.isInteger(pieceNum) || pieceNum < 1 || pieceNum > 8) {
+      return {
+        ok: false,
+        status: 400,
+        body: { ok: false, error: 'invalid_piece', message: 'Select a valid piece number to restore.' },
+      };
+    }
+
+    let tankId = opts.tankId != null ? Number(opts.tankId) : null;
+    const tankNumberRaw = opts.tankNumber != null ? String(opts.tankNumber).trim() : '';
+    if ((!Number.isInteger(tankId) || tankId <= 0) && tankNumberRaw) {
+      const found = await validateTankExists(tankNumberRaw);
+      if (!found) {
+        return {
+          ok: false,
+          status: 404,
+          body: { ok: false, error: 'tank_not_found', message: TANK_NOT_FOUND_MESSAGE },
+        };
+      }
+      tankId = Number(found.id);
+    }
+    if (!Number.isInteger(tankId) || tankId <= 0) {
+      const open = await getOpenSession(machine.id);
+      if (open && open.tank_id) tankId = Number(open.tank_id);
+    }
+    if (!Number.isInteger(tankId) || tankId <= 0) {
+      const mid = await pool.query(`SELECT active_tank_id FROM machines WHERE id = $1`, [machine.id]);
+      tankId = mid.rows[0] && mid.rows[0].active_tank_id != null ? Number(mid.rows[0].active_tank_id) : null;
+    }
+    if (!Number.isInteger(tankId) || tankId <= 0) {
+      return {
+        ok: false,
+        status: 400,
+        body: { ok: false, error: 'validation', message: 'Select a tank before restoring a piece.' },
+      };
+    }
+
+    await ensurePieceRestoreEventsTable();
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const tankLock = await client.query(
+        `SELECT id, tank_number, status, piece_count, fab_completed_at, current_piece_number
+         FROM tanks WHERE id = $1 FOR UPDATE`,
+        [tankId]
+      );
+      const tankRow = tankLock.rows[0] || null;
+      if (!tankRow) {
+        await client.query('ROLLBACK');
+        return {
+          ok: false,
+          status: 404,
+          body: { ok: false, error: 'tank_not_found', message: TANK_NOT_FOUND_MESSAGE },
+        };
+      }
+
+      const blockedStatus = fabPieceRestoreBlockReason(tankRow);
+      if (blockedStatus) {
+        await client.query('ROLLBACK');
+        const label = String(blockedStatus).replace(/_/g, ' ');
+        return {
+          ok: false,
+          status: 409,
+          body: {
+            ok: false,
+            error: 'tank_left_fab',
+            tank_status: blockedStatus,
+            message:
+              `Cannot restore Piece ${pieceNum}: tank ${tankRow.tank_number} has already left FAB production (${label}). ` +
+              'Ask a manager to return the tank to FAB rework before restoring a piece.',
+          },
+        };
+      }
+
+      const pieceCount = Math.min(8, Math.max(1, Number(tankRow.piece_count) || 1));
+      if (pieceNum > pieceCount) {
+        await client.query('ROLLBACK');
+        return {
+          ok: false,
+          status: 400,
+          body: {
+            ok: false,
+            error: 'invalid_piece',
+            message: `This tank only has ${pieceCount} piece(s).`,
+          },
+        };
+      }
+
+      const pieceLock = await client.query(
+        `SELECT id, tank_id, piece_number, status, started_at, completed_at, machine_id, team_id, operator_name
+         FROM tank_pieces
+         WHERE tank_id = $1 AND piece_number = $2
+         FOR UPDATE`,
+        [tankId, pieceNum]
+      );
+      let pieceRow = pieceLock.rows[0] || null;
+      if (!pieceRow) {
+        await client.query(
+          `INSERT INTO tank_pieces (tank_id, piece_number, status, created_at, updated_at)
+           VALUES ($1, $2, 'pending', NOW(), NOW())
+           ON CONFLICT (tank_id, piece_number) DO NOTHING`,
+          [tankId, pieceNum]
+        );
+        const again = await client.query(
+          `SELECT id, tank_id, piece_number, status, started_at, completed_at, machine_id, team_id, operator_name
+           FROM tank_pieces WHERE tank_id = $1 AND piece_number = $2 FOR UPDATE`,
+          [tankId, pieceNum]
+        );
+        pieceRow = again.rows[0] || null;
+      }
+      if (!pieceRow) {
+        await client.query('ROLLBACK');
+        return {
+          ok: false,
+          status: 404,
+          body: { ok: false, error: 'piece_not_found', message: 'Piece not found for this tank.' },
+        };
+      }
+
+      const prevStatus = String(pieceRow.status || '');
+      if (prevStatus !== 'completed') {
+        await client.query('ROLLBACK');
+        return {
+          ok: false,
+          status: 409,
+          body: {
+            ok: false,
+            error: 'piece_not_completed',
+            message: `Piece ${pieceNum} is not completed (status: ${prevStatus || 'unknown'}). Nothing to restore.`,
+            pieces: await getTankPieces(tankId),
+          },
+        };
+      }
+
+      const ts = nowIso();
+      const newStatus = pieceRow.started_at ? 'in_progress' : 'pending';
+      const prevCompletedAt = pieceRow.completed_at || null;
+
+      await client.query(
+        `UPDATE tank_pieces
+         SET status = $1,
+             completed_at = NULL,
+             updated_at = $2::timestamptz
+         WHERE id = $3 AND status = 'completed'`,
+        [newStatus, ts, Number(pieceRow.id)]
+      );
+
+      // Recheck — concurrent restore may have already changed the row.
+      const verify = await client.query(`SELECT status FROM tank_pieces WHERE id = $1`, [Number(pieceRow.id)]);
+      if (!verify.rows[0] || String(verify.rows[0].status) === 'completed') {
+        await client.query('ROLLBACK');
+        return {
+          ok: false,
+          status: 409,
+          body: {
+            ok: false,
+            error: 'restore_conflict',
+            message: `Could not restore Piece ${pieceNum}. Try again.`,
+          },
+        };
+      }
+
+      // Keep tank in FAB production; clear accidental fab_completed_at if still on the winder.
+      await client.query(
+        `UPDATE tanks
+         SET current_piece_number = $1,
+             fab_completed_at = CASE
+               WHEN LOWER(TRIM(COALESCE(status, ''))) IN ('active', 'paused', 'rework_required', '')
+                 THEN NULL
+               ELSE fab_completed_at
+             END,
+             completed_at = NULL,
+             updated_at = $2::timestamptz
+         WHERE id = $3`,
+        [pieceNum, ts, tankId]
+      );
+
+      const reason =
+        opts.reason != null && String(opts.reason).trim()
+          ? String(opts.reason).trim().slice(0, 2000)
+          : null;
+      let teamId = null;
+      let teamName = null;
+      try {
+        const assign = await getMachineAssignment(machine.id);
+        if (assign && assign.team_id) {
+          teamId = Number(assign.team_id);
+          teamName = assign.team_name || null;
+        }
+      } catch (_err) {
+        /* ignore */
+      }
+
+      await client.query(
+        `INSERT INTO piece_restore_events
+           (tank_id, tank_number, piece_id, piece_number, previous_status, new_status,
+            previous_completed_at, machine_id, team_id, team_name,
+            restored_by_employee_id, restored_by_employee_name, reason, restored_at, created_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7::timestamptz,$8,$9,$10,$11,$12,$13,$14::timestamptz,$14::timestamptz)`,
+        [
+          tankId,
+          tankRow.tank_number || null,
+          Number(pieceRow.id),
+          pieceNum,
+          prevStatus,
+          newStatus,
+          prevCompletedAt,
+          machine.id,
+          teamId,
+          teamName,
+          opts.confirmedByEmployeeId || null,
+          opts.confirmedByEmployeeName || null,
+          reason,
+          ts,
+        ]
+      );
+
+      await client.query('COMMIT');
+
+      await setMachineActiveTank(machine.id, tankId);
+      const pieces = await getTankPieces(tankId);
+      const progress = computePieceProgress(pieces, pieceCount);
+
+      return {
+        ok: true,
+        body: {
+          ok: true,
+          action: 'restore_piece',
+          piece_number: pieceNum,
+          previous_status: prevStatus,
+          new_status: newStatus,
+          previous_completed_at: prevCompletedAt,
+          pieces,
+          piece_count: pieceCount,
+          completed_pieces: progress.completed_pieces,
+          all_pieces_complete: progress.all_pieces_complete,
+          tank_id: tankId,
+          tank_number: tankRow.tank_number || null,
+          confirmation_line: `Piece ${pieceNum} restored — ready to resume production.`,
+          message:
+            `Piece ${pieceNum} is incomplete again. Previous labor history was preserved. ` +
+            'Select the piece and continue with a phase.',
+        },
+      };
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (_rb) {
+        /* ignore */
+      }
+      console.error('[restorePiece]', err);
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
   /**
    * FAB Tank Complete: release tank from winding.
    * First complete → ready_for_assembly.
@@ -1935,7 +2252,7 @@ function createPhase1ProductionLogic(deps) {
    */
   async function finishFabComplete(machine, session, opts, ts) {
     const tankRes = await pool.query(
-      `SELECT id, status, requires_test, fab_completed_at, assembly_completed_at
+      `SELECT id, status, requires_test, fab_completed_at, assembly_completed_at, assembly_restored_at
        FROM tanks WHERE id = $1`,
       [session.tank_id]
     );
@@ -1950,11 +2267,23 @@ function createPhase1ProductionLogic(deps) {
         tankRow.requires_test === 'true');
 
     if (fromRework && requiresTest) {
-      // Rework cycle done → return directly to Testing. Preserve assembly_* and FAIL history.
+      // Rework cycle done. Assembly already finished → straight back to Testing.
+      // Assembly not finished (Testing failed first) → ready_for_assembly, which lists the tank
+      // in both the Assembly and Testing queues again. Preserve assembly_* and FAIL history.
+      const asmCompletedMs = tankRow.assembly_completed_at
+        ? new Date(tankRow.assembly_completed_at).getTime()
+        : null;
+      const asmRestoredMs = tankRow.assembly_restored_at
+        ? new Date(tankRow.assembly_restored_at).getTime()
+        : null;
+      const assemblyDone = asmCompletedMs != null && (asmRestoredMs == null || asmRestoredMs < asmCompletedMs);
+      const reworkStatus = assemblyDone ? 'ready_for_testing' : 'ready_for_assembly';
       try {
         await pool.query(
           `UPDATE tanks
-           SET status = 'ready_for_testing',
+           SET status = $3::text,
+               assembly_machine_id = CASE WHEN $3::text = 'ready_for_assembly' THEN NULL ELSE assembly_machine_id END,
+               assembly_team_id = CASE WHEN $3::text = 'ready_for_assembly' THEN NULL ELSE assembly_team_id END,
                fab_completed_at = COALESCE(fab_completed_at, $1::timestamptz),
                completed_at = NULL,
                testing_started_at = NULL,
@@ -1970,13 +2299,15 @@ function createPhase1ProductionLogic(deps) {
                wip_machine_id = NULL,
                updated_at = $1::timestamptz
            WHERE id = $2`,
-          [ts, session.tank_id]
+          [ts, session.tank_id, reworkStatus]
         );
       } catch (err) {
         if (!/last_rework_completed_at/i.test(String(err && err.message))) throw err;
         await pool.query(
           `UPDATE tanks
-           SET status = 'ready_for_testing',
+           SET status = $3::text,
+               assembly_machine_id = CASE WHEN $3::text = 'ready_for_assembly' THEN NULL ELSE assembly_machine_id END,
+               assembly_team_id = CASE WHEN $3::text = 'ready_for_assembly' THEN NULL ELSE assembly_team_id END,
                fab_completed_at = COALESCE(fab_completed_at, $1::timestamptz),
                completed_at = NULL,
                testing_started_at = NULL,
@@ -1991,7 +2322,7 @@ function createPhase1ProductionLogic(deps) {
                wip_machine_id = NULL,
                updated_at = $1::timestamptz
            WHERE id = $2`,
-          [ts, session.tank_id]
+          [ts, session.tank_id, reworkStatus]
         );
       }
       await setMachineActiveTank(machine.id, null);
@@ -2011,9 +2342,10 @@ function createPhase1ProductionLogic(deps) {
       } catch (_err) {
         mapped = null;
       }
+      const destination = assemblyDone ? 'Testing' : 'Assembly + Testing';
       const confirmer = opts.confirmedByEmployeeName
-        ? `${opts.confirmedByEmployeeName} confirmed Tank Complete — returned to Testing`
-        : 'Rework complete — returned to Testing';
+        ? `${opts.confirmedByEmployeeName} confirmed Tank Complete — returned to ${destination}`
+        : `Rework complete — returned to ${destination}`;
       return {
         ok: true,
         body: {
@@ -2023,11 +2355,13 @@ function createPhase1ProductionLogic(deps) {
           fab_complete: true,
           rework_complete: true,
           ready_for_testing: true,
+          ready_for_assembly: !assemblyDone,
           session: mapped,
           tank_number: session.tank_number || null,
           confirmation_line: confirmer,
-          message:
-            'Rework complete — ready for Testing. Confirm on Testing / QA-QC, then START TESTING.',
+          message: assemblyDone
+            ? 'Rework complete — ready for Testing. Confirm on Testing / QA-QC, then START TESTING.'
+            : 'Rework complete — ready for Assembly and Testing (either order, never at the same time).',
           team_name: session.team_name,
           confirmed_by_employee_name: opts.confirmedByEmployeeName || null,
         },
@@ -2084,10 +2418,13 @@ function createPhase1ProductionLogic(deps) {
         tank_complete: true,
         fab_complete: true,
         ready_for_assembly: true,
+        ready_for_testing: Boolean(requiresTest),
         session: mapped,
         tank_number: session.tank_number || null,
         confirmation_line: confirmer,
-        message: 'Tank released to Assembly — select it on an Assembly kiosk and press CONFIRM TANK.',
+        message: requiresTest
+          ? 'Tank released to Assembly and Testing — either stage can go first (never at the same time).'
+          : 'Tank released to Assembly — select it on an Assembly kiosk and press CONFIRM TANK.',
         team_name: session.team_name,
         confirmed_by_employee_name: opts.confirmedByEmployeeName || null,
       },
@@ -4138,6 +4475,7 @@ function createPhase1ProductionLogic(deps) {
     fetchPieceReports,
     fetchPhaseEditorPayload,
     finishPiece,
+    restorePiece,
     finishFabComplete,
     finishTankArchive,
     getMachineAssignment,

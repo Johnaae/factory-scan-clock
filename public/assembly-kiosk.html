@@ -19,6 +19,8 @@
       .ak-team-card {
         border: 3px solid #94a3b8; border-radius: 14px; padding: 12px;
         background: #fff; display: grid; gap: 8px; min-width: 0; align-content: start;
+        /* minmax(0, 1fr): a <select> is as wide as its longest option; an auto track would let it push past the card. */
+        grid-template-columns: minmax(0, 1fr);
       }
       .ak-team-card.is-lunch { border-color: #f59e0b; background: #fffbeb; }
       .ak-team-card.is-working { border-color: #16a34a; background: linear-gradient(180deg, #f0fdf4 0%, #fff 48px); }
@@ -27,8 +29,9 @@
       .ak-team-badges { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: flex-end; }
       .ak-badge--selected { background: #2563eb; color: #fff; }
       .ak-badge[hidden] { display: none; }
-      .ak-team-head { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
-      .ak-team-title { margin: 0; font-size: 1.3rem; font-weight: 900; color: #0f172a; min-width: 0; overflow-wrap: anywhere; }
+      .ak-team-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; align-items: center; }
+      .ak-team-title { margin: 0; font-size: 1.3rem; font-weight: 900; color: #0f172a; flex: 1 1 auto; max-width: 100%; overflow-wrap: break-word; }
+      .ak-team-badges { margin-left: auto; }
       .ak-team-meta { margin: 0; font-weight: 700; color: #92400e; font-size: 0.9rem; }
       .ak-badge {
         display: inline-block; padding: 6px 12px; border-radius: 999px; font-size: 0.8rem; font-weight: 900;
@@ -40,14 +43,16 @@
       .ak-roster-label { color: #64748b; }
       .ak-select-panel {
         padding: 8px; border: 1px solid #cbd5e1; border-radius: 10px;
-        background: #f8fafc; display: grid; gap: 8px;
+        background: #f8fafc; display: grid; gap: 8px; min-width: 0; grid-template-columns: minmax(0, 1fr);
       }
-      .ak-select-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; }
+      .ak-select-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; min-width: 0; }
       .ak-select-row select {
-        flex: 1 1 200px; min-width: 0; min-height: 52px; font-size: 1rem; font-weight: 700;
+        flex: 999 1 200px; width: 0; min-width: 0; max-width: 100%; min-height: 52px; font-size: 1rem; font-weight: 700;
         border: 2px solid #94a3b8; border-radius: 10px; padding: 6px 10px; background: #fff; color: #0f172a;
+        text-overflow: ellipsis; white-space: nowrap; overflow: hidden;
       }
-      .ak-select-row .btn-touch { flex: 0 0 auto; min-width: 140px; min-height: 52px; font-weight: 800; }
+      /* Shares the row with the select; takes the full line when the card is too narrow for both. */
+      .ak-select-row .btn-touch { flex: 1 0 140px; min-width: 140px; min-height: 52px; font-weight: 800; }
       .wk-touch { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
       .wk-touch .btn-touch { min-height: 56px; font-size: 15px; font-weight: 800; border-radius: 12px; }
       .ak-actions, .ak-team-actions { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
@@ -60,9 +65,10 @@
         background: #166534; border-color: #166534; color: #fff;
         font-size: 1.05rem !important; min-height: 56px !important;
       }
-      .ak-tank-grid { display: grid; gap: 8px; }
+      .ak-tank-grid { display: grid; gap: 8px; min-width: 0; grid-template-columns: minmax(0, 1fr); }
       .ak-tank-card {
         background: #fff; border: 2px solid #e2e8f0; border-radius: 12px; padding: 10px; display: grid; gap: 8px;
+        min-width: 0; grid-template-columns: minmax(0, 1fr);
       }
       .ak-tank-card.is-active { border-color: #2563eb; background: #f8fbff; }
       .ak-tank-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 6px; }
@@ -88,6 +94,23 @@
       .ak-recent-card h3 { margin: 0; font-size: 1.15rem; }
       .ak-recent-card p { margin: 0; font-weight: 700; color: #475569; }
       .ak-recent-card .btn-touch { min-height: 52px; font-weight: 800; }
+      .ak-locked { margin-top: 18px; border: 2px dashed #94a3b8; border-radius: 14px; padding: 12px 14px; background: #f1f5f9; }
+      .ak-locked-list {
+        display: grid; gap: 10px;
+        grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
+      }
+      .ak-locked-card {
+        min-width: 0; display: grid; gap: 6px; padding: 10px 12px;
+        border: 2px dashed #cbd5e1; border-radius: 12px; background: #f8fafc;
+        opacity: 0.8; pointer-events: none; user-select: none;
+      }
+      .ak-locked-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+      .ak-locked-card h3 { margin: 0; min-width: 0; font-size: 1.05rem; font-weight: 800; color: #64748b; overflow-wrap: anywhere; }
+      .ak-locked-badge {
+        flex: 0 0 auto; padding: 3px 10px; border-radius: 999px; background: #e2e8f0; color: #475569;
+        font-size: 0.75rem; font-weight: 900; letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap;
+      }
+      .ak-locked-reason { margin: 0; font-size: 0.9rem; font-weight: 700; color: #b45309; }
       .ak-return { margin-top: 18px; border: 2px solid #94a3b8; border-radius: 14px; padding: 12px 14px; background: #f8fafc; }
       .ak-return [hidden] { display: none !important; }
       .ak-roster { margin: 0; font-weight: 700; color: #334155; font-size: 0.95rem; }
@@ -155,6 +178,10 @@
             <button id="btnReturnRemoved" type="button" class="btn-primary btn-touch" hidden>Return to Assembly</button>
           </div>
         </section>
+        <section id="lockedTesting" class="ak-locked" hidden>
+          <h2 class="ak-recent-title" data-i18n="ak.lockedTestingTitle">In Testing — Assembly Locked</h2>
+          <div id="lockedTestingList" class="ak-locked-list"></div>
+        </section>
         <section id="recentlyFinished" class="ak-recent" hidden>
           <h2 class="ak-recent-title" data-i18n="ak.recentTitle">Recently Finished Assembly</h2>
           <div id="recentlyFinishedList"></div>
@@ -190,7 +217,7 @@
     </div>
 
     <script src="/i18n.js"></script>
-    <script src="/assembly-kiosk-i18n.js?v=1"></script>
-    <script src="/assembly-kiosk.js?v=i18n-1"></script>
+    <script src="/assembly-kiosk-i18n.js?v=3"></script>
+    <script src="/assembly-kiosk.js?v=parallel-asm-test-2"></script>
   </body>
 </html>

@@ -90,8 +90,21 @@
       .wk-piece-status { border: 1px solid #cbd5e1; border-radius: 10px; padding: 10px 12px; background: #fff; cursor: pointer; }
       .wk-piece-status.is-selected { outline: 2px solid #2563eb; background: #eff6ff; border-color: #93c5fd; }
       .wk-piece-status.is-running { border-color: #86efac; }
-      .wk-piece-status-head { font-weight: 800; color: #1e3a5f; margin-bottom: 4px; }
+      .wk-piece-status.is-complete { border-color: #6ee7b7; background: #f0fdf4; }
+      .wk-piece-status-head { font-weight: 800; color: #1e3a5f; margin-bottom: 4px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
       .wk-piece-status-body { font-size: 0.92rem; font-weight: 600; color: #334155; }
+      .wk-piece-restore-btn {
+        min-height: 44px; padding: 8px 12px; border-radius: 10px; border: 2px solid #f59e0b;
+        background: #fffbeb; color: #92400e; font: inherit; font-size: 0.9rem; font-weight: 800;
+        cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+      }
+      .wk-piece-restore-btn:hover, .wk-piece-restore-btn:focus { border-color: #d97706; background: #fef3c7; outline: none; }
+      .restore-piece-modal.show { backdrop-filter: blur(8px); background: rgba(15,23,42,.55); }
+      .restore-piece-card { width: min(560px, 100%); }
+      .restore-piece-text { margin: 0; font-size: 1.1rem; font-weight: 800; color: #1e3a5f; line-height: 1.4; white-space: pre-line; }
+      .restore-piece-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; margin-top: 8px; }
+      .restore-piece-actions .btn-primary, .restore-piece-actions .btn-secondary { min-height: 52px; font-size: 16px; font-weight: 800; }
+      .btn-touch--restore { background: #fffbeb; border-color: #f59e0b; color: #92400e; }
       .btn-touch--employee-out { background: #fff7ed; border-color: #fdba74; color: #9a3412; }
       .modal-note { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: none; align-items: center; justify-content: center; z-index: 80; padding: 16px; }
       .modal-note.show { display: flex; }
@@ -345,7 +358,17 @@
         </div>
       </div>
     </div>
+    <div id="restorePieceModal" class="modal-note restore-piece-modal" role="dialog" aria-modal="true" aria-labelledby="restorePieceTitle" hidden>
+      <div class="modal-note-card restore-piece-card">
+        <h3 id="restorePieceTitle">Restore Piece</h3>
+        <p id="restorePieceText" class="restore-piece-text"></p>
+        <div class="restore-piece-actions">
+          <button type="button" class="btn-secondary" id="btnCancelRestorePiece">CANCEL</button>
+          <button type="button" class="btn-primary btn-touch--restore" id="btnConfirmRestorePiece">RESTORE PIECE</button>
+        </div>
+      </div>
+    </div>
     <script src="/i18n.js"></script>
-    <script src="/machine-kiosk.js?v=14"></script>
+    <script src="/machine-kiosk.js?v=15"></script>
   </body>
 </html>

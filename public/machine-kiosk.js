@@ -85,6 +85,11 @@ const els = {
   pieceSelectList: document.getElementById('pieceSelectList'),
   pieceSelectEmpty: document.getElementById('pieceSelectEmpty'),
   btnCancelPieceSelect: document.getElementById('btnCancelPieceSelect'),
+  restorePieceModal: document.getElementById('restorePieceModal'),
+  restorePieceTitle: document.getElementById('restorePieceTitle'),
+  restorePieceText: document.getElementById('restorePieceText'),
+  btnCancelRestorePiece: document.getElementById('btnCancelRestorePiece'),
+  btnConfirmRestorePiece: document.getElementById('btnConfirmRestorePiece'),
 };
 
 let config = null;
@@ -107,6 +112,8 @@ let changePhasePick = null;
 let changePhaseContext = null;
 let changePhaseSubmitting = false;
 let pieceSelectSubmitting = false;
+let restorePiecePending = null;
+let restorePieceSubmitting = false;
 let phases = [];
 let elapsedTimer = null;
 let scanBuffer = '';
@@ -1037,6 +1044,62 @@ function pieceElapsedDisplay(pieceNum) {
   return fmtElapsed(end - start);
 }
 
+function closeRestorePieceModal() {
+  restorePiecePending = null;
+  restorePieceSubmitting = false;
+  if (!els.restorePieceModal) return;
+  els.restorePieceModal.classList.remove('show');
+  els.restorePieceModal.hidden = true;
+  if (els.btnConfirmRestorePiece) els.btnConfirmRestorePiece.disabled = false;
+}
+
+function openRestorePieceModal(pieceNum) {
+  const n = Number(pieceNum);
+  if (!Number.isInteger(n) || n < 1 || !els.restorePieceModal) return;
+  const tank = pendingTank || activeTankNumber() || '—';
+  restorePiecePending = { piece_number: n, tank_number: tank };
+  restorePieceSubmitting = false;
+  if (els.restorePieceTitle) els.restorePieceTitle.textContent = `Restore Piece ${n}`;
+  if (els.restorePieceText) {
+    els.restorePieceText.textContent =
+      `Restore Piece ${n} to production?\n\n` +
+      `Tank ${tank}\n\n` +
+      'This will mark the piece as incomplete so work can continue.\n\n' +
+      'Previously recorded labor history will be preserved.';
+  }
+  if (els.btnConfirmRestorePiece) els.btnConfirmRestorePiece.disabled = false;
+  blurScanInputs();
+  els.restorePieceModal.hidden = false;
+  els.restorePieceModal.classList.add('show');
+}
+
+async function confirmRestorePiece() {
+  if (!restorePiecePending || restorePieceSubmitting) return;
+  restorePieceSubmitting = true;
+  if (els.btnConfirmRestorePiece) els.btnConfirmRestorePiece.disabled = true;
+  const pieceNum = Number(restorePiecePending.piece_number);
+  const tankNum = restorePiecePending.tank_number;
+  const data = await postAction({
+    action: 'restore_piece',
+    tank_number: tankNum,
+    piece_number: pieceNum,
+    ...confirmerPayload(),
+  });
+  restorePieceSubmitting = false;
+  if (!data) {
+    if (els.btnConfirmRestorePiece) els.btnConfirmRestorePiece.disabled = false;
+    return;
+  }
+  closeRestorePieceModal();
+  if (Array.isArray(data.pieces)) pieces = data.pieces;
+  if (data.piece_count != null) pieceCount = Number(data.piece_count) || pieceCount;
+  pendingPiece = pieceNum;
+  warn(data.confirmation_line || data.message || `Piece ${pieceNum} restored.`);
+  renderUi();
+  if (isPieceSelectModalOpen()) renderPieceSelectList();
+  focusScanInput();
+}
+
 function renderPieceStatusPanel() {
   if (!els.pieceStatusPanel) return;
   const list = configuredPieces();
@@ -1051,22 +1114,38 @@ function renderPieceStatusPanel() {
   els.pieceStatusPanel.innerHTML = list
     .map((p) => {
       const n = Number(p.piece_number);
+      const done = String(p.status) === 'completed';
       const status = pieceStatusLabel(n);
       const sess = openSessionForPiece(n);
       const phase = sess ? sess.phase_name || sess.activity_name || '—' : '—';
       const elapsed = pieceElapsedDisplay(n);
       const selectedCls = n === selected ? ' is-selected' : '';
       const runningCls = sess && sess.status === 'running' ? ' is-running' : '';
-      const detail =
-        status === 'Not Started'
+      const doneCls = done ? ' is-complete' : '';
+      const detail = done
+        ? 'Complete'
+        : status === 'Not Started'
           ? 'Not Started'
           : `${phase}${elapsed ? ` — ${elapsed}` : ''} — ${status}`;
-      return `<div class="wk-piece-status${selectedCls}${runningCls}" data-piece="${n}">
-        <div class="wk-piece-status-head">Piece ${n}</div>
+      const restoreBtn = done
+        ? `<button type="button" class="wk-piece-restore-btn" data-restore-piece="${n}">Undo Complete</button>`
+        : '';
+      return `<div class="wk-piece-status${selectedCls}${runningCls}${doneCls}" data-piece="${n}">
+        <div class="wk-piece-status-head"><span>Piece ${n}</span>${restoreBtn}</div>
         <div class="wk-piece-status-body">${detail}</div>
       </div>`;
     })
     .join('');
+  els.pieceStatusPanel.querySelectorAll('[data-restore-piece]').forEach((btn) => {
+    btn.addEventListener('mousedown', (e) => e.preventDefault());
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const n = Number(btn.getAttribute('data-restore-piece'));
+      if (!Number.isInteger(n)) return;
+      openRestorePieceModal(n);
+    });
+  });
   els.pieceStatusPanel.querySelectorAll('[data-piece]').forEach((row) => {
     row.addEventListener('mousedown', (e) => e.preventDefault());
     row.addEventListener('click', () => {
@@ -2006,6 +2085,25 @@ if (els.pieceSelectModal) {
   els.pieceSelectModal.addEventListener('click', (e) => {
     if (e.target === els.pieceSelectModal) {
       closePieceSelectModal();
+      focusScanInput();
+    }
+  });
+}
+if (els.btnCancelRestorePiece) {
+  els.btnCancelRestorePiece.addEventListener('mousedown', (e) => e.preventDefault());
+  els.btnCancelRestorePiece.addEventListener('click', () => {
+    closeRestorePieceModal();
+    focusScanInput();
+  });
+}
+if (els.btnConfirmRestorePiece) {
+  els.btnConfirmRestorePiece.addEventListener('mousedown', (e) => e.preventDefault());
+  els.btnConfirmRestorePiece.addEventListener('click', () => void confirmRestorePiece());
+}
+if (els.restorePieceModal) {
+  els.restorePieceModal.addEventListener('click', (e) => {
+    if (e.target === els.restorePieceModal) {
+      closeRestorePieceModal();
       focusScanInput();
     }
   });

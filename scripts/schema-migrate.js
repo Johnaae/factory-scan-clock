@@ -343,6 +343,26 @@ CREATE TABLE IF NOT EXISTS tank_pieces (
   UNIQUE (tank_id, piece_number)
 );
 
+CREATE TABLE IF NOT EXISTS piece_restore_events (
+  id BIGSERIAL PRIMARY KEY,
+  tank_id BIGINT NOT NULL REFERENCES tanks(id) ON DELETE RESTRICT,
+  tank_number TEXT,
+  piece_id BIGINT REFERENCES tank_pieces(id) ON DELETE SET NULL,
+  piece_number INTEGER NOT NULL,
+  previous_status TEXT NOT NULL,
+  new_status TEXT NOT NULL,
+  previous_completed_at TIMESTAMPTZ,
+  machine_id BIGINT REFERENCES machines(id) ON DELETE SET NULL,
+  team_id BIGINT REFERENCES teams(id) ON DELETE SET NULL,
+  team_name TEXT,
+  restored_by_employee_id BIGINT REFERENCES employees(id) ON DELETE SET NULL,
+  restored_by_employee_name TEXT,
+  reason TEXT,
+  restored_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_piece_restore_events_tank ON piece_restore_events(tank_id, restored_at DESC);
+
 CREATE TABLE IF NOT EXISTS production_notes (
   id BIGSERIAL PRIMARY KEY,
   note_type TEXT NOT NULL DEFAULT 'general'

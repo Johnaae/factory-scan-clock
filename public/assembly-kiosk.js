@@ -29,6 +29,8 @@ const els = {
   teamsEmpty: document.getElementById('teamsEmpty'),
   recentlyFinished: document.getElementById('recentlyFinished'),
   recentlyFinishedList: document.getElementById('recentlyFinishedList'),
+  lockedTesting: document.getElementById('lockedTesting'),
+  lockedTestingList: document.getElementById('lockedTestingList'),
   returnRemoved: document.getElementById('returnRemoved'),
   returnRemovedSelect: document.getElementById('returnRemovedSelect'),
   btnReturnRemoved: document.getElementById('btnReturnRemoved'),
@@ -259,10 +261,20 @@ function eligibleOptionLabel(tank) {
       ? tr('ak.optInAssemblyTeams', { tank: num, teams: otherTeamNames(teams) })
       : tr('ak.optInAssembly', { tank: num });
   }
+  if (st === 'testing_in_progress') return tr('ak.optLockedTesting', { tank: num });
+  if (st === 'testing_failed') return tr('ak.optLockedTestingFailed', { tank: num });
+  if (tank && tank.requires_test && tank.testing_done) {
+    return tr('ak.optTestingPassed', { tank: num });
+  }
   if (tank && tank.assembly_restored_at) {
     return tr('ak.optRestored', { tank: num });
   }
   return tr('ak.optReady', { tank: num });
+}
+
+function isTestingLockedTank(tank) {
+  const st = String((tank && tank.status) || '').toLowerCase();
+  return Boolean(tank && tank.locked) && (st === 'testing_in_progress' || st === 'testing_failed');
 }
 
 function wireTouchPrevent(root) {
@@ -366,9 +378,14 @@ function renderTeamCard(team) {
         const onCard = (team.tanks || []).some((ct) => Number(ct.id) === Number(t.id));
         return !onTank && !onCard;
       }
-      return false;
+      // Shown greyed out so the team can see why the tank is not available.
+      return isTestingLockedTank(t);
     })
-    .map((t) => `<option value="${Number(t.id)}">${escapeHtml(eligibleOptionLabel(t))}</option>`)
+    .map((t) =>
+      isTestingLockedTank(t)
+        ? `<option value="${Number(t.id)}" disabled>${escapeHtml(eligibleOptionLabel(t))}</option>`
+        : `<option value="${Number(t.id)}">${escapeHtml(eligibleOptionLabel(t))}</option>`
+    )
     .join('');
   const tanksHtml = (team.tanks || []).map((t) => renderTankCard(t, teamId)).join('');
   return `<section class="ak-team-card ${onLunch ? 'is-lunch' : 'is-working'} ${focused ? 'is-focused' : ''}" data-team-id="${teamId}">
@@ -424,6 +441,29 @@ function renderRecentlyFinished() {
     })
     .join('');
   wireTouchPrevent(els.recentlyFinishedList);
+}
+
+function renderLockedTesting() {
+  if (!els.lockedTesting || !els.lockedTestingList) return;
+  const rows = (eligibleTanks || []).filter(isTestingLockedTank);
+  if (!rows.length) {
+    els.lockedTesting.hidden = true;
+    els.lockedTestingList.innerHTML = '';
+    return;
+  }
+  els.lockedTesting.hidden = false;
+  els.lockedTestingList.innerHTML = rows
+    .map((t) => {
+      const failed = String(t.status || '').toLowerCase() === 'testing_failed';
+      return `<article class="ak-locked-card" data-locked-tank-id="${Number(t.id)}" aria-disabled="true">
+        <div class="ak-locked-head">
+          <h3>${escapeHtml(tankLabel(t.tank_number))}</h3>
+          <span class="ak-locked-badge">${escapeHtml(tr('ak.lockedBadge'))}</span>
+        </div>
+        <p class="ak-locked-reason">${escapeHtml(tr(failed ? 'ak.lockedTestingFailedReason' : 'ak.lockedTestingReason'))}</p>
+      </article>`;
+    })
+    .join('');
 }
 
 function syncReturnRemovedButton() {
@@ -505,6 +545,7 @@ function renderMachineLabel() {
 function renderAll() {
   renderMachineLabel();
   renderRecentlyFinished();
+  renderLockedTesting();
   renderReturnRemoved();
   if (!els.teamCards) return;
   if (!activeTeams.length) {
@@ -720,7 +761,9 @@ async function handleTeamCardsClick(ev) {
       tr('ak.msg.finishTitle'),
       others.length
         ? tr('ak.msg.finishOthers', { tank: tankNo, teams: otherTeamNames(others) })
-        : tr('ak.msg.finishLast', { tank: tankNo }),
+        : tankRow && tankRow.testing_pending === false
+          ? tr('ak.msg.finishLastQa', { tank: tankNo })
+          : tr('ak.msg.finishLast', { tank: tankNo }),
       tr('ak.msg.finishOk')
     );
     if (!ok) return;
