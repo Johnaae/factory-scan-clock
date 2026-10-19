@@ -13,32 +13,40 @@
  * Business rules:
  *   FAB Tank Complete → ready_for_assembly + fab_completed_at; NOT archived; NOT completed_at
  *   CONFIRM TANK → assembly_in_progress (Assembly Duration); NOT labor
- *   Assembly Complete:
- *     requires_test=true  → ready_for_testing (eligible for Testing dropdown only — NOT auto-confirmed)
- *     requires_test=false → ready_for_dome_install (skip Testing)
- *   CONFIRM TEST → testing_machine_id (QA selects tank); status stays ready_for_testing until START TESTING
- *   Workflow order: Assembly → Testing → Ready for QA/QC → QA → Completed
- *     (Completed = ready_for_dome_install → Manager Complete Tank archives)
- *   START TESTING → testing_in_progress + open TESTING attempt; operator selects Vacuum OR Brine
+ *   Assembly and Testing do NOT lock each other — the same tank may be worked concurrently.
+ *     Independent labor, teams, and completion timestamps; QA/QC only when both required stages done.
+ *   Assembly Complete (all assigned teams finished):
+ *     requires_test=false → ready_for_qa
+ *     requires_test=true + Testing already passed → ready_for_qa
+ *     requires_test=true + Testing still in progress → keep testing_in_progress
+ *     requires_test=true + Testing not started → ready_for_testing
+ *   CONFIRM TEST / START TESTING may run while Assembly is still in progress (or before Assembly)
+ *   Workflow order: FAB → Assembly / Testing (parallel OK) → QA/QC → Ready for Dome Install
+ *     → Dome Install → Dome Installed (waiting) → Manager Complete Tank archives
+ *   START TESTING → testing started (+ status testing_in_progress unless Assembly still owns status)
  *   One test per TESTING attempt (the other is locked once a test is started on that attempt)
  *   Vacuum START → RECORD END → Vacuum PASS/FAIL
  *   Brine START FILL → STOP FILL → Brine PASS/FAIL
- *     PASS (either) → stays testing_in_progress; READY FOR QA/QC button unlocks
+ *     PASS (either) → testing work continues until READY FOR QA/QC
  *     FAIL (either) → testing_failed (FAILED/HOLD); RETEST or existing FAB rework
- *   READY FOR QA/QC → TESTING attempt passed + testing_completed_at → ready_for_qa (QA NOT started)
- *   START QA → qa_in_progress; QA PASS → ready_for_dome_install (Completed); QA FAIL → qa_failed
+ *   READY FOR QA/QC → Testing PASS recorded; ready_for_qa only if Assembly is also done;
+ *     otherwise keep assembly_in_progress / ready_for_assembly until Assembly finishes
+ *   START QA → qa_in_progress; QA PASS → ready_for_dome_install; QA FAIL → qa_failed
+ *   FAB Dome Install (after QA PASS) → dome_installed (waiting for next Fabrication phase / Complete Tank)
  *   Legacy: tanks the old order parked in ready_for_qa (untested, QA not started) list under
  *     Ready for Testing and may START TESTING; legacy qa_in_progress tanks → QA PASS → ready_for_testing
  *   RETEST from testing_failed → new TESTING attempt (select Vacuum or Brine again)
  *   SEND BACK TO FAB REWORK from testing_failed or qa_failed → existing rework_required FAB workflow
  *   RESTORE TO ASSEMBLY from any Testing / QA/QC status → ready_for_assembly (open attempts cancelled)
  *   FAB Tank Complete after rework_required → ready_for_testing (skip re-Assembly; requires_test stays true)
- *   Manager Complete Tank → archived + completed_at (final factory completion / ready to ship)
+ *   Manager Complete Tank → archived + completed_at (final factory completion / ready to ship;
+ *     allowed from ready_for_dome_install or dome_installed; Phase 3 may require a dome or override)
  *   START/STOP WORK manage stage labor only; Tank Duration freezes at Assembly FINISH
  *   Team assign does NOT start labor
  *   Same employee cannot have two open stage_labor_participants rows
  *   Only requires_test=true tanks may enter Testing
  *   Testing never creates production labor
+ *   testing_failed still blocks new Assembly confirms (FAILED / HOLD) until Retest or FAB Rework
  */
 
 const ASSEMBLY_STATUSES = Object.freeze({
@@ -93,17 +101,23 @@ const ELIGIBLE_LIST_STATUSES = Object.freeze([
 ]);
 
 const STAGE_ELIGIBLE_STATUSES = Object.freeze({
-  // ASSEMBLY labor requires CONFIRM TANK first (status = assembly_in_progress).
-  [STAGE_CODES.ASSEMBLY]: [ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS],
+  // ASSEMBLY labor requires CONFIRM TANK first. Concurrent Testing may leave status as
+  // testing_in_progress while assembly_started_at is set — still allow Assembly labor.
+  [STAGE_CODES.ASSEMBLY]: [
+    ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS,
+    ASSEMBLY_STATUSES.TESTING_IN_PROGRESS,
+  ],
   [STAGE_CODES.TESTING]: [
     ASSEMBLY_STATUSES.READY_FOR_TESTING,
     ASSEMBLY_STATUSES.TESTING_IN_PROGRESS,
     ASSEMBLY_STATUSES.TESTING_FAILED,
+    ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS,
   ],
   [STAGE_CODES.CORRECTION]: [
     ASSEMBLY_STATUSES.READY_FOR_TESTING,
     ASSEMBLY_STATUSES.TESTING_IN_PROGRESS,
     ASSEMBLY_STATUSES.TESTING_FAILED,
+    ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS,
     ASSEMBLY_STATUSES.QA_FAILED,
     ASSEMBLY_STATUSES.REWORK_REQUIRED,
   ],
@@ -151,6 +165,51 @@ function tankAssemblyDone(row) {
 
 function tankTestingDone(row) {
   return Boolean(row && row.testing_completed_at);
+}
+
+/**
+ * Testing work is open (started, not passed/failed-closed). Concurrent Assembly may own
+ * tanks.status = assembly_in_progress while testing_started_at is set.
+ */
+function tankTestingWorkOpen(row) {
+  if (!row || !tankRequiresTest(row) || tankTestingDone(row)) return false;
+  const st = normalizeAssemblyTankStatus(row.status);
+  if (st === ASSEMBLY_STATUSES.TESTING_FAILED) return false;
+  if (st === ASSEMBLY_STATUSES.TESTING_IN_PROGRESS) return true;
+  return Boolean(row.testing_started_at);
+}
+
+/** Assembly confirmed and not finished (may share the tank with Testing). */
+function tankAssemblyWorkOpen(row) {
+  if (!row || tankAssemblyDone(row)) return false;
+  const st = normalizeAssemblyTankStatus(row.status);
+  // Concurrent path always sets status to assembly_in_progress while Assembly owns the tank.
+  if (st === ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS) return true;
+  // Testing FAIL/HOLD after a concurrent start — Assembly may still finish this cycle.
+  if (st === ASSEMBLY_STATUSES.TESTING_FAILED && row.assembly_machine_id != null) return true;
+  return false;
+}
+
+/** Next tanks.status after Assembly fully finishes (all teams). */
+function nextStatusAfterAssemblyComplete(tank) {
+  const st = normalizeAssemblyTankStatus(tank && tank.status);
+  if (st === ASSEMBLY_STATUSES.TESTING_FAILED) return ASSEMBLY_STATUSES.TESTING_FAILED;
+  if (!tankRequiresTest(tank)) return ASSEMBLY_STATUSES.READY_FOR_QA;
+  if (tankTestingDone(tank)) return ASSEMBLY_STATUSES.READY_FOR_QA;
+  if (tankTestingWorkOpen(tank)) return ASSEMBLY_STATUSES.TESTING_IN_PROGRESS;
+  return ASSEMBLY_STATUSES.READY_FOR_TESTING;
+}
+
+/**
+ * Next tanks.status after Testing PASS / READY FOR QA/QC.
+ * Does not clear Assembly ownership when Assembly is still working.
+ */
+function nextStatusAfterTestingPass(tank) {
+  if (tankAssemblyDone(tank)) return ASSEMBLY_STATUSES.READY_FOR_QA;
+  if (tankAssemblyWorkOpen(tank) || normalizeAssemblyTankStatus(tank.status) === ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS) {
+    return ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS;
+  }
+  return ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY;
 }
 
 /** SQL twin of !tankAssemblyDone (column names unqualified). */
@@ -865,8 +924,8 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
     if (startMs == null) return 0;
     const completedMs = toMs(tankRow.testing_completed_at);
     if (completedMs != null) return Math.max(0, completedMs - startMs);
-    const status = normalizeAssemblyTankStatus(tankRow.status);
-    if (status === ASSEMBLY_STATUSES.TESTING_IN_PROGRESS) {
+    // Concurrent Assembly may own tanks.status while Testing is still open.
+    if (tankTestingWorkOpen(tankRow)) {
       return Math.max(0, closeMs - startMs);
     }
     return 0;
@@ -1213,11 +1272,15 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
   async function enrichTankSummaryWithTestingFailure(summary, client = pool) {
     if (!summary || !summary.id) return summary;
     const st = normalizeAssemblyTankStatus(summary.status);
-    if (
-      st !== ASSEMBLY_STATUSES.READY_FOR_TESTING &&
-      st !== ASSEMBLY_STATUSES.TESTING_IN_PROGRESS &&
-      st !== ASSEMBLY_STATUSES.TESTING_FAILED
-    ) {
+    // Concurrent Assembly keeps tanks.status = assembly_in_progress while Testing is open.
+    // Still load Vacuum/Brine attempt context so the QA/QC kiosk shows RECORD END / PASS-FAIL
+    // instead of a stale START VACUUM button.
+    const shouldEnrichTestingContext =
+      st === ASSEMBLY_STATUSES.READY_FOR_TESTING ||
+      st === ASSEMBLY_STATUSES.TESTING_IN_PROGRESS ||
+      st === ASSEMBLY_STATUSES.TESTING_FAILED ||
+      tankTestingWorkOpen(summary);
+    if (!shouldEnrichTestingContext) {
       return { ...summary, ...emptyTestingSessionContext() };
     }
     const ctx = await getTestingFailureContext(summary.id, client);
@@ -1721,15 +1784,15 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       const summary = mapTankSummary(row, labor);
       if (forDropdown) {
         summary.assembly_active_teams = teamsByTank.get(Number(row.id)) || [];
-        if (summary.status === ASSEMBLY_STATUSES.TESTING_IN_PROGRESS) {
-          summary.locked = true;
-          summary.locked_by = 'testing';
-          summary.lock_reason = 'In Testing (QA/QC). Assembly can start after Testing finishes.';
-        } else if (summary.status === ASSEMBLY_STATUSES.TESTING_FAILED) {
+        // Assembly and Testing may run concurrently — only FAILED/HOLD locks Assembly out.
+        if (summary.status === ASSEMBLY_STATUSES.TESTING_FAILED) {
           summary.locked = true;
           summary.locked_by = 'testing_failed';
           summary.lock_reason =
             'Failed Testing — on hold. Assembly is blocked until Retest passes or FAB Rework is complete.';
+        } else if (summary.status === ASSEMBLY_STATUSES.TESTING_IN_PROGRESS && !tankAssemblyDone(row)) {
+          summary.testing_in_progress = true;
+          summary.concurrent_testing = true;
         }
       }
       out.push(summary);
@@ -1743,7 +1806,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
    */
   function isAssemblyConfirmedTank(row) {
     if (!row || row.deleted_at) return false;
-    return normalizeAssemblyTankStatus(row.status) === ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS;
+    return tankAssemblyWorkOpen(row);
   }
 
   /**
@@ -1755,7 +1818,8 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
     const status = normalizeAssemblyTankStatus(row.status);
     return (
       status === ASSEMBLY_STATUSES.READY_FOR_TESTING ||
-      status === ASSEMBLY_STATUSES.TESTING_IN_PROGRESS
+      status === ASSEMBLY_STATUSES.TESTING_IN_PROGRESS ||
+      tankTestingWorkOpen(row)
     );
   }
 
@@ -1765,7 +1829,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
   }
 
   /**
-   * Confirmed for Assembly on THIS kiosk (assembly_in_progress only).
+   * Confirmed for Assembly on THIS kiosk (Assembly open; may also be in Testing concurrently).
    */
   async function listConfirmedTanksForAssembly(machineId) {
     const mid = Number(machineId);
@@ -1775,7 +1839,8 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
        FROM tanks
        WHERE deleted_at IS NULL
          AND assembly_started_at IS NOT NULL
-         AND LOWER(TRIM(status)) = $2
+         AND ${SQL_ASSEMBLY_NOT_DONE}
+         AND LOWER(TRIM(status)) = ANY($2::text[])
          AND (
            assembly_machine_id = $1
            OR EXISTS (
@@ -1784,7 +1849,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
            )
          )
        ORDER BY tank_number ASC`,
-      [mid, ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS]
+      [mid, [ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS, ASSEMBLY_STATUSES.TESTING_IN_PROGRESS]]
     );
     const out = [];
     for (const row of rows) {
@@ -2004,14 +2069,6 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       if (status === ASSEMBLY_STATUSES.ARCHIVED) {
         return errResult(403, 'tank_archived', 'Tank is completed/archived.');
       }
-      if (status === ASSEMBLY_STATUSES.TESTING_IN_PROGRESS) {
-        return errResult(
-          409,
-          'tank_in_testing',
-          `Tank ${tank.tank_number} is in Testing (QA/QC). Assembly can start after Testing finishes.`,
-          { tank_status: status, locked_by: 'testing' }
-        );
-      }
       if (status === ASSEMBLY_STATUSES.TESTING_FAILED) {
         return errResult(
           409,
@@ -2020,39 +2077,35 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
           { tank_status: status, locked_by: 'testing_failed' }
         );
       }
-      if (
-        status !== ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY &&
-        status !== ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS
-      ) {
+      // Concurrent Testing is allowed. Assembly may confirm while Testing is open.
+      const canConfirmAssembly =
+        status === ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY ||
+        status === ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS ||
+        status === ASSEMBLY_STATUSES.READY_FOR_TESTING ||
+        (status === ASSEMBLY_STATUSES.TESTING_IN_PROGRESS && !tankAssemblyDone(tank));
+      if (!canConfirmAssembly) {
         return errResult(
           409,
           'tank_status',
-          `Tank status "${status}" cannot be confirmed for Assembly. Need ready_for_assembly or assembly_in_progress.`,
+          `Tank status "${status}" cannot be confirmed for Assembly.`,
           { tank_status: status }
         );
       }
-      // Defensive: an open Testing attempt means QA/QC owns the tank even if status drifted.
-      const openTesting = await client.query(
-        `SELECT id FROM test_attempts
-         WHERE tank_id = $1
-           AND UPPER(TRIM(COALESCE(test_type, ''))) = 'TESTING'
-           AND LOWER(TRIM(COALESCE(attempt_status, ''))) = 'in_progress'
-         LIMIT 1`,
-        [tankId]
-      );
-      if (openTesting.rows.length) {
+      if (tankAssemblyDone(tank) && status !== ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY) {
         return errResult(
           409,
-          'tank_in_testing',
-          `Tank ${tank.tank_number} has an open Testing session (QA/QC). Assembly can start after Testing finishes.`,
-          { tank_status: status, locked_by: 'testing' }
+          'assembly_already_done',
+          `Tank ${tank.tank_number} Assembly is already complete.`,
+          { tank_status: status }
         );
       }
 
       const ts = opts.at || nowIso();
       const hadStarted = tank.assembly_started_at != null;
       const resumeAfterRestore =
-        status === ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY &&
+        (status === ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY ||
+          status === ASSEMBLY_STATUSES.READY_FOR_TESTING ||
+          status === ASSEMBLY_STATUSES.TESTING_IN_PROGRESS) &&
         tank.assembly_restored_at != null &&
         tank.assembly_completed_at != null;
       let teamId =
@@ -2169,20 +2222,23 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       }
       if (
         status !== ASSEMBLY_STATUSES.READY_FOR_TESTING &&
-        status !== ASSEMBLY_STATUSES.TESTING_IN_PROGRESS
+        status !== ASSEMBLY_STATUSES.TESTING_IN_PROGRESS &&
+        status !== ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS &&
+        status !== ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY
       ) {
         return errResult(
           409,
           'tank_status',
-          `Tank status "${status}" cannot be confirmed for Testing. Need ready_for_testing.`,
+          `Tank status "${status}" cannot be confirmed for Testing.`,
           { tank_status: status }
         );
       }
-      if (!tank.assembly_completed_at) {
+      if (tankTestingDone(tank)) {
         return errResult(
           409,
-          'assembly_not_finished',
-          'Assembly must be finished before confirming Testing.'
+          'testing_already_passed',
+          `Tank ${tank.tank_number} already passed Testing.`,
+          { tank_status: status }
         );
       }
 
@@ -2764,7 +2820,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       if (status === ASSEMBLY_STATUSES.ARCHIVED) {
         return errResult(403, 'tank_archived', 'Tank is already archived.');
       }
-      if (status !== ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS) {
+      if (!tankAssemblyWorkOpen(tank) && status !== ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS) {
         return errResult(
           409,
           'tank_status',
@@ -2888,13 +2944,12 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       // End Assembly Duration at assembly_completed_at. Never reset assembly_started_at.
       // Every tank goes through QA/QC; only Testing is skipped when requires_test is off.
       // Ready for Dome Install is reached only via QA/QC PASS.
-      // RT tanks may have passed Testing before Assembly started; then both stages are done.
-      const requiresTest = tankRequiresTest(tank);
-      const testingAlreadyPassed = requiresTest && tankTestingDone(tank);
-      const nextStatus =
-        requiresTest && !testingAlreadyPassed
-          ? ASSEMBLY_STATUSES.READY_FOR_TESTING
-          : ASSEMBLY_STATUSES.READY_FOR_QA;
+      // Concurrent Testing may still be open — wait for Testing before ready_for_qa.
+      const tankAfterTeams = await getTankById(tankId, client);
+      const requiresTest = tankRequiresTest(tankAfterTeams || tank);
+      const testingAlreadyPassed = requiresTest && tankTestingDone(tankAfterTeams || tank);
+      const testingStillOpen = requiresTest && !testingAlreadyPassed && tankTestingWorkOpen(tankAfterTeams || tank);
+      const nextStatus = nextStatusAfterAssemblyComplete(tankAfterTeams || tank);
       await client.query(
         `UPDATE tanks
          SET status = $1,
@@ -2920,12 +2975,15 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         tank: mapTankSummary(updated),
         requires_test: requiresTest,
         testing_already_passed: testingAlreadyPassed,
+        testing_still_open: testingStillOpen,
         next_status: nextStatus,
         message: !requiresTest
           ? `${allTeamsNote}Assembly complete — Ready for QA/QC (no testing required).`
           : testingAlreadyPassed
             ? `${allTeamsNote}Assembly complete — Testing already passed. Tank moved to Ready for QA/QC.`
-            : `${allTeamsNote}Assembly complete — Ready for Testing. QA/QC reviews the tank after Testing.`,
+            : testingStillOpen
+              ? `${allTeamsNote}Assembly complete — Testing still in progress. Tank goes to QA/QC when Testing finishes.`
+              : `${allTeamsNote}Assembly complete — Ready for Testing. QA/QC reviews the tank after Testing.`,
       });
     });
   }
@@ -2969,12 +3027,14 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       }
       if (
         status !== ASSEMBLY_STATUSES.READY_FOR_TESTING &&
-        status !== ASSEMBLY_STATUSES.TESTING_IN_PROGRESS
+        status !== ASSEMBLY_STATUSES.TESTING_IN_PROGRESS &&
+        status !== ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS &&
+        status !== ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY
       ) {
         return errResult(
           409,
           'tank_status',
-          `Tank status "${status}" is not eligible for Testing. Need ready_for_testing.`,
+          `Tank status "${status}" is not eligible for Testing.`,
           { tank_status: status }
         );
       }
@@ -3038,65 +3098,47 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       return errResult(400, 'validation', 'tankId is required.');
     }
     return withTransaction(async (client) => {
-      // Same row lock as CONFIRM TANK so Assembly and Testing cannot both claim the tank.
+      // Row lock serializes status transitions with Assembly FINISH / CONFIRM (no mutual exclusion).
       await client.query('SELECT id FROM tanks WHERE id = $1 FOR UPDATE', [tankId]);
       const tank = await getTankById(tankId, client);
       if (!tank || tank.deleted_at) {
         return errResult(404, 'tank_not_found', 'Tank not found.');
       }
       const status = normalizeAssemblyTankStatus(tank.status);
-      if (status === ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS) {
-        const links = await listActiveAssemblyTeamLinks(tankId, client);
-        const who = links.length
-          ? ` (${links
-              .map((l) => `${l.team_name || `Team ${l.team_id}`}${l.machine_name ? ` — ${l.machine_name}` : ''}`)
-              .join(', ')})`
-          : '';
+      if (!tankRequiresTest(tank)) {
         return errResult(
           409,
-          'tank_in_assembly',
-          `Tank ${tank.tank_number} is in Assembly${who}. Testing can start after Assembly finishes.`,
-          { tank_status: status, locked_by: 'assembly', assembly_active_teams: links }
-        );
-      }
-      // RT tank fresh from FAB (or restored): Testing may go first while Assembly waits.
-      const testingBeforeAssembly =
-        status === ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY &&
-        tankRequiresTest(tank) &&
-        !tankTestingDone(tank) &&
-        !tankAssemblyDone(tank);
-      if (status === ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY && !testingBeforeAssembly) {
-        return errResult(
-          409,
-          tankRequiresTest(tank) ? 'testing_already_passed' : 'test_not_required',
-          tankRequiresTest(tank)
-            ? `Tank ${tank.tank_number} already passed Testing — it is waiting for Assembly.`
-            : `Tank ${tank.tank_number} does not require Testing.`,
+          'test_not_required',
+          `Tank ${tank.tank_number} does not require Testing.`,
           { tank_status: status }
         );
       }
-      if (
-        status !== ASSEMBLY_STATUSES.READY_FOR_TESTING &&
-        status !== ASSEMBLY_STATUSES.TESTING_IN_PROGRESS &&
-        !testingBeforeAssembly &&
-        !isUntestedLegacyQaTank(tank)
-      ) {
-        return errResult(409, 'tank_status', `Cannot start Testing from "${status}".`);
+      if (tankTestingDone(tank)) {
+        return errResult(
+          409,
+          'testing_already_passed',
+          `Tank ${tank.tank_number} already passed Testing — it is waiting for Assembly or QA/QC.`,
+          { tank_status: status }
+        );
       }
-      if (testingBeforeAssembly) {
-        const active = await getActiveSessionForTank(tankId, null, client);
-        if (active && String(active.stage || '').toUpperCase() === STAGE_CODES.ASSEMBLY) {
-          return errResult(
-            409,
-            'tank_in_assembly',
-            `Tank ${tank.tank_number} has open Assembly labor. Testing can start after Assembly finishes.`,
-            { tank_status: status, locked_by: 'assembly' }
-          );
-        }
+      // Concurrent Assembly is allowed. Testing may start while Assembly is open.
+      const canStartTesting =
+        status === ASSEMBLY_STATUSES.READY_FOR_TESTING ||
+        status === ASSEMBLY_STATUSES.TESTING_IN_PROGRESS ||
+        status === ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS ||
+        (status === ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY && !tankTestingDone(tank) && !tankAssemblyDone(tank)) ||
+        isUntestedLegacyQaTank(tank);
+      if (!canStartTesting) {
+        return errResult(409, 'tank_status', `Cannot start Testing from "${status}".`);
       }
       const ts = opts.at || nowIso();
       const user = opts.user || {};
-      const attemptId = await ensureOpenTestingAttempt(tankId, machine, user, client, status);
+      const assemblyStillOpen = tankAssemblyWorkOpen(tank) || status === ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS;
+      // Keep assembly_in_progress when Assembly is still working so Assembly labor stays eligible.
+      const nextStatus = assemblyStillOpen
+        ? ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS
+        : ASSEMBLY_STATUSES.TESTING_IN_PROGRESS;
+      const attemptId = await ensureOpenTestingAttempt(tankId, machine, user, client, nextStatus);
       await client.query(
         `UPDATE tanks
          SET status = $1,
@@ -3104,16 +3146,19 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
              testing_machine_id = COALESCE($3, testing_machine_id),
              updated_at = $2::timestamptz
          WHERE id = $4`,
-        [ASSEMBLY_STATUSES.TESTING_IN_PROGRESS, ts, mid, tankId]
+        [nextStatus, ts, mid, tankId]
       );
       return okResult({
         action: 'begin_testing',
         attempt_id: attemptId,
+        concurrent_assembly: assemblyStillOpen,
         tank: await enrichTankSummaryWithTestingFailure(
           mapTankSummary(await getTankById(tankId, client)),
           client
         ),
-        message: 'Testing started — select Vacuum OR Brine.',
+        message: assemblyStillOpen
+          ? 'Testing started (Assembly still in progress) — select Vacuum OR Brine.'
+          : 'Testing started — select Vacuum OR Brine.',
       });
     });
   }
@@ -3154,7 +3199,8 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       }
       if (
         status !== ASSEMBLY_STATUSES.TESTING_IN_PROGRESS &&
-        status !== ASSEMBLY_STATUSES.READY_FOR_TESTING
+        status !== ASSEMBLY_STATUSES.READY_FOR_TESTING &&
+        !tankTestingWorkOpen(tank)
       ) {
         return errResult(409, 'tank_status', `Cannot record test from status "${status}".`, {
           tank_status: status,
@@ -3332,7 +3378,9 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
 
   /**
    * Manager Dashboard "Complete Tank" — FINAL factory completion / ready to ship.
-   * Distinct from Winding kiosk Tank Complete (FAB → Assembly).
+   * Distinct from Winding kiosk Tank Complete (FAB → Assembly) and from FAB Dome Install
+   * (ready_for_dome_install → dome_installed). Allowed from ready_for_dome_install or
+   * dome_installed; Phase 3 may gate on an installed dome (or manager override).
    * Sets completed_at + archived. Tank Duration stops here.
    */
   async function finalizeTankCompletion(tankId, opts = {}) {
@@ -4529,11 +4577,11 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         return errResult(404, 'tank_not_found', 'Tank not found.');
       }
       const status = normalizeAssemblyTankStatus(tank.status);
-      if (status !== ASSEMBLY_STATUSES.TESTING_IN_PROGRESS) {
+      if (!tankTestingWorkOpen(tank)) {
         return errResult(
           409,
           'tank_status',
-          status === ASSEMBLY_STATUSES.READY_FOR_TESTING
+          status === ASSEMBLY_STATUSES.READY_FOR_TESTING || status === ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS
             ? 'Press START TESTING before Vacuum.'
             : `Vacuum requires Testing in progress (got "${status}").`
         );
@@ -4648,7 +4696,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         );
       }
       const tank = await getTankById(Number(attempt.tank_id), client);
-      if (!tank || normalizeAssemblyTankStatus(tank.status) !== ASSEMBLY_STATUSES.TESTING_IN_PROGRESS) {
+      if (!tank || !tankTestingWorkOpen(tank)) {
         return errResult(409, 'tank_status', 'Vacuum end requires Testing in progress.');
       }
       const ts = opts.at || nowIso();
@@ -4722,7 +4770,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       if (!tank || tank.deleted_at) {
         return errResult(404, 'tank_not_found', 'Tank not found.');
       }
-      if (normalizeAssemblyTankStatus(tank.status) !== ASSEMBLY_STATUSES.TESTING_IN_PROGRESS) {
+      if (!tankTestingWorkOpen(tank)) {
         return errResult(409, 'tank_status', 'Vacuum result requires Testing in progress.');
       }
       const ts = opts.at || nowIso();
@@ -4823,11 +4871,11 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         return errResult(404, 'tank_not_found', 'Tank not found.');
       }
       const status = normalizeAssemblyTankStatus(tank.status);
-      if (status !== ASSEMBLY_STATUSES.TESTING_IN_PROGRESS) {
+      if (!tankTestingWorkOpen(tank)) {
         return errResult(
           409,
           'tank_status',
-          status === ASSEMBLY_STATUSES.READY_FOR_TESTING
+          status === ASSEMBLY_STATUSES.READY_FOR_TESTING || status === ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS
             ? 'Press START TESTING before Brine.'
             : `Brine requires Testing in progress (got "${status}").`
         );
@@ -4925,7 +4973,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         return errResult(409, 'already_complete', 'This Brine measurement is already recorded.');
       }
       const tank = await getTankById(Number(attempt.tank_id), client);
-      if (!tank || normalizeAssemblyTankStatus(tank.status) !== ASSEMBLY_STATUSES.TESTING_IN_PROGRESS) {
+      if (!tank || !tankTestingWorkOpen(tank)) {
         return errResult(409, 'tank_status', 'Brine stop requires Testing in progress.');
       }
       const ts = opts.at || nowIso();
@@ -4999,7 +5047,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       if (!tank || tank.deleted_at) {
         return errResult(404, 'tank_not_found', 'Tank not found.');
       }
-      if (normalizeAssemblyTankStatus(tank.status) !== ASSEMBLY_STATUSES.TESTING_IN_PROGRESS) {
+      if (!tankTestingWorkOpen(tank)) {
         return errResult(409, 'tank_status', 'Brine result requires Testing in progress.');
       }
       const ts = opts.at || nowIso();
@@ -5079,7 +5127,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         return errResult(404, 'tank_not_found', 'Tank not found.');
       }
       const status = normalizeAssemblyTankStatus(tank.status);
-      if (status !== ASSEMBLY_STATUSES.TESTING_IN_PROGRESS) {
+      if (!tankTestingWorkOpen(tank) && status !== ASSEMBLY_STATUSES.TESTING_IN_PROGRESS) {
         return errResult(
           409,
           'tank_status',
@@ -5119,30 +5167,32 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         next_status: nextStatus,
         tank: mapTankSummary(await getTankById(tankId, client)),
         message:
-          nextStatus === ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY
-            ? `Tank ${tank.tank_number} passed Testing — moved to Ready for Assembly. It goes to QA/QC after Assembly finishes.`
-            : `Tank ${tank.tank_number} moved to Ready for QA/QC. Press START QA when ready.`,
+          nextStatus === ASSEMBLY_STATUSES.READY_FOR_QA
+            ? `Tank ${tank.tank_number} moved to Ready for QA/QC. Press START QA when ready.`
+            : nextStatus === ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS
+              ? `Tank ${tank.tank_number} passed Testing — Assembly is still in progress. Tank goes to QA/QC when Assembly finishes.`
+              : `Tank ${tank.tank_number} passed Testing — moved to Ready for Assembly. It goes to QA/QC after Assembly finishes.`,
       });
     });
   }
 
   /**
-   * Testing PASS → ready_for_qa when Assembly is done; otherwise back to the Assembly queue
-   * (ready_for_assembly) with testing_completed_at kept. Returns the new status.
+   * Testing PASS → ready_for_qa when Assembly is done; otherwise keep Assembly working
+   * (assembly_in_progress) or return to ready_for_assembly. Preserves concurrent Assembly ownership.
    */
   async function markTankTestingPassed(tank, ts, client) {
-    const nextStatus = tankAssemblyDone(tank)
-      ? ASSEMBLY_STATUSES.READY_FOR_QA
-      : ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY;
+    const fresh = (await getTankById(Number(tank.id), client)) || tank;
+    const nextStatus = nextStatusAfterTestingPass(fresh);
+    const clearAssemblyOwner = nextStatus === ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY;
     await client.query(
       `UPDATE tanks
        SET status = $1,
            testing_completed_at = COALESCE(testing_completed_at, $2::timestamptz),
-           assembly_machine_id = CASE WHEN $1::text = 'ready_for_assembly' THEN NULL ELSE assembly_machine_id END,
-           assembly_team_id = CASE WHEN $1::text = 'ready_for_assembly' THEN NULL ELSE assembly_team_id END,
+           assembly_machine_id = CASE WHEN $4::boolean THEN NULL ELSE assembly_machine_id END,
+           assembly_team_id = CASE WHEN $4::boolean THEN NULL ELSE assembly_team_id END,
            updated_at = $2::timestamptz
        WHERE id = $3`,
-      [nextStatus, ts, Number(tank.id)]
+      [nextStatus, ts, Number(tank.id), clearAssemblyOwner]
     );
     return nextStatus;
   }
@@ -5150,6 +5200,9 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
   function testingPassMessage(nextStatus) {
     if (nextStatus === ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY) {
       return 'Testing PASS — Assembly still required. Tank moved to Ready for Assembly; it goes to QA/QC after Assembly finishes.';
+    }
+    if (nextStatus === ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS) {
+      return 'Testing PASS — Assembly is still in progress. Tank goes to QA/QC when Assembly finishes.';
     }
     return 'Testing PASS — tank moved to Ready for QA/QC.';
   }
@@ -5180,7 +5233,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         return errResult(404, 'tank_not_found', 'Tank not found.');
       }
       const status = normalizeAssemblyTankStatus(tank.status);
-      if (status !== ASSEMBLY_STATUSES.TESTING_IN_PROGRESS) {
+      if (!tankTestingWorkOpen(tank)) {
         return errResult(409, 'tank_status', `TEST COMPLETE requires Testing in progress (got "${status}").`);
       }
       const ts = opts.at || nowIso();
@@ -5607,25 +5660,33 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
     for (const row of rows) {
       const rowStatus = normalizeAssemblyTankStatus(row.status);
       if (rowStatus === ASSEMBLY_STATUSES.READY_FOR_ASSEMBLY) {
-        // RT tank waiting on both stages — Testing may go first.
+        // RT tank waiting on both stages — Testing may go first (or alongside Assembly).
         ready_for_testing.push({ ...mapTankSummary(row), assembly_pending: true });
         continue;
       }
       if (rowStatus === ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS) {
         const teams = assemblyTeamsByTank.get(Number(row.id)) || [];
-        const who = teams
-          .map((t) => `${t.team_name || `Team ${t.team_id}`}${t.machine_name ? ` — ${t.machine_name}` : ''}`)
-          .join(', ');
-        ready_for_testing.push({
-          ...mapTankSummary(row),
-          assembly_pending: true,
-          locked: true,
-          locked_by: 'assembly',
-          assembly_active_teams: teams,
-          lock_reason: who
-            ? `In Assembly (${who}). Testing can start after Assembly finishes.`
-            : 'In Assembly. Testing can start after Assembly finishes.',
-        });
+        const summaryAsm = mapTankSummary(row);
+        if (tankTestingWorkOpen(row)) {
+          // Concurrent: Assembly owns status but Testing already started — show under Testing.
+          const laborOpen = await computeStageLaborForTank(row.id);
+          testing.push(
+            await enrichTankSummaryWithTestingFailure({
+              ...mapTankSummary(row, laborOpen),
+              assembly_pending: !tankAssemblyDone(row),
+              concurrent_assembly: true,
+              assembly_active_teams: teams,
+            })
+          );
+        } else if (!tankTestingDone(row) && tankRequiresTest(row)) {
+          // Assembly open; Testing not started yet — selectable (not locked).
+          ready_for_testing.push({
+            ...summaryAsm,
+            assembly_pending: true,
+            concurrent_assembly: true,
+            assembly_active_teams: teams,
+          });
+        }
         continue;
       }
       const labor = await computeStageLaborForTank(row.id);
@@ -5643,7 +5704,13 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
           failure_source: source,
         });
       } else if (st === ASSEMBLY_STATUSES.READY_FOR_TESTING) ready_for_testing.push(summary);
-      else if (st === ASSEMBLY_STATUSES.TESTING_IN_PROGRESS) testing.push(summary);
+      else if (st === ASSEMBLY_STATUSES.TESTING_IN_PROGRESS) {
+        testing.push({
+          ...summary,
+          assembly_pending: !tankAssemblyDone(row),
+          concurrent_assembly: tankAssemblyWorkOpen(row),
+        });
+      }
     }
     return okResult({
       ready_for_qa,
@@ -5671,6 +5738,23 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       const status = normalizeAssemblyTankStatus(tank.status);
       if (status !== ASSEMBLY_STATUSES.READY_FOR_QA && status !== ASSEMBLY_STATUSES.QA_FAILED) {
         return errResult(409, 'tank_status', `START QA requires Ready for QA (got "${status}").`);
+      }
+      // Hard gate: never start QA while a required department is still open.
+      if (!tankAssemblyDone(tank)) {
+        return errResult(
+          409,
+          'assembly_incomplete',
+          `Tank ${tank.tank_number} cannot start QA until Assembly is finished.`,
+          { tank_status: status }
+        );
+      }
+      if (tankRequiresTest(tank) && !tankTestingDone(tank)) {
+        return errResult(
+          409,
+          'testing_incomplete',
+          `Tank ${tank.tank_number} cannot start QA until Testing is finished.`,
+          { tank_status: status }
+        );
       }
       const ts = opts.at || nowIso();
       const user = opts.user || {};

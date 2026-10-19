@@ -1945,6 +1945,7 @@ function createPhase1ProductionLogic(deps) {
     'qa_in_progress',
     'qa_failed',
     'ready_for_dome_install',
+    'dome_installed',
     'archived',
   ]);
 

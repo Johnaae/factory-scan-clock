@@ -171,16 +171,22 @@ function chipHtml(label, kind) {
 }
 
 function assemblyChip(t) {
-  if (t.locked || t.locked_by === 'assembly') {
-    return chipHtml('Assembly: In progress', 'assembly-pending');
+  const st = String((t && t.status) || '').toLowerCase();
+  const inProgress =
+    t.concurrent_assembly ||
+    t.locked_by === 'assembly' ||
+    st === 'assembly_in_progress' ||
+    (t.assembly_done === false && Boolean(t.assembly_started_at) && !t.assembly_pending);
+  if (inProgress) {
+    return chipHtml('Assembly: In Progress', 'assembly-progress');
   }
   if (t.assembly_pending || t.assembly_done === false) {
     return chipHtml('Assembly: Pending', 'assembly-pending');
   }
   if (t.assembly_completed_at || t.assembly_done === true) {
-    return chipHtml('Assembly: Complete', 'assembly');
+    return chipHtml('Assembly: Complete', 'assembly-complete');
   }
-  return chipHtml('Assembly: —', 'assembly');
+  return chipHtml('Assembly: —', 'assembly-pending');
 }
 
 function tankCard(tank, metaHtml, actionsHtml, extraClass = '', chips = []) {
@@ -309,11 +315,12 @@ function restoreButton(t) {
 }
 
 function readyTestingCard(t) {
-  if (t.locked) {
+  // Assembly and Testing may run at the same time — never disable START TESTING for Assembly.
+  if (t.locked && t.locked_by === 'testing_failed') {
     return tankCard(
       t,
-      `<p class="qa2-meta"><strong>LOCKED — IN ASSEMBLY</strong></p>
-       <p class="qa2-meta qa2-lock-reason">${escapeHtml(t.lock_reason || 'In Assembly. Testing can start after Assembly finishes.')}</p>`,
+      `<p class="qa2-meta"><strong>LOCKED — TESTING FAILED / HOLD</strong></p>
+       <p class="qa2-meta qa2-lock-reason">${escapeHtml(t.lock_reason || 'Retest or send to FAB Rework first.')}</p>`,
       `<button type="button" class="btn-primary btn-touch" disabled aria-disabled="true">START TESTING</button>`,
       'qa2-card--locked',
       [
@@ -323,13 +330,17 @@ function readyTestingCard(t) {
       ]
     );
   }
-  if (t.assembly_pending) {
-    // RT tank fresh from FAB: Testing may go first; Assembly is locked once Testing starts.
+  if (t.assembly_pending || t.concurrent_assembly) {
+    const asmNote = t.concurrent_assembly
+      ? 'Assembly is in progress on this tank — Testing may run at the same time.'
+      : 'Assembly is still required before QA/QC (may run in parallel with Testing).';
     return tankCard(
       t,
-      `<p class="qa2-meta">FAB Complete — Ready for Testing (Assembly not started)</p>
+      `<p class="qa2-meta">${
+        t.concurrent_assembly ? 'Ready for Testing — Assembly in progress' : 'FAB Complete — Ready for Testing'
+      }</p>
        <p class="qa2-meta">FAB completed: ${escapeHtml(formatTs(t.fab_completed_at))}</p>
-       <p class="qa2-meta">Assembly is still required before QA/QC.</p>`,
+       <p class="qa2-meta">${escapeHtml(asmNote)}</p>`,
       `<button type="button" class="btn-primary btn-touch" data-qa="begin_testing" data-tank-id="${Number(t.id)}">START TESTING</button>`,
       '',
       [chipHtml('Ready for Testing', 'stage'), assemblyChip(t)]
@@ -386,7 +397,7 @@ function testingCard(t) {
   }
   const assemblyPending = t.assembly_done === false;
   if (assemblyPending) {
-    meta += `<p class="qa2-meta">Assembly not done yet — Assembly is locked while Testing is open.</p>`;
+    meta += `<p class="qa2-meta">Assembly not done yet — Assembly and Testing may run at the same time.</p>`;
   }
 
   const actions = [];

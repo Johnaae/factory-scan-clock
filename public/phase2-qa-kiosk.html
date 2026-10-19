@@ -242,8 +242,11 @@
         overflow-wrap: anywhere;
       }
       .qa2-chip--stage { background: #eff6ff; color: #1e40af; border-color: #bfdbfe; }
-      .qa2-chip--assembly { background: #ecfdf5; color: #065f46; border-color: #a7f3d0; }
-      .qa2-chip--assembly-pending { background: #fff7ed; color: #9a3412; border-color: #fdba74; }
+      /* Assembly status chips — Pending / In Progress / Complete must be clearly distinct. */
+      .qa2-chip--assembly-pending { background: #f1f5f9; color: #334155; border-color: #cbd5e1; }
+      .qa2-chip--assembly-progress { background: #ffedd5; color: #9a3412; border-color: #fb923c; }
+      .qa2-chip--assembly-complete,
+      .qa2-chip--assembly { background: #dcfce7; color: #166534; border-color: #86efac; }
       .qa2-chip--lock { background: #f1f5f9; color: #475569; border-color: #cbd5e1; }
       .qa2-chip--fail { background: #fef2f2; color: #991b1b; border-color: #fecaca; }
       .qa2-expand-hint {
@@ -523,6 +526,6 @@
         </div>
       </div>
     </div>
-    <script src="/phase2-qa-kiosk.js?v=ops-dash-1"></script>
+    <script src="/phase2-qa-kiosk.js?v=ops-dash-2"></script>
   </body>
 </html>

@@ -257,11 +257,15 @@ function eligibleOptionLabel(tank) {
   const num = (tank && tank.tank_number) || '—';
   if (st === 'assembly_in_progress') {
     const teams = Array.isArray(tank.assembly_active_teams) ? tank.assembly_active_teams : [];
-    return teams.length
+    const base = teams.length
       ? tr('ak.optInAssemblyTeams', { tank: num, teams: otherTeamNames(teams) })
       : tr('ak.optInAssembly', { tank: num });
+    return tank && tank.concurrent_testing ? `${base} — ${tr('ak.optAlsoTesting')}` : base;
   }
-  if (st === 'testing_in_progress') return tr('ak.optLockedTesting', { tank: num });
+  if (st === 'testing_in_progress') {
+    // Concurrent Testing no longer locks Assembly — tank remains selectable.
+    return tr('ak.optAlsoInTesting', { tank: num });
+  }
   if (st === 'testing_failed') return tr('ak.optLockedTestingFailed', { tank: num });
   if (tank && tank.requires_test && tank.testing_done) {
     return tr('ak.optTestingPassed', { tank: num });
@@ -274,7 +278,8 @@ function eligibleOptionLabel(tank) {
 
 function isTestingLockedTank(tank) {
   const st = String((tank && tank.status) || '').toLowerCase();
-  return Boolean(tank && tank.locked) && (st === 'testing_in_progress' || st === 'testing_failed');
+  // Only FAILED/HOLD blocks Assembly selection; concurrent Testing is allowed.
+  return Boolean(tank && tank.locked) && st === 'testing_failed';
 }
 
 function wireTouchPrevent(root) {

@@ -172,6 +172,14 @@ function isPieceSelectModalOpen() {
   );
 }
 
+function isRestorePieceModalOpen() {
+  return Boolean(
+    els.restorePieceModal &&
+      !els.restorePieceModal.hidden &&
+      els.restorePieceModal.classList.contains('show')
+  );
+}
+
 function isTextEntryModalOpen() {
   const noteOpen = els.noteModal && !els.noteModal.hidden && els.noteModal.classList.contains('show');
   const downtimeOpen =
@@ -189,6 +197,7 @@ function isTextEntryModalOpen() {
       isEmployeeOutModalOpen() ||
       isChangePhaseModalOpen() ||
       isPieceSelectModalOpen() ||
+      isRestorePieceModalOpen() ||
       domeOpen
   );
 }
@@ -2336,6 +2345,13 @@ async function handleScan(raw) {
 }
 
 function processScan(v) {
+  // While Restore Piece is confirming, ignore USB/wedge/manual barcodes so they
+  // cannot start phases, select pieces, or otherwise act behind the modal.
+  if (isRestorePieceModalOpen()) {
+    if (els.manual) els.manual.value = '';
+    scanBuffer = '';
+    return;
+  }
   if (els.manual) els.manual.value = '';
   scanBuffer = '';
   void handleScan(v);
