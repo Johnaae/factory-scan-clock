@@ -5374,6 +5374,10 @@ async function domeInstallTankSelected(machine, tankRow, assignment) {
  * A running Dome Install session only accepts Finish/Cancel Install; a Ready for Dome Install
  * tank only accepts the Dome Install phase (which opens the dome picker); a Dome Installed tank
  * accepts no phase.
+ *
+ * Important: never fall through to changePhase/startSession for Ready-for-Dome tanks. An open
+ * FAB session on the same tank used to skip this intercept and silently rename the phase to
+ * Dome Install without the inventory picker — that path is closed.
  */
 async function domeInstallPhaseIntercept(machine, ph, pending, focusedSession, body) {
   if (focusedSession && String(focusedSession.activity_code || '').toUpperCase() === 'DOME_INSTALL') {
@@ -5399,11 +5403,11 @@ async function domeInstallPhaseIntercept(machine, ph, pending, focusedSession, b
     tankRow = r.rows[0] || null;
   }
   if (!tankRow || isTankDeleted(tankRow)) return null;
-  if (focusedSession && Number(focusedSession.tank_id) === Number(tankRow.id)) return null;
   // The phase after Dome Installed is not defined yet: refuse every phase (incl. Tank Complete).
   if (normalizeTankStatus(tankRow.status) === 'dome_installed') {
     return { ok: false, status: 409, body: tankProductionBlockBody(tankRow) };
   }
+  // Mid-FAB tanks keep the legacy "Dome Install" winding phase (changePhase / startSession).
   if (!phase3.isDomeTankStatus(tankRow.status)) return null;
   if (ph.code !== 'DOME_INSTALL') {
     return {
@@ -5417,8 +5421,37 @@ async function domeInstallPhaseIntercept(machine, ph, pending, focusedSession, b
       },
     };
   }
+  // Ready for Dome Install + DOME_INSTALL: open picker, or a clear 409 — never changePhase.
+  if (focusedSession && String(focusedSession.activity_code || '').toUpperCase() === 'DOME_INSTALL') {
+    return {
+      ok: false,
+      status: 409,
+      body: {
+        ok: false,
+        error: 'dome_install_active',
+        tank_number: tankRow.tank_number,
+        message: `Dome Install session is already open on Tank ${tankRow.tank_number}. Tap Finish Install or Cancel Install. The phase was not changed.`,
+      },
+    };
+  }
   const blocked = await phase3.tankInstallBlock(tankRow);
-  if (blocked) return blocked;
+  if (blocked) {
+    if (blocked.body && blocked.body.error === 'tank_in_use') {
+      return {
+        ok: false,
+        status: 409,
+        body: {
+          ok: false,
+          error: 'tank_in_use',
+          tank_number: tankRow.tank_number,
+          message:
+            `Tank ${tankRow.tank_number} still has an open Fabrication session. ` +
+            `Finish that work or End Shift before Dome Install. The phase was not changed.`,
+        },
+      };
+    }
+    return blocked;
+  }
   const available = await phase3.listAvailableDomes({});
   if (!available.ok) return available;
   return {

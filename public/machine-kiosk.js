@@ -597,14 +597,19 @@ async function selectPieceFromModal(pieceNum) {
 function showChangePhaseConfirm(ph) {
   if (!changePhaseContext || !ph) return;
   changePhasePick = ph;
-  const pieceLabel = `Piece ${changePhaseContext.piece}`;
+  const pieceLabel =
+    changePhaseContext.piece != null ? `Piece ${changePhaseContext.piece}` : `Tank ${changePhaseContext.tank}`;
   const fromLabel = changePhaseContext.currentPhase || '—';
   const toLabel = ph.label || ph.code || 'phase';
+  const isDomePick =
+    changePhaseContext.domeInstallMode && String(ph.code || '').toUpperCase() === 'DOME_INSTALL';
   if (els.changePhaseConfirm) {
     els.changePhaseConfirm.hidden = false;
-    els.changePhaseConfirm.textContent = changePhaseContext.hasCurrentPhase
-      ? `Change ${pieceLabel} from ${fromLabel} to ${toLabel}?`
-      : `Start ${toLabel} on ${pieceLabel}?`;
+    els.changePhaseConfirm.textContent = isDomePick
+      ? `Open Dome Inventory to install a dome on Tank ${changePhaseContext.tank}?`
+      : changePhaseContext.hasCurrentPhase
+        ? `Change ${pieceLabel} from ${fromLabel} to ${toLabel}?`
+        : `Start ${toLabel} on ${pieceLabel}?`;
   }
   if (els.btnConfirmChangePhase) {
     els.btnConfirmChangePhase.hidden = false;
@@ -658,8 +663,9 @@ function openChangePhaseModal() {
     warn('Scan or select a tank first, then Change Phase.');
     return;
   }
+  // Ready for Dome Install is tank-level — no piece required (Phase 3 picker).
   const piece = selectedPieceNumber();
-  if (piece == null) {
+  if (piece == null && !domeInstallMode) {
     warn('Select the target piece first, then Change Phase.');
     return;
   }
@@ -672,10 +678,11 @@ function openChangePhaseModal() {
 
   changePhaseContext = {
     tank: String(tank).toUpperCase(),
-    piece: Number(piece),
+    piece: piece != null ? Number(piece) : null,
     currentPhase: currentPhase || 'Not started',
     currentCode,
     hasCurrentPhase: Boolean(currentPhase),
+    domeInstallMode: Boolean(domeInstallMode),
   };
   changePhasePick = null;
   changePhaseSubmitting = false;
@@ -687,13 +694,18 @@ function openChangePhaseModal() {
 
   if (els.changePhaseContext) els.changePhaseContext.hidden = false;
   if (els.changePhaseTarget) {
-    els.changePhaseTarget.textContent = `Tank ${changePhaseContext.tank} — Piece ${changePhaseContext.piece}`;
+    els.changePhaseTarget.textContent =
+      changePhaseContext.piece != null
+        ? `Tank ${changePhaseContext.tank} — Piece ${changePhaseContext.piece}`
+        : `Tank ${changePhaseContext.tank} — Dome Install`;
   }
   if (els.changePhaseCurrent) {
     els.changePhaseCurrent.textContent = `Current Phase: ${changePhaseContext.currentPhase}`;
   }
 
-  const list = selectablePhases();
+  const list = domeInstallMode
+    ? selectablePhases().filter((ph) => String(ph.code || '').toUpperCase() === 'DOME_INSTALL')
+    : selectablePhases();
   if (!list.length) {
     if (els.changePhaseEmpty) {
       els.changePhaseEmpty.hidden = false;

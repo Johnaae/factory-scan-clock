@@ -259,7 +259,8 @@
     'dome.err.install_on_other_machine': 'This Dome Install is running on another Fabrication kiosk.',
     'dome.err.dome_install_only': 'Tank {tank} is Ready for Dome Install. Tap Dome Install.',
     'dome.err.dome_already_installed': 'Dome {dome} is already installed on Tank {tank}.',
-    'dome.err.tank_in_use': 'Tank {tank} is already being worked on.',
+    'dome.err.tank_in_use':
+      'Tank {tank} still has open Fabrication work. Finish or End Shift before Dome Install. The phase was not changed.',
     'dome.err.dome_installed_waiting': 'Tank {tank} — Dome Installed. Waiting for the next Fabrication phase.',
     'dome.err.dome_install_active': 'Dome Install in progress (Dome {dome}). Tap Finish Install or Cancel Install.',
     'dome.err.server_error': 'Could not complete the action. Try again.',
@@ -525,7 +526,8 @@
     'dome.err.install_on_other_machine': 'Esta Instalación de Domo está en proceso en otro kiosco de Fabricación.',
     'dome.err.dome_install_only': 'El Tanque {tank} está Listo para Instalación de Domo. Toque Instalación de Domo.',
     'dome.err.dome_already_installed': 'El Domo {dome} ya está instalado en el Tanque {tank}.',
-    'dome.err.tank_in_use': 'El Tanque {tank} ya se está trabajando.',
+    'dome.err.tank_in_use':
+      'El Tanque {tank} todavía tiene trabajo de Fabricación abierto. Termine o End Shift antes de Instalación de Domo. La fase no cambió.',
     'dome.err.dome_installed_waiting': 'Tanque {tank} — Domo Instalado. Esperando la siguiente fase de Fabricación.',
     'dome.err.dome_install_active': 'Instalación de Domo en proceso (Domo {dome}). Toque Terminar Instalación o Cancelar Instalación.',
     'dome.err.server_error': 'No se pudo completar la acción. Intente de nuevo.',
