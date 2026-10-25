@@ -62,6 +62,9 @@ function parseWeight(raw) {
   return Math.round(n * 100) / 100;
 }
 
+/** Max workers selectable per dome (Create Dome / Set Fabricators). */
+const MAX_DOME_FABRICATORS = 3;
+
 function parseIdList(raw) {
   const list = Array.isArray(raw) ? raw : raw == null ? [] : [raw];
   const out = [];
@@ -70,6 +73,12 @@ function parseIdList(raw) {
     if (Number.isInteger(n) && n > 0 && !out.includes(n)) out.push(n);
   }
   return out;
+}
+
+function parseDomeNotes(raw) {
+  if (raw == null) return null;
+  const s = String(raw).trim().slice(0, 1000);
+  return s || null;
 }
 
 function isDomeTankStatus(status) {
@@ -106,6 +115,9 @@ function mapDome(row) {
     installed_tank_id: row.installed_tank_id != null ? Number(row.installed_tank_id) : null,
     installed_tank_number: row.installed_tank_number || null,
     installed_piece_number: row.installed_piece_number != null ? Number(row.installed_piece_number) : null,
+    deleted_at: row.deleted_at || null,
+    deleted_by: row.deleted_by || null,
+    deleted_reason: row.deleted_reason || null,
     updated_at: row.updated_at || null,
   };
 }
@@ -115,6 +127,12 @@ function createPhase3Dome(pool, helpers = {}) {
   const phase1 = helpers.phase1;
   const phase2 = helpers.phase2;
   const isEmployeeShopsReady = helpers.isEmployeeShopsReady || (async () => false);
+  const claimEmployeesForDomeWork = helpers.claimEmployeesForDomeWork || null;
+  const listActiveEmployeesForPicker = helpers.listActiveEmployeesForPicker || null;
+  /** Optional Phase 3 bulkhead board hooks (same Dome Shop kiosk Lunch/Resume/End Shift). */
+  const onBulkheadLunch = helpers.onBulkheadLunch || null;
+  const onBulkheadResume = helpers.onBulkheadResume || null;
+  const onBulkheadEndShift = helpers.onBulkheadEndShift || null;
 
   let readyCache = { value: false, checkedAt: 0 };
 
@@ -270,8 +288,23 @@ function createPhase3Dome(pool, helpers = {}) {
   }
 
   async function lockDome(client, domeId) {
-    const { rows } = await client.query(`SELECT * FROM domes WHERE id = $1 FOR UPDATE`, [domeId]);
+    const { rows } = await client.query(
+      `SELECT * FROM domes WHERE id = $1 AND deleted_at IS NULL FOR UPDATE`,
+      [domeId]
+    );
     return rows[0] || null;
+  }
+
+  async function softDeleteColumnsReady() {
+    try {
+      const { rows } = await pool.query(
+        `SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'domes' AND column_name = 'deleted_at'`
+      );
+      return Boolean(rows.length);
+    } catch (_err) {
+      return false;
+    }
   }
 
   async function activeEmployees(ids, client) {
@@ -293,34 +326,50 @@ function createPhase3Dome(pool, helpers = {}) {
   }
 
   /**
-   * Validates fabricator ids: active employees with the Dome shop (when shop data exists).
-   * Employees on shift with a Dome team on the kiosk (shopExempt) skip the shop check.
+   * Validates fabricator ids: any active employees (any department/shop).
+   * Temporary transfer into Dome labor happens on Start, not Create.
+   * Enforce 1–3 unique workers.
    */
-  async function validateFabricators(ids, client, shopExempt = new Set()) {
+  async function validateFabricators(ids, client, _shopExempt = new Set(), opts = {}) {
+    const min = opts.min != null ? Number(opts.min) : 1;
+    const max = opts.max != null ? Number(opts.max) : MAX_DOME_FABRICATORS;
     if (!ids.length) {
-      return { error: errResult(400, 'fabricators_required', 'Select at least one fabricator.') };
+      return { error: errResult(400, 'fabricators_required', 'Select 1 to 3 employees.') };
+    }
+    if (ids.length < min) {
+      return {
+        error: errResult(400, 'fabricators_required', `Select at least ${min} employee${min === 1 ? '' : 's'}.`),
+      };
+    }
+    if (ids.length > max) {
+      return {
+        error: errResult(
+          400,
+          'too_many_fabricators',
+          `Select at most ${max} employees per dome.`,
+          { max }
+        ),
+      };
     }
     const rows = await activeEmployees(ids, client);
     const byId = new Map(rows.map((r) => [Number(r.id), r]));
     const missing = ids.filter((id) => !byId.has(id) || Number(byId.get(id).is_active) !== 1);
     if (missing.length) {
-      return { error: errResult(400, 'invalid_fabricator', 'One or more selected fabricators are not active employees.') };
-    }
-    const shopSet = await domeShopEmployeeIds(client);
-    if (shopSet) {
-      const notDome = ids.filter((id) => !shopSet.has(id) && !shopExempt.has(id)).map((id) => byId.get(id).name);
-      if (notDome.length) {
-        return {
-          error: errResult(
-            409,
-            'not_dome_shop',
-            `Not assigned to the Dome shop: ${notDome.join(', ')}. A manager can update Shop Assignment.`,
-            { employees: notDome }
-          ),
-        };
-      }
+      return { error: errResult(400, 'invalid_fabricator', 'One or more selected employees are not active.') };
     }
     return { employees: ids.map((id) => byId.get(id)) };
+  }
+
+  /** Active employees currently listed as fabricators on a dome (for team-optional Start Dome). */
+  async function domeFabricatorEmployees(client, domeId) {
+    const { rows } = await client.query(
+      `SELECT e.id, e.code, e.name, e.hourly_rate, e.is_active
+       FROM dome_fabricators df JOIN employees e ON e.id = df.employee_id
+       WHERE df.dome_id = $1 AND e.is_active = 1
+       ORDER BY LOWER(e.name), e.id`,
+      [domeId]
+    );
+    return rows;
   }
 
   async function busyElsewhere(employeeIds, domeId, client) {
@@ -379,21 +428,50 @@ function createPhase3Dome(pool, helpers = {}) {
   }
 
   /**
-   * Start (or restart after Stop / Lunch / End Shift) labor for one locked dome row. The team's
-   * workers become participants and are added to the dome's fabricators; the dome moves to that team.
+   * Start (or restart after Stop / Lunch / End Shift) labor for one locked dome row.
+   * Team is optional — when omitted, labor uses the dome's selected employees and team_id is left unchanged.
    */
-  async function startLaborForLockedDome(client, dome, machine, team, employees, ts, event) {
+  /**
+   * @returns {null|{ok:true,transferred_from:Array}|errResult}
+   * null / {ok:true} = success; errResult = failure (ok === false).
+   */
+  async function startLaborForLockedDome(client, dome, machine, team, employees, ts, event, opts = {}) {
     if (!employees.length) {
       return errResult(
         409,
         'no_workers',
-        `Nobody can work on Dome ${dome.dome_number}: ${team.name} has no employees on shift. Scan employee badges onto the team first.`,
-        { dome_number: dome.dome_number, team_name: team.name }
+        team
+          ? `Nobody can work on Dome ${dome.dome_number}: ${team.name} has no employees on shift. Scan employee badges onto the team first.`
+          : `Nobody can work on Dome ${dome.dome_number}. Select 1 to 3 employees on the dome first.`,
+        { dome_number: dome.dome_number, team_name: team ? team.name : null }
       );
     }
-    const busy = await busyElsewhere(employees.map((e) => Number(e.id)), dome.id, client);
-    if (busy.length) return busyResult(busy);
-    await openLabor(client, dome, team.id, machine.id, employees, ts);
+    // Start-time temporary transfer: close prior memberships / stage labor; other Dome/Bulkhead
+    // labor requires confirmTransfer (intentional move) so concurrent Starts cannot both succeed.
+    let claimedHandoff = [];
+    if (typeof claimEmployeesForDomeWork === 'function') {
+      const claimed = await claimEmployeesForDomeWork(client, employees, {
+        ts,
+        reason: opts.reason || 'dome_start',
+        keepDomeId: Number(dome.id),
+        // Team-card Start/Resume: keep that team's open memberships so Lunch/moves still work.
+        keepTeamId: team && team.id != null ? Number(team.id) : null,
+        confirmTransfer: Boolean(opts.confirmTransfer),
+        targetLabel: `Dome ${dome.dome_number}`,
+        targetMachineId: Number(machine.id),
+      });
+      if (!claimed.ok) return claimed;
+      claimedHandoff = claimed.transferred_from || [];
+    } else {
+      const busy = await busyElsewhere(
+        employees.map((e) => Number(e.id)),
+        dome.id,
+        client
+      );
+      if (busy.length) return busyResult(busy);
+    }
+    const teamId = team && team.id != null ? Number(team.id) : null;
+    await openLabor(client, dome, teamId, machine.id, employees, ts);
     for (const e of employees) {
       await client.query(
         `INSERT INTO dome_fabricators (dome_id, employee_id, added_at) VALUES ($1, $2, $3::timestamptz)
@@ -401,22 +479,32 @@ function createPhase3Dome(pool, helpers = {}) {
         [dome.id, Number(e.id), ts]
       );
     }
-    await client.query(
-      `UPDATE domes SET production_status = 'in_progress', pause_reason = NULL,
-              started_at = COALESCE(started_at, $2::timestamptz), team_id = $3,
-              updated_at = $2::timestamptz
-       WHERE id = $1`,
-      [dome.id, ts, team.id]
-    );
+    if (teamId != null) {
+      await client.query(
+        `UPDATE domes SET production_status = 'in_progress', pause_reason = NULL,
+                started_at = COALESCE(started_at, $2::timestamptz), team_id = $3,
+                updated_at = $2::timestamptz
+         WHERE id = $1`,
+        [dome.id, ts, teamId]
+      );
+    } else {
+      await client.query(
+        `UPDATE domes SET production_status = 'in_progress', pause_reason = NULL,
+                started_at = COALESCE(started_at, $2::timestamptz),
+                updated_at = $2::timestamptz
+         WHERE id = $1`,
+        [dome.id, ts]
+      );
+    }
     await logEvent(
       client,
       dome.id,
       event,
-      { machine_id: Number(machine.id), team_id: team.id, employees: employees.map((e) => Number(e.id)) },
+      { machine_id: Number(machine.id), team_id: teamId, employees: employees.map((e) => Number(e.id)) },
       'kiosk',
       ts
     );
-    return null;
+    return { ok: true, transferred_from: claimedHandoff };
   }
 
   // ---------------------------------------------------------------- Dome teams (shared Assembly presence)
@@ -594,13 +682,14 @@ function createPhase3Dome(pool, helpers = {}) {
 
     const { rows: domeRows } = await pool.query(
       `SELECT d.*, t.name AS team_name FROM domes d LEFT JOIN teams t ON t.id = d.team_id
-       WHERE d.machine_id = $1 AND d.production_status <> 'completed'
+       WHERE d.machine_id = $1 AND d.production_status <> 'completed' AND d.deleted_at IS NULL
        ORDER BY d.created_at ASC, d.id ASC`,
       [mid]
     );
     const { rows: doneRows } = await pool.query(
       `SELECT d.*, t.name AS team_name FROM domes d LEFT JOIN teams t ON t.id = d.team_id
-       WHERE d.machine_id = $1 AND d.production_status = 'completed' AND d.completed_at >= NOW() - INTERVAL '16 hours'
+       WHERE d.machine_id = $1 AND d.production_status = 'completed' AND d.deleted_at IS NULL
+         AND d.completed_at >= NOW() - INTERVAL '16 hours'
        ORDER BY d.completed_at DESC LIMIT 6`,
       [mid]
     );
@@ -654,44 +743,102 @@ function createPhase3Dome(pool, helpers = {}) {
       };
     });
 
-    // Fabricator choices: Dome-shop employees plus everyone on shift with a team on this kiosk
-    // and everyone already on a listed dome (so editing never silently drops a worker).
+    // Notices when workers were pulled off this kiosk's jobs by another kiosk (last 3 minutes).
+    const transferNotices = [];
+    try {
+      const { rows: domeNotices } = await pool.query(
+        `SELECT e.id, e.dome_id, d.dome_number, e.details, e.performed_at
+         FROM dome_events e
+         JOIN domes d ON d.id = e.dome_id
+         WHERE d.machine_id = $1 AND e.event = 'employee_reassigned'
+           AND e.performed_at >= NOW() - INTERVAL '3 minutes'
+         ORDER BY e.performed_at DESC
+         LIMIT 20`,
+        [mid]
+      );
+      for (const r of domeNotices) {
+        const details = r.details || {};
+        transferNotices.push({
+          id: `dome-${r.id}`,
+          kind: 'dome',
+          dome_id: Number(r.dome_id),
+          dome_number: r.dome_number,
+          employee_name: details.employee_name || null,
+          to: details.to || null,
+          performed_at: r.performed_at,
+          message: details.employee_name
+            ? `${details.employee_name} was assigned elsewhere${details.to ? ` (${details.to})` : ''}. Dome ${r.dome_number} was updated.`
+            : `A worker was assigned elsewhere. Dome ${r.dome_number} was updated.`,
+        });
+      }
+      const { rows: bhNotices } = await pool.query(
+        `SELECT e.id, e.bulkhead_id, b.bulkhead_number, e.details, e.performed_at
+         FROM bulkhead_events e
+         JOIN bulkheads b ON b.id = e.bulkhead_id
+         WHERE b.machine_id = $1 AND e.event = 'employee_reassigned'
+           AND e.performed_at >= NOW() - INTERVAL '3 minutes'
+         ORDER BY e.performed_at DESC
+         LIMIT 20`,
+        [mid]
+      );
+      for (const r of bhNotices) {
+        const details = r.details || {};
+        transferNotices.push({
+          id: `bh-${r.id}`,
+          kind: 'bulkhead',
+          bulkhead_id: Number(r.bulkhead_id),
+          bulkhead_number: r.bulkhead_number,
+          employee_name: details.employee_name || null,
+          to: details.to || null,
+          performed_at: r.performed_at,
+          message: details.employee_name
+            ? `${details.employee_name} was assigned elsewhere${details.to ? ` (${details.to})` : ''}. Bulkhead ${r.bulkhead_number} was updated.`
+            : `A worker was assigned elsewhere. Bulkhead ${r.bulkhead_number} was updated.`,
+        });
+      }
+    } catch (_err) {
+      /* bulkhead tables may lag briefly after migrate */
+    }
+
+    // Picker: all active employees (any department). Temporary transfer happens on Start.
     const shopSet = await domeShopEmployeeIds();
-    const candidateIds = new Set([...(shopSet || []), ...shiftTeamBy.keys()]);
-    for (const list of fabs.values()) for (const f of list) if (f.active) candidateIds.add(f.id);
-    const { rows: candidates } = candidateIds.size
-      ? await pool.query(
-          `SELECT id, code, name FROM employees WHERE id = ANY($1::bigint[]) AND is_active = 1 ORDER BY LOWER(name), id`,
-          [[...candidateIds]]
-        )
-      : { rows: [] };
-    const { rows: busyRows } = await pool.query(
-      `SELECT p.employee_id, s.dome_id, d.dome_number FROM dome_labor_participants p
-       JOIN dome_labor_sessions s ON s.id = p.session_id JOIN domes d ON d.id = s.dome_id
-       WHERE p.left_at IS NULL AND p.employee_id IS NOT NULL`
-    );
-    const busyBy = new Map(busyRows.map((r) => [Number(r.employee_id), { dome_id: Number(r.dome_id), dome_number: r.dome_number }]));
-    const fabricatorOptions = candidates.map((e) => {
-      const shift = shiftTeamBy.get(Number(e.id)) || null;
-      return {
-        id: Number(e.id),
-        code: e.code || null,
-        name: e.name,
-        on_shift: Boolean(shift),
-        team_id: shift ? shift.team_id : null,
-        team_name: shift ? shift.team_name : null,
-        busy_on_dome: busyBy.get(Number(e.id)) || null,
-      };
-    });
+    let fabricatorOptions = [];
+    if (typeof listActiveEmployeesForPicker === 'function') {
+      fabricatorOptions = await listActiveEmployeesForPicker();
+    } else {
+      const { rows: candidates } = await pool.query(
+        `SELECT id, code, name FROM employees WHERE is_active = 1 ORDER BY LOWER(name), id LIMIT 2000`
+      );
+      fabricatorOptions = candidates.map((e) => {
+        const shift = shiftTeamBy.get(Number(e.id)) || null;
+        return {
+          id: Number(e.id),
+          code: e.code || null,
+          name: e.name,
+          on_shift: Boolean(shift),
+          team_id: shift ? shift.team_id : null,
+          team_name: shift ? shift.team_name : null,
+          department: null,
+          busy_on_dome: null,
+          dome_shop: shopSet ? shopSet.has(Number(e.id)) : true,
+        };
+      });
+    }
 
     return okResult({
       workflow: 'dome',
       machine: { id: mid, name: machine.name, slug: machine.kiosk_slug },
       assignment,
       active_teams: teams,
-      other_domes: domes.filter((d) => !presentIds.has(d.team_id)),
+      other_domes: domes.filter((d) => d.team_id == null || !presentIds.has(d.team_id)),
       fabricator_options: fabricatorOptions,
+      // Backward-compatible alias — now the full active employee list (not Dome-shop only).
+      dome_shop_employees: fabricatorOptions,
+      all_employees: fabricatorOptions,
+      transfer_notices: transferNotices,
       shop_assignment_ready: Boolean(shopSet),
+      team_login_required: false,
+      max_fabricators: MAX_DOME_FABRICATORS,
       diameters: DOME_DIAMETERS_FT,
       types: DOME_TYPES,
       domes,
@@ -724,8 +871,8 @@ function createPhase3Dome(pool, helpers = {}) {
   }
 
   /**
-   * Create Dome for the selected team card. Fabricators default to the team's on-shift employees;
-   * a manual pick is only needed when nobody is on shift with the team.
+   * Create Dome without team login. Worker selects 1–3 Dome Shop employees and optional notes.
+   * Legacy: if team_id is sent and fabricator_ids are omitted, still defaults to that team's on-shift roster.
    */
   async function createDome(machine, body) {
     if (!(await isReady())) return notReady();
@@ -735,29 +882,32 @@ function createPhase3Dome(pool, helpers = {}) {
     if (!type) return errResult(400, 'dome_type_required', 'Select a Dome Type (Petro or Water).');
     const diameter = parseDiameter(body.diameter_ft != null ? body.diameter_ft : body.diameter);
     if (!diameter) return errResult(400, 'diameter_required', "Select a Diameter (4', 6', 8', 10' or 12').");
+    const notes = parseDomeNotes(body.notes);
     return withTransaction(async (client) => {
-      const { team, error } = await resolveKioskTeam(client, machine, body);
-      if (error) return error;
-      const roster = await teamShiftEmployees(client, team.id);
+      let team = null;
+      const requestedTeamId = Number(body && body.team_id);
+      if (Number.isInteger(requestedTeamId) && requestedTeamId > 0) {
+        const resolved = await resolveKioskTeam(client, machine, body);
+        if (resolved.error) return resolved.error;
+        team = resolved.team;
+      }
       let ids = parseIdList(body.fabricator_ids);
-      if (!ids.length) ids = roster.map((e) => Number(e.id));
+      if (!ids.length && team) {
+        const roster = await teamShiftEmployees(client, team.id);
+        ids = roster.map((e) => Number(e.id));
+      }
       if (!ids.length) {
-        return errResult(
-          400,
-          'fabricators_required',
-          `Nobody is on shift with ${team.name}. Scan employee badges onto the team, or select fabricators.`,
-          { team_name: team.name }
-        );
+        return errResult(400, 'fabricators_required', 'Select 1 to 3 Dome Shop employees.');
       }
       const v = await validateFabricators(ids, client, await kioskShiftEmployeeIds(client, machine.id));
       if (v.error) return v.error;
       const ts = nowIso();
       const { rows } = await client.query(
         `INSERT INTO domes (dome_number, dome_type, diameter_ft, production_status, inventory_status, source,
-                            machine_id, team_id, created_by, created_at, updated_at)
-         VALUES ($1, $2, $3, 'created', 'not_in_inventory', 'kiosk', $4, $5, $6, $7::timestamptz, $7::timestamptz)
+                            machine_id, team_id, created_by, notes, created_at, updated_at)
+         VALUES ($1, $2, $3, 'created', 'not_in_inventory', 'kiosk', $4, $5, $6, $7, $8::timestamptz, $8::timestamptz)
          RETURNING *`,
-        [number, type, diameter, machine.id, team.id, `kiosk:${machine.name}`, ts]
+        [number, type, diameter, machine.id, team ? team.id : null, `kiosk:${machine.name}`, notes, ts]
       );
       const dome = rows[0];
       for (const id of ids) {
@@ -771,62 +921,107 @@ function createPhase3Dome(pool, helpers = {}) {
         client,
         dome.id,
         'created',
-        { dome_type: type, diameter_ft: diameter, team_id: team.id, fabricators: ids },
+        { dome_type: type, diameter_ft: diameter, team_id: team ? team.id : null, fabricators: ids, notes },
         `kiosk:${machine.name}`,
         ts
       );
+      const names = v.employees.map((e) => e.name).filter(Boolean).join(', ');
       return okResult({
         action: 'dome_created',
-        dome: { ...mapDome(dome), team_name: team.name },
-        team: { id: team.id, name: team.name },
+        dome: { ...mapDome(dome), team_name: team ? team.name : null },
+        team: team ? { id: team.id, name: team.name } : null,
         fabricator_ids: ids,
-        message: `Dome ${number} created for ${team.name}. Press Start Dome when work begins.`,
+        message: names
+          ? `Dome ${number} created for ${names}. Press Start Dome when work begins.`
+          : `Dome ${number} created. Press Start Dome when work begins.`,
       });
     });
   }
 
   /**
-   * Start Dome for a team card: that team's on-shift employees become the labor participants.
-   * A team runs one dome at a time; different teams run different domes at the same time.
+   * Start Dome. Preferred path (no team): labor from the dome's selected fabricators.
+   * Legacy path: when team_id is present on the kiosk, use that team's on-shift roster.
    */
   async function startDome(machine, body) {
     if (!(await isReady())) return notReady();
     const domeId = Number(body.dome_id);
     if (!Number.isInteger(domeId) || domeId <= 0) return errResult(400, 'validation', 'Select a dome.');
     return withTransaction(async (client) => {
-      const { rows: peek } = await client.query(`SELECT team_id FROM domes WHERE id = $1`, [domeId]);
-      const { team, error } = await resolveKioskTeam(client, machine, body, peek[0] ? peek[0].team_id : null, true);
-      if (error) return error;
       const dome = await lockDome(client, domeId);
       if (!dome || Number(dome.machine_id) !== Number(machine.id)) return errResult(404, 'not_found', 'Dome not found on this kiosk.');
       if (dome.production_status === 'completed') return errResult(409, 'dome_completed', `Dome ${dome.dome_number} is already completed.`);
       if (dome.production_status === 'in_progress') return errResult(409, 'dome_already_running', `Dome ${dome.dome_number} is already running.`);
-      if (team.on_lunch) {
-        return errResult(409, 'team_on_lunch', `${team.name} is on lunch. Press Resume on the team card first.`, { team_name: team.name });
-      }
-      const { rows: running } = await client.query(
-        `SELECT d.dome_number FROM dome_labor_sessions s JOIN domes d ON d.id = s.dome_id
-         WHERE s.team_id = $1 AND s.status = 'active' AND s.dome_id <> $2 LIMIT 1`,
-        [team.id, domeId]
-      );
-      if (running.length) {
-        return errResult(
-          409,
-          'team_busy',
-          `${team.name} is already working on Dome ${running[0].dome_number}. Stop or complete it first.`,
-          { team_name: team.name, dome_number: running[0].dome_number }
+
+      const requestedTeamId = Number(body && body.team_id);
+      const wantTeam = Number.isInteger(requestedTeamId) && requestedTeamId > 0;
+      let team = null;
+      let employees = [];
+      if (wantTeam) {
+        const resolved = await resolveKioskTeam(client, machine, body, dome.team_id, true);
+        if (resolved.error) return resolved.error;
+        team = resolved.team;
+        if (team.on_lunch) {
+          return errResult(409, 'team_on_lunch', `${team.name} is on lunch. Press Resume on the team card first.`, {
+            team_name: team.name,
+          });
+        }
+        const { rows: running } = await client.query(
+          `SELECT d.dome_number FROM dome_labor_sessions s JOIN domes d ON d.id = s.dome_id
+           WHERE s.team_id = $1 AND s.status = 'active' AND s.dome_id <> $2 LIMIT 1`,
+          [team.id, domeId]
         );
+        if (running.length) {
+          return errResult(
+            409,
+            'team_busy',
+            `${team.name} is already working on Dome ${running[0].dome_number}. Stop or complete it first.`,
+            { team_name: team.name, dome_number: running[0].dome_number }
+          );
+        }
+        employees = await teamShiftEmployees(client, team.id);
+      } else {
+        employees = await domeFabricatorEmployees(client, domeId);
+        if (!employees.length) {
+          return errResult(
+            409,
+            'no_workers',
+            `Select 1 to 3 employees on Dome ${dome.dome_number} before Start Dome.`,
+            { dome_number: dome.dome_number }
+          );
+        }
       }
-      const employees = await teamShiftEmployees(client, team.id);
+
       const ts = nowIso();
-      const fail = await startLaborForLockedDome(client, dome, machine, team, employees, ts, dome.started_at ? 'restarted' : 'started');
-      if (fail) return fail;
+      const started = await startLaborForLockedDome(
+        client,
+        dome,
+        machine,
+        team,
+        employees,
+        ts,
+        dome.started_at ? 'restarted' : 'started',
+        { confirmTransfer: body && body.confirm_transfer === true, reason: 'dome_start' }
+      );
+      if (started && started.ok === false) return started;
+      const transferredFrom = (started && started.transferred_from) || [];
+      const names = employees.map((e) => e.name).filter(Boolean).join(', ');
+      const moveNote = transferredFrom.length
+        ? ` Moved from ${transferredFrom
+            .map((h) => (h.dome_number ? `Dome ${h.dome_number}` : h.bulkhead_number ? `Bulkhead ${h.bulkhead_number}` : null))
+            .filter(Boolean)
+            .join(', ')}.`
+        : '';
       return okResult({
         action: 'dome_started',
         dome_id: domeId,
         dome_number: dome.dome_number,
-        team: { id: team.id, name: team.name },
-        message: `Dome ${dome.dome_number} started by ${team.name}.`,
+        team: team ? { id: team.id, name: team.name } : null,
+        transferred_from: transferredFrom,
+        message: team
+          ? `Dome ${dome.dome_number} started by ${team.name}.${moveNote}`
+          : names
+            ? `Dome ${dome.dome_number} started — ${names}.${moveNote}`
+            : `Dome ${dome.dome_number} started.${moveNote}`,
       });
     });
   }
@@ -853,19 +1048,35 @@ function createPhase3Dome(pool, helpers = {}) {
     });
   }
 
-  /** Team Lunch (Assembly rule): this team card only — its running dome pauses, other teams keep working. */
+  /**
+   * Lunch: with team_id — that team card only (legacy). Without team_id — all running domes on this kiosk.
+   */
   async function lunch(machine, body = {}) {
     if (!(await isReady())) return notReady();
     return withTransaction(async (client) => {
-      const { team, error } = await resolveKioskTeam(client, machine, body, null, true);
-      if (error) return error;
-      const { rows } = await client.query(
-        `SELECT d.* FROM domes d
-         WHERE d.machine_id = $1 AND d.production_status = 'in_progress'
-           AND EXISTS (SELECT 1 FROM dome_labor_sessions s WHERE s.dome_id = d.id AND s.status = 'active' AND s.team_id = $2)
-         ORDER BY d.id FOR UPDATE`,
-        [machine.id, team.id]
-      );
+      const requestedTeamId = Number(body && body.team_id);
+      const wantTeam = Number.isInteger(requestedTeamId) && requestedTeamId > 0;
+      let team = null;
+      let rows;
+      if (wantTeam) {
+        const resolved = await resolveKioskTeam(client, machine, body, null, true);
+        if (resolved.error) return resolved.error;
+        team = resolved.team;
+        ({ rows } = await client.query(
+          `SELECT d.* FROM domes d
+           WHERE d.machine_id = $1 AND d.production_status = 'in_progress'
+             AND EXISTS (SELECT 1 FROM dome_labor_sessions s WHERE s.dome_id = d.id AND s.status = 'active' AND s.team_id = $2)
+           ORDER BY d.id FOR UPDATE`,
+          [machine.id, team.id]
+        ));
+      } else {
+        ({ rows } = await client.query(
+          `SELECT d.* FROM domes d
+           WHERE d.machine_id = $1 AND d.production_status = 'in_progress'
+           ORDER BY d.id FOR UPDATE`,
+          [machine.id]
+        ));
+      }
       const ts = nowIso();
       for (const d of rows) {
         await closeLabor(client, d.id, ts, 'stopped', 'lunch');
@@ -873,140 +1084,242 @@ function createPhase3Dome(pool, helpers = {}) {
           `UPDATE domes SET production_status = 'paused', pause_reason = 'lunch', updated_at = $2::timestamptz WHERE id = $1`,
           [d.id, ts]
         );
-        await logEvent(client, d.id, 'lunch', { team_id: team.id }, 'kiosk', ts);
+        await logEvent(client, d.id, 'lunch', { team_id: team ? team.id : null }, 'kiosk', ts);
       }
-      await client.query(
-        `UPDATE assembly_kiosk_teams SET status = 'lunch', lunch_paused_at = $1::timestamptz, updated_at = $1::timestamptz
-         WHERE machine_id = $2 AND team_id = $3 AND left_at IS NULL`,
-        [ts, machine.id, team.id]
-      );
+      if (team) {
+        await client.query(
+          `UPDATE assembly_kiosk_teams SET status = 'lunch', lunch_paused_at = $1::timestamptz, updated_at = $1::timestamptz
+           WHERE machine_id = $2 AND team_id = $3 AND left_at IS NULL`,
+          [ts, machine.id, team.id]
+        );
+      }
+      let bulkheadNumbers = [];
+      if (!wantTeam && typeof onBulkheadLunch === 'function') {
+        bulkheadNumbers = (await onBulkheadLunch(client, machine, ts)) || [];
+      }
       const list = rows.map((d) => d.dome_number);
+      const parts = [];
+      if (list.length) parts.push(`Dome ${list.join(', ')}`);
+      if (bulkheadNumbers.length) parts.push(`Bulkhead ${bulkheadNumbers.join(', ')}`);
       return okResult({
         action: 'lunch',
-        team_id: team.id,
-        team_name: team.name,
+        team_id: team ? team.id : null,
+        team_name: team ? team.name : null,
         dome_numbers: list,
-        count: list.length,
-        message: list.length ? `${team.name} on lunch. Dome ${list.join(', ')} paused.` : `${team.name} on lunch.`,
+        bulkhead_numbers: bulkheadNumbers,
+        count: list.length + bulkheadNumbers.length,
+        message: team
+          ? list.length
+            ? `${team.name} on lunch. Dome ${list.join(', ')} paused.`
+            : `${team.name} on lunch.`
+          : parts.length
+            ? `Lunch — ${parts.join('; ')} paused.`
+            : 'Lunch recorded. No running work.',
       });
     });
   }
 
   /**
-   * Team Resume (Assembly rule): restart the domes this team paused for lunch with the prior workers
-   * still on shift plus anyone who joined the team during lunch. Always clears the team's lunch.
+   * Resume after lunch. With team_id — legacy team card. Without — all lunch-paused domes on this kiosk,
+   * using each dome's fabricators (or prior labor participants).
    */
   async function resume(machine, body = {}) {
     if (!(await isReady())) return notReady();
     return withTransaction(async (client) => {
-      const { team, error } = await resolveKioskTeam(client, machine, body, null, true);
-      if (error) return error;
-      const { rows: lunchDomes } = await client.query(
-        `SELECT * FROM domes WHERE machine_id = $1 AND team_id = $2 AND production_status = 'paused' AND pause_reason = 'lunch'
-         ORDER BY updated_at DESC, id DESC FOR UPDATE`,
-        [machine.id, team.id]
-      );
-      const roster = await teamShiftEmployees(client, team.id);
-      const lunchAt = toMs(team.lunch_paused_at);
+      const requestedTeamId = Number(body && body.team_id);
+      const wantTeam = Number.isInteger(requestedTeamId) && requestedTeamId > 0;
+      let team = null;
+      let lunchDomes;
+      if (wantTeam) {
+        const resolved = await resolveKioskTeam(client, machine, body, null, true);
+        if (resolved.error) return resolved.error;
+        team = resolved.team;
+        ({ rows: lunchDomes } = await client.query(
+          `SELECT * FROM domes WHERE machine_id = $1 AND team_id = $2 AND production_status = 'paused' AND pause_reason = 'lunch'
+           ORDER BY updated_at DESC, id DESC FOR UPDATE`,
+          [machine.id, team.id]
+        ));
+      } else {
+        ({ rows: lunchDomes } = await client.query(
+          `SELECT * FROM domes WHERE machine_id = $1 AND production_status = 'paused' AND pause_reason = 'lunch'
+           ORDER BY updated_at DESC, id DESC FOR UPDATE`,
+          [machine.id]
+        ));
+      }
+      const roster = team ? await teamShiftEmployees(client, team.id) : [];
+      const lunchAt = team ? toMs(team.lunch_paused_at) : null;
       const ts = nowIso();
       const resumed = [];
       const used = new Set();
       for (const d of lunchDomes) {
-        const { rows: prior } = await client.query(
-          `SELECT DISTINCT p.employee_id FROM dome_labor_participants p
-           WHERE p.session_id = (SELECT id FROM dome_labor_sessions WHERE dome_id = $1 ORDER BY started_at DESC, id DESC LIMIT 1)`,
-          [d.id]
-        );
-        const priorIds = new Set(prior.map((r) => Number(r.employee_id)));
-        let employees = roster.filter((e) => priorIds.has(Number(e.id)) || (lunchAt != null && toMs(e.joined_at) > lunchAt));
-        if (!employees.length) employees = roster;
-        employees = employees.filter((e) => !used.has(Number(e.id)));
+        let employees;
+        if (team) {
+          const { rows: prior } = await client.query(
+            `SELECT DISTINCT p.employee_id FROM dome_labor_participants p
+             WHERE p.session_id = (SELECT id FROM dome_labor_sessions WHERE dome_id = $1 ORDER BY started_at DESC, id DESC LIMIT 1)`,
+            [d.id]
+          );
+          const priorIds = new Set(prior.map((r) => Number(r.employee_id)));
+          employees = roster.filter((e) => priorIds.has(Number(e.id)) || (lunchAt != null && toMs(e.joined_at) > lunchAt));
+          if (!employees.length) employees = roster;
+          employees = employees.filter((e) => !used.has(Number(e.id)));
+        } else {
+          employees = await domeFabricatorEmployees(client, d.id);
+          if (!employees.length) {
+            const { rows: prior } = await client.query(
+              `SELECT e.id, e.code, e.name, e.hourly_rate, e.is_active
+               FROM dome_labor_participants p
+               JOIN employees e ON e.id = p.employee_id
+               WHERE p.session_id = (
+                 SELECT id FROM dome_labor_sessions WHERE dome_id = $1 ORDER BY started_at DESC, id DESC LIMIT 1
+               ) AND e.is_active = 1`,
+              [d.id]
+            );
+            employees = prior;
+          }
+          employees = employees.filter((e) => !used.has(Number(e.id)));
+        }
         if (!employees.length) continue;
-        const fail = await startLaborForLockedDome(client, d, machine, team, employees, ts, 'resumed');
-        if (fail) return fail;
+        const started = await startLaborForLockedDome(client, d, machine, team, employees, ts, 'resumed', {
+          confirmTransfer: false,
+          reason: 'dome_resume',
+        });
+        if (started && started.ok === false) {
+          // Worker was moved elsewhere during lunch — skip this dome; do not fail the whole Resume.
+          if (started.body && started.body.error === 'employee_assigned_elsewhere') continue;
+          return started;
+        }
         for (const e of employees) used.add(Number(e.id));
         resumed.push(d.dome_number);
       }
-      await client.query(
-        `UPDATE assembly_kiosk_teams SET status = 'active', lunch_paused_at = NULL, updated_at = $1::timestamptz
-         WHERE machine_id = $2 AND team_id = $3 AND left_at IS NULL`,
-        [ts, machine.id, team.id]
-      );
+      if (team) {
+        await client.query(
+          `UPDATE assembly_kiosk_teams SET status = 'active', lunch_paused_at = NULL, updated_at = $1::timestamptz
+           WHERE machine_id = $2 AND team_id = $3 AND left_at IS NULL`,
+          [ts, machine.id, team.id]
+        );
+      }
+      let bulkheadNumbers = [];
+      if (!wantTeam && typeof onBulkheadResume === 'function') {
+        const bh = await onBulkheadResume(client, machine, ts);
+        if (bh && bh.error) return bh.error;
+        bulkheadNumbers = (bh && bh.resumed) || [];
+      }
+      const parts = [];
+      if (resumed.length) parts.push(`Dome ${resumed.join(', ')}`);
+      if (bulkheadNumbers.length) parts.push(`Bulkhead ${bulkheadNumbers.join(', ')}`);
       return okResult({
         action: 'resume',
-        team_id: team.id,
-        team_name: team.name,
+        team_id: team ? team.id : null,
+        team_name: team ? team.name : null,
         dome_numbers: resumed,
-        count: resumed.length,
-        message: resumed.length ? `${team.name} resumed Dome ${resumed.join(', ')}.` : `${team.name} is back from lunch.`,
+        bulkhead_numbers: bulkheadNumbers,
+        count: resumed.length + bulkheadNumbers.length,
+        message: team
+          ? resumed.length
+            ? `${team.name} resumed Dome ${resumed.join(', ')}.`
+            : `${team.name} is back from lunch.`
+          : parts.length
+            ? `Resumed ${parts.join('; ')}.`
+            : 'Back from lunch.',
       });
     });
   }
 
   /**
-   * Team End Shift (Assembly rule): this team's domes pause for the next shift, its card leaves the
-   * kiosk and temporary moves into the team end. Default team rosters are untouched.
+   * End Shift. With team_id — legacy team card leave. Without — pause all running/lunch domes on this kiosk.
    */
   async function endShift(machine, body = {}) {
     if (!(await isReady())) return notReady();
     const ts = nowIso();
+    const requestedTeamId = Number(body && body.team_id);
+    const wantTeam = Number.isInteger(requestedTeamId) && requestedTeamId > 0;
     const result = await withTransaction(async (client) => {
-      const { team, error } = await resolveKioskTeam(client, machine, body, null, true);
-      if (error) return error;
-      const { rows } = await client.query(
-        `SELECT d.* FROM domes d
-         WHERE d.machine_id = $1
-           AND (
-             (d.production_status = 'paused' AND d.pause_reason = 'lunch' AND d.team_id = $2)
-             OR (d.production_status = 'in_progress' AND EXISTS (
-               SELECT 1 FROM dome_labor_sessions s WHERE s.dome_id = d.id AND s.status = 'active' AND s.team_id = $2))
-           )
-         ORDER BY d.id FOR UPDATE`,
-        [machine.id, team.id]
-      );
+      let team = null;
+      let rows;
+      if (wantTeam) {
+        const resolved = await resolveKioskTeam(client, machine, body, null, true);
+        if (resolved.error) return resolved.error;
+        team = resolved.team;
+        ({ rows } = await client.query(
+          `SELECT d.* FROM domes d
+           WHERE d.machine_id = $1
+             AND (
+               (d.production_status = 'paused' AND d.pause_reason = 'lunch' AND d.team_id = $2)
+               OR (d.production_status = 'in_progress' AND EXISTS (
+                 SELECT 1 FROM dome_labor_sessions s WHERE s.dome_id = d.id AND s.status = 'active' AND s.team_id = $2))
+             )
+           ORDER BY d.id FOR UPDATE`,
+          [machine.id, team.id]
+        ));
+      } else {
+        ({ rows } = await client.query(
+          `SELECT d.* FROM domes d
+           WHERE d.machine_id = $1
+             AND (
+               (d.production_status = 'paused' AND d.pause_reason = 'lunch')
+               OR d.production_status = 'in_progress'
+             )
+           ORDER BY d.id FOR UPDATE`,
+          [machine.id]
+        ));
+      }
       for (const d of rows) {
         await closeLabor(client, d.id, ts, 'stopped', 'end_shift');
         await client.query(
           `UPDATE domes SET production_status = 'paused', pause_reason = 'end_shift', updated_at = $2::timestamptz WHERE id = $1`,
           [d.id, ts]
         );
-        await logEvent(client, d.id, 'end_shift', { team_id: team.id }, 'kiosk', ts);
+        await logEvent(client, d.id, 'end_shift', { team_id: team ? team.id : null }, 'kiosk', ts);
       }
-      await client.query(
-        `UPDATE assembly_kiosk_teams SET left_at = $1::timestamptz, status = 'left', updated_at = $1::timestamptz
-         WHERE machine_id = $2 AND team_id = $3 AND left_at IS NULL`,
-        [ts, machine.id, team.id]
-      );
-      // Keep the legacy single-team assignment on a team still here, so the card is not re-synced back.
-      const { rows: rest } = await client.query(
-        `SELECT team_id FROM assembly_kiosk_teams WHERE machine_id = $1 AND left_at IS NULL ORDER BY joined_at DESC, id DESC LIMIT 1`,
-        [machine.id]
-      );
-      if (rest.length) {
-        await client.query(`UPDATE machines SET assigned_team_id = $2 WHERE id = $1 AND assigned_team_id = $3`, [
-          machine.id,
-          Number(rest[0].team_id),
-          team.id,
-        ]);
-      } else {
+      if (team) {
         await client.query(
-          `UPDATE machines SET assigned_team_id = NULL, assigned_team_day = NULL, assigned_team_at = NULL WHERE id = $1`,
+          `UPDATE assembly_kiosk_teams SET left_at = $1::timestamptz, status = 'left', updated_at = $1::timestamptz
+           WHERE machine_id = $2 AND team_id = $3 AND left_at IS NULL`,
+          [ts, machine.id, team.id]
+        );
+        const { rows: rest } = await client.query(
+          `SELECT team_id FROM assembly_kiosk_teams WHERE machine_id = $1 AND left_at IS NULL ORDER BY joined_at DESC, id DESC LIMIT 1`,
           [machine.id]
         );
+        if (rest.length) {
+          await client.query(`UPDATE machines SET assigned_team_id = $2 WHERE id = $1 AND assigned_team_id = $3`, [
+            machine.id,
+            Number(rest[0].team_id),
+            team.id,
+          ]);
+        } else {
+          await client.query(
+            `UPDATE machines SET assigned_team_id = NULL, assigned_team_day = NULL, assigned_team_at = NULL WHERE id = $1`,
+            [machine.id]
+          );
+        }
+      }
+      let bulkheadNumbers = [];
+      if (!wantTeam && typeof onBulkheadEndShift === 'function') {
+        bulkheadNumbers = (await onBulkheadEndShift(client, machine, ts)) || [];
       }
       const list = rows.map((d) => d.dome_number);
+      const parts = [];
+      if (list.length) parts.push(`Dome ${list.join(', ')}`);
+      if (bulkheadNumbers.length) parts.push(`Bulkhead ${bulkheadNumbers.join(', ')}`);
       return okResult({
         action: 'end_shift',
-        team_id: team.id,
-        team_name: team.name,
+        team_id: team ? team.id : null,
+        team_name: team ? team.name : null,
         dome_numbers: list,
-        count: list.length,
-        message: list.length
-          ? `End Shift for ${team.name}. Dome ${list.join(', ')} paused for the next shift.`
-          : `End Shift for ${team.name}.`,
+        bulkhead_numbers: bulkheadNumbers,
+        count: list.length + bulkheadNumbers.length,
+        message: team
+          ? list.length
+            ? `End Shift for ${team.name}. Dome ${list.join(', ')} paused for the next shift.`
+            : `End Shift for ${team.name}.`
+          : parts.length
+            ? `End Shift. ${parts.join('; ')} paused for the next shift.`
+            : 'End Shift recorded.',
       });
     });
-    if (result.ok) await phase2.endAssemblyTeamMoves(result.body.team_id, { at: ts });
+    if (result.ok && result.body.team_id) await phase2.endAssemblyTeamMoves(result.body.team_id, { at: ts });
     return result;
   }
 
@@ -1064,7 +1377,18 @@ function createPhase3Dome(pool, helpers = {}) {
         [domeId]
       );
       const activeSessionId = act[0] ? Number(act[0].id) : null;
-      if (activeSessionId && added.length) {
+      if (activeSessionId && added.length && typeof claimEmployeesForDomeWork === 'function') {
+        const toClaim = v.employees.filter((x) => added.includes(Number(x.id)));
+        const claimed = await claimEmployeesForDomeWork(client, toClaim, {
+          ts,
+          reason: 'dome_fabricators_add',
+          keepDomeId: domeId,
+          confirmTransfer: body && body.confirm_transfer === true,
+          targetLabel: `Dome ${dome.dome_number}`,
+          targetMachineId: Number(machine.id),
+        });
+        if (!claimed.ok) return claimed;
+      } else if (activeSessionId && added.length) {
         const busy = await busyElsewhere(added, domeId, client);
         if (busy.length) return busyResult(busy);
       }
@@ -1151,7 +1475,7 @@ function createPhase3Dome(pool, helpers = {}) {
 
   async function listDomes(filters = {}) {
     if (!(await isReady())) return notReady();
-    const where = ['TRUE'];
+    const where = ['d.deleted_at IS NULL'];
     const params = [];
     const search = String(filters.search || '').trim();
     if (search) {
@@ -1180,7 +1504,7 @@ function createPhase3Dome(pool, helpers = {}) {
       params
     );
     const { rows: counts } = await pool.query(
-      `SELECT inventory_status, production_status, COUNT(*)::int AS n FROM domes GROUP BY 1, 2`
+      `SELECT inventory_status, production_status, COUNT(*)::int AS n FROM domes WHERE deleted_at IS NULL GROUP BY 1, 2`
     );
     const totals = { all: 0, available: 0, reserved: 0, installed: 0, in_production: 0 };
     for (const c of counts) {
@@ -1194,7 +1518,7 @@ function createPhase3Dome(pool, helpers = {}) {
   async function listAvailableDomes(filters = {}) {
     if (!(await isReady())) return notReady();
     const params = [];
-    const where = [`d.inventory_status = 'available'`, `d.production_status = 'completed'`];
+    const where = [`d.inventory_status = 'available'`, `d.production_status = 'completed'`, `d.deleted_at IS NULL`];
     const search = String(filters.search || '').trim();
     if (search) {
       params.push(`%${search.toUpperCase()}%`);
@@ -1218,7 +1542,8 @@ function createPhase3Dome(pool, helpers = {}) {
     const id = Number(domeId);
     if (!Number.isInteger(id) || id <= 0) return errResult(400, 'validation', 'Invalid dome id.');
     const { rows } = await pool.query(
-      `SELECT d.*, t.name AS team_name FROM domes d LEFT JOIN teams t ON t.id = d.team_id WHERE d.id = $1`,
+      `SELECT d.*, t.name AS team_name FROM domes d LEFT JOIN teams t ON t.id = d.team_id
+       WHERE d.id = $1 AND d.deleted_at IS NULL`,
       [id]
     );
     if (!rows.length) return errResult(404, 'not_found', 'Dome not found.');
@@ -1368,6 +1693,107 @@ function createPhase3Dome(pool, helpers = {}) {
       );
       await logEvent(client, id, 'edited', changes, performedBy, ts);
       return okResult({ dome: mapDome(rows[0]), message: `Dome ${next.dome_number} updated.` });
+    });
+  }
+
+  /**
+   * Manager-only soft delete. Labor sessions/participants/events stay in the database.
+   * Blocks installed, reserved (active install), and in-production (active/paused) domes.
+   * Requires confirm_dome_number matching the dome number.
+   */
+  async function deleteDome(domeId, body = {}, performedBy) {
+    if (!(await isReady())) return notReady();
+    if (!(await softDeleteColumnsReady())) {
+      return errResult(
+        503,
+        'dome_not_ready',
+        'Delete Dome is not available yet — the database update has not finished. Try again in a minute.'
+      );
+    }
+    const id = Number(domeId);
+    if (!Number.isInteger(id) || id <= 0) return errResult(400, 'validation', 'Invalid dome id.');
+    const confirm = normalizeDomeNumber(body.confirm_dome_number != null ? body.confirm_dome_number : body.dome_number);
+    if (!confirm) {
+      return errResult(400, 'confirm_required', 'Type the Dome Number to confirm delete.');
+    }
+    const reason = body.reason != null ? String(body.reason).trim().slice(0, 500) || null : null;
+    return withTransaction(async (client) => {
+      const dome = await lockDome(client, id);
+      if (!dome) return errResult(404, 'not_found', 'Dome not found.');
+      if (normalizeDomeNumber(dome.dome_number).toUpperCase() !== confirm.toUpperCase()) {
+        return errResult(400, 'confirm_mismatch', 'Dome Number confirmation does not match.');
+      }
+      if (String(dome.inventory_status) === 'installed') {
+        return errResult(
+          409,
+          'cannot_delete_installed',
+          `Dome ${dome.dome_number} is installed and cannot be deleted. Historical labor stays on the record.`,
+          { dome_number: dome.dome_number }
+        );
+      }
+      if (String(dome.inventory_status) === 'reserved') {
+        return errResult(
+          409,
+          'cannot_delete_active',
+          `Dome ${dome.dome_number} is reserved for an active Dome Install and cannot be deleted.`,
+          { dome_number: dome.dome_number }
+        );
+      }
+      if (['in_progress', 'paused'].includes(String(dome.production_status))) {
+        return errResult(
+          409,
+          'cannot_delete_active',
+          `Dome ${dome.dome_number} is still in production (active or paused). Finish or cancel production before deleting.`,
+          { dome_number: dome.dome_number, production_status: dome.production_status }
+        );
+      }
+      const { rows: liveInstall } = await client.query(
+        `SELECT id FROM dome_installations WHERE dome_id = $1 AND status = 'in_progress' LIMIT 1`,
+        [id]
+      );
+      if (liveInstall.length) {
+        return errResult(
+          409,
+          'cannot_delete_active',
+          `Dome ${dome.dome_number} has an active Dome Install and cannot be deleted.`,
+          { dome_number: dome.dome_number }
+        );
+      }
+      const { rows: activeLabor } = await client.query(
+        `SELECT id FROM dome_labor_sessions WHERE dome_id = $1 AND status = 'active' LIMIT 1`,
+        [id]
+      );
+      if (activeLabor.length) {
+        return errResult(
+          409,
+          'cannot_delete_active',
+          `Dome ${dome.dome_number} still has open labor and cannot be deleted.`,
+          { dome_number: dome.dome_number }
+        );
+      }
+      const ts = nowIso();
+      const by = performedBy || 'manager';
+      const { rows } = await client.query(
+        `UPDATE domes
+         SET deleted_at = $2::timestamptz, deleted_by = $3, deleted_reason = $4, updated_at = $2::timestamptz
+         WHERE id = $1 AND deleted_at IS NULL
+         RETURNING *`,
+        [id, ts, by, reason]
+      );
+      if (!rows.length) return errResult(404, 'not_found', 'Dome not found.');
+      await logEvent(
+        client,
+        id,
+        'deleted',
+        { inventory_status: dome.inventory_status, production_status: dome.production_status, reason },
+        by,
+        ts
+      );
+      return okResult({
+        action: 'dome_deleted',
+        dome: mapDome(rows[0]),
+        message: `Dome ${dome.dome_number} deleted from inventory. Labor history is preserved.`,
+      });
     });
   }
 
@@ -1818,7 +2244,8 @@ function createPhase3Dome(pool, helpers = {}) {
     if (!(await isReady())) return { has_open_production: false, has_history: false };
     const { rows } = await pool.query(
       `SELECT
-         (SELECT COUNT(*)::int FROM domes WHERE machine_id = $1 AND production_status IN ('in_progress', 'paused')) AS open_domes,
+         (SELECT COUNT(*)::int FROM domes WHERE machine_id = $1 AND deleted_at IS NULL
+            AND production_status IN ('in_progress', 'paused')) AS open_domes,
          (SELECT COUNT(*)::int FROM domes WHERE machine_id = $1) AS domes,
          (SELECT COUNT(*)::int FROM dome_labor_sessions WHERE machine_id = $1) AS labor,
          (SELECT COUNT(*)::int FROM dome_installations WHERE machine_id = $1) AS installs,
@@ -1894,6 +2321,7 @@ function createPhase3Dome(pool, helpers = {}) {
     getDomeDetails,
     addManualDome,
     updateDome,
+    deleteDome,
     installForSession,
     machineHasOpenInstallSession,
     listMachineInstalls,

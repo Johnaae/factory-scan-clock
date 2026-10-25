@@ -23,7 +23,15 @@
     detailsTitle: $('detailsTitle'),
     detailsBody: $('detailsBody'),
     btnDetailsEdit: $('btnDetailsEdit'),
+    btnDetailsDelete: $('btnDetailsDelete'),
     btnDetailsClose: $('btnDetailsClose'),
+    deleteModal: $('deleteModal'),
+    deleteTitle: $('deleteTitle'),
+    deleteIntro: $('deleteIntro'),
+    deleteConfirm: $('deleteConfirm'),
+    deleteHint: $('deleteHint'),
+    btnDeleteCancel: $('btnDeleteCancel'),
+    btnDeleteConfirm: $('btnDeleteConfirm'),
     formModal: $('formModal'),
     formTitle: $('formTitle'),
     formIntro: $('formIntro'),
@@ -326,6 +334,11 @@
     }
     state.details = data;
     renderDetails();
+    if (els.btnDetailsDelete) {
+      const allowed = canDeleteDome(data.dome);
+      els.btnDetailsDelete.disabled = !allowed;
+      els.btnDetailsDelete.title = allowed ? '' : tr('di.delete.blocked');
+    }
     showModal(els.detailsModal);
   }
 
@@ -443,12 +456,70 @@
     hideModal(els.detailsModal);
     openForm(state.details.dome);
   });
+  function canDeleteDome(d) {
+    if (!d) return false;
+    if (d.inventory_status === 'installed' || d.inventory_status === 'reserved') return false;
+    if (d.production_status === 'in_progress' || d.production_status === 'paused') return false;
+    return true;
+  }
+  function openDelete() {
+    if (!state.details || !state.details.dome) return;
+    const d = state.details.dome;
+    if (!canDeleteDome(d)) {
+      setHint(tr('di.delete.blocked'), true);
+      return;
+    }
+    els.deleteIntro.textContent = tr('di.delete.intro', { dome: d.dome_number });
+    els.deleteConfirm.value = '';
+    els.deleteHint.textContent = '';
+    hideModal(els.detailsModal);
+    showModal(els.deleteModal);
+    setTimeout(() => els.deleteConfirm.focus(), 50);
+  }
+  async function confirmDelete() {
+    if (!state.details || !state.details.dome || state.saving) return;
+    const d = state.details.dome;
+    const typed = els.deleteConfirm.value.trim();
+    if (!typed) {
+      els.deleteHint.textContent = tr('di.delete.confirmRequired');
+      return;
+    }
+    state.saving = true;
+    els.btnDeleteConfirm.disabled = true;
+    try {
+      const { res, data } = await api(`/api/manager/domes/${Number(d.id)}`, {
+        method: 'DELETE',
+        body: JSON.stringify({ confirm_dome_number: typed }),
+      });
+      if (!res.ok || !data.ok) {
+        els.deleteHint.textContent = message(data, { dome: d.dome_number });
+        return;
+      }
+      hideModal(els.deleteModal);
+      state.details = null;
+      setHint(message(data, { dome: d.dome_number }) || tr('dome.ok.dome_deleted', { dome: d.dome_number }), false);
+      await load();
+    } finally {
+      state.saving = false;
+      els.btnDeleteConfirm.disabled = false;
+    }
+  }
+  if (els.btnDetailsDelete) {
+    els.btnDetailsDelete.addEventListener('click', () => openDelete());
+  }
+  if (els.btnDeleteCancel) {
+    els.btnDeleteCancel.addEventListener('click', () => {
+      hideModal(els.deleteModal);
+      if (state.details) showModal(els.detailsModal);
+    });
+  }
+  if (els.btnDeleteConfirm) els.btnDeleteConfirm.addEventListener('click', () => void confirmDelete());
   els.btnFormCancel.addEventListener('click', () => {
     state.form = null;
     hideModal(els.formModal);
   });
   els.btnFormSave.addEventListener('click', () => void saveForm());
-  for (const modal of [els.detailsModal, els.formModal]) {
+  for (const modal of [els.detailsModal, els.formModal, els.deleteModal].filter(Boolean)) {
     modal.addEventListener('click', (e) => {
       if (e.target === modal) hideModal(modal);
     });

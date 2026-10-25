@@ -1486,6 +1486,7 @@ function renderUi() {
   renderQaQcUi();
   renderReworkBanner();
   renderDomeInstallPanel();
+  renderDomeInstallCta();
 
   const displaySession = focusedSession();
 
@@ -2064,6 +2065,10 @@ async function consumeScanResult(data) {
 
 const domeEls = {
   panel: document.getElementById('domeInstallPanel'),
+  cta: document.getElementById('domeInstallCta'),
+  ctaBtn: document.getElementById('btnDomeInstallCta'),
+  ctaTitle: document.getElementById('domeInstallCtaTitle'),
+  ctaSub: document.getElementById('domeInstallCtaSub'),
   pickModal: document.getElementById('domePickModal'),
   pickSub: document.getElementById('domePickSub'),
   pickSearch: document.getElementById('domePickSearch'),
@@ -2126,6 +2131,58 @@ function renderDomeInstallPanel() {
     row.appendChild(finish);
     row.appendChild(cancel);
     panel.appendChild(row);
+  }
+}
+
+function pendingTankDomeInstallRunning() {
+  if (!pendingTank) return null;
+  const tankNorm = String(pendingTank).toUpperCase();
+  return (
+    (domeInstalls || []).find(
+      (i) => i && i.status === 'in_progress' && String(i.tank_number || '').toUpperCase() === tankNorm
+    ) ||
+    (domeInstallInProgress &&
+    String(domeInstallInProgress.tank_number || '').toUpperCase() === tankNorm
+      ? domeInstallInProgress
+      : null)
+  );
+}
+
+/** Large green CTA — only when selected tank is Ready for Dome Install and no install is running. */
+function renderDomeInstallCta() {
+  const wrap = domeEls.cta;
+  if (!wrap) return;
+  const show = Boolean(domeInstallMode && pendingTank && !pendingTankDomeInstallRunning());
+  wrap.hidden = !show;
+  if (!show) return;
+  if (domeEls.ctaTitle) domeEls.ctaTitle.textContent = domeTr('fdi.ctaTitle');
+  if (domeEls.ctaSub) domeEls.ctaSub.textContent = domeTr('fdi.ctaSub');
+  if (domeEls.ctaBtn) {
+    domeEls.ctaBtn.disabled = Boolean(domeActionBusy);
+    domeEls.ctaBtn.setAttribute('aria-label', domeTr('fdi.ctaTitle'));
+  }
+}
+
+function findDomeInstallPhase() {
+  const fromPhases = (phases || []).find((ph) => String(ph.code || '').toUpperCase() === 'DOME_INSTALL');
+  if (fromPhases) return fromPhases;
+  return { code: 'DOME_INSTALL', barcode: 'PHASE:DOME_INSTALL', label: 'Dome Install' };
+}
+
+/** Reuses the existing PHASE:DOME_INSTALL scan → dome_install_select → openDomePickModal path. */
+async function openDomeInstallFromCta() {
+  if (!domeInstallMode || !pendingTank || domeActionBusy || domePick) return;
+  if (pendingTankDomeInstallRunning()) return;
+  if (domeEls.pickModal && !domeEls.pickModal.hidden && domeEls.pickModal.classList.contains('show')) {
+    return;
+  }
+  domeActionBusy = true;
+  renderDomeInstallCta();
+  try {
+    await onPhaseSelected(findDomeInstallPhase());
+  } finally {
+    domeActionBusy = false;
+    renderDomeInstallCta();
   }
 }
 
@@ -2309,8 +2366,17 @@ if (domeEls.pickCancel) {
 if (domeEls.pickStart) domeEls.pickStart.addEventListener('click', () => void startDomeInstall());
 if (domeEls.confirmCancel) domeEls.confirmCancel.addEventListener('click', () => settleDomeConfirm(false));
 if (domeEls.confirmOk) domeEls.confirmOk.addEventListener('click', () => settleDomeConfirm(true));
+if (domeEls.ctaBtn) {
+  domeEls.ctaBtn.addEventListener('mousedown', (e) => e.preventDefault());
+  domeEls.ctaBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    void openDomeInstallFromCta();
+  });
+}
 window.addEventListener('factory-lang-change', () => {
   renderDomeInstallPanel();
+  renderDomeInstallCta();
   renderDomePick();
   if (domeInstallMode) renderUi();
 });

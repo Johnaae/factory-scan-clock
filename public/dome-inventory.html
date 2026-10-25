@@ -118,8 +118,27 @@
         <h3 id="detailsTitle"></h3>
         <div id="detailsBody"></div>
         <div class="di-modal-actions">
+          <button type="button" class="btn btn-danger" id="btnDetailsDelete" data-i18n="di.delete">Delete Dome</button>
           <button type="button" class="btn" id="btnDetailsEdit" data-i18n="di.edit">Edit</button>
           <button type="button" class="btn btn-primary" id="btnDetailsClose" data-i18n="dome.close">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="deleteModal" class="di-modal" role="dialog" aria-modal="true" aria-labelledby="deleteTitle" hidden>
+      <div class="di-modal-card">
+        <h3 id="deleteTitle" data-i18n="di.delete.title">Delete Dome</h3>
+        <p id="deleteIntro" class="muted" style="margin:0"></p>
+        <div class="di-form">
+          <div class="field">
+            <label for="deleteConfirm" data-i18n="di.delete.confirmLabel">Type the Dome Number to confirm</label>
+            <input id="deleteConfirm" type="text" maxlength="60" autocomplete="off" />
+          </div>
+        </div>
+        <p id="deleteHint" class="di-hint"></p>
+        <div class="di-modal-actions">
+          <button type="button" class="btn" id="btnDeleteCancel" data-i18n="dome.cancel">Cancel</button>
+          <button type="button" class="btn btn-danger" id="btnDeleteConfirm" data-i18n="di.delete.confirm">Delete</button>
         </div>
       </div>
     </div>
@@ -159,7 +178,7 @@
     </div>
 
     <script src="/i18n.js"></script>
-    <script src="/dome-i18n.js?v=4"></script>
-    <script src="/dome-inventory.js?v=1"></script>
+    <script src="/dome-i18n.js?v=8"></script>
+    <script src="/dome-inventory.js?v=2"></script>
   </body>
 </html>

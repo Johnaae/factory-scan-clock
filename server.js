@@ -5047,6 +5047,19 @@ const phase2 = createPhase2AssemblyTesting(pool, {
   },
 });
 
+/** Temporary Dome Shop Start handoff (close prior labor/memberships; never touches home team_members). */
+const { createPhase3EmployeeClaim } = require('./scripts/phase3-employee-claim');
+const phase3Claim = createPhase3EmployeeClaim(pool, { nowIso, phase2 });
+
+/** Phase 3 Bulkhead Shop (Dome kiosk) + Bulkhead Inventory — create before Dome so Lunch/Resume/End Shift can hook in. */
+const { createPhase3Bulkhead } = require('./scripts/phase3-bulkhead');
+const phase3Bulkhead = createPhase3Bulkhead(pool, {
+  nowIso,
+  isEmployeeShopsReady: () => isEmployeeShopsReady(),
+  claimEmployeesForDomeWork: (...args) => phase3Claim.claimEmployeesForDomeWork(...args),
+  listActiveEmployeesForPicker: () => phase3Claim.listActiveEmployeesForPicker(),
+});
+
 /** Phase 3 Dome Shop + Dome Inventory + Fabrication Dome Install */
 const { createPhase3Dome } = require('./scripts/phase3-dome');
 const phase3 = createPhase3Dome(pool, {
@@ -5054,6 +5067,11 @@ const phase3 = createPhase3Dome(pool, {
   phase1,
   phase2,
   isEmployeeShopsReady: () => isEmployeeShopsReady(),
+  claimEmployeesForDomeWork: (...args) => phase3Claim.claimEmployeesForDomeWork(...args),
+  listActiveEmployeesForPicker: () => phase3Claim.listActiveEmployeesForPicker(),
+  onBulkheadLunch: (client, machine, ts) => phase3Bulkhead.lunchBoard(client, machine, ts),
+  onBulkheadResume: (client, machine, ts) => phase3Bulkhead.resumeBoard(client, machine, ts),
+  onBulkheadEndShift: (client, machine, ts) => phase3Bulkhead.endShiftBoard(client, machine, ts),
 });
 
 /** Unified Phase1 + Phase2 (+ scan) employee labor for Team/Employee details */
@@ -5113,7 +5131,11 @@ const unifiedLabor = createUnifiedEmployeeLabor(pool, {
       ? phase1.collectEmployeeMembershipProductionIntervals(employeeId, bounds, closeMs)
       : Promise.resolve([]),
   collectScanIntervals: collectScanLaborIntervalsForUnified,
-  collectDomeIntervals: (...args) => phase3.collectDomeLaborIntervals(...args),
+  collectDomeIntervals: async (employeeId, bounds, closeMs) => {
+    const dome = await phase3.collectDomeLaborIntervals(employeeId, bounds, closeMs);
+    const bh = await phase3Bulkhead.collectBulkheadLaborIntervals(employeeId, bounds, closeMs);
+    return [...(dome || []), ...(bh || [])];
+  },
   formatXhYmFromMs: (ms) => {
     const totalMin = Math.round(Math.max(0, Number(ms) || 0) / 60000);
     return `${Math.floor(totalMin / 60)}h ${totalMin % 60}m`;
@@ -6696,7 +6718,13 @@ app.get('/api/kiosk/dome/config', async (req, res) => {
     const machine = await domeKioskMachine(req, res);
     if (!machine) return;
     const result = await phase3.getKioskConfig(machine);
-    return res.status(result.status).json(result.body);
+    if (!result.ok) return res.status(result.status).json(result.body);
+    const bulkheads = await phase3Bulkhead.listMachineBulkheads(machine);
+    return res.status(result.status).json({
+      ...result.body,
+      bulkheads,
+      max_bulkhead_workers: phase3Bulkhead.MAX_WORKERS,
+    });
   } catch (err) {
     console.error('[dome config]', err);
     return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load the Dome Shop kiosk.' });
@@ -6720,6 +6748,11 @@ app.post('/api/kiosk/dome/action', async (req, res) => {
       complete_dome: () => phase3.completeDome(machine, body),
       set_fabricators: () => phase3.setFabricators(machine, body),
       employee_out: () => phase3.employeeOut(machine, body),
+      create_bulkhead: () => phase3Bulkhead.createBulkhead(machine, body),
+      start_bulkhead: () => phase3Bulkhead.startBulkhead(machine, body),
+      stop_bulkhead: () => phase3Bulkhead.stopBulkhead(machine, body),
+      finish_bulkhead: () => phase3Bulkhead.finishBulkhead(machine, body),
+      set_bulkhead_workers: () => phase3Bulkhead.setWorkers(machine, body),
     };
     if (!handlers[action]) {
       return res.status(400).json({ ok: false, error: 'validation', message: 'Unknown action.' });
@@ -6848,9 +6881,30 @@ app.get('/api/kiosk/assembly/config', async (req, res) => {
     }
     const result = await phase2.getMachineConfig(machine.id);
     if (!result.ok) return res.status(result.status).json(result.body);
+    const body = { ...result.body };
+    // Attach installed bulkhead summary onto each team tank card (Task 5).
+    try {
+      const tankIds = [];
+      for (const team of body.active_teams || []) {
+        for (const t of team.tanks || []) {
+          if (t && t.id != null) tankIds.push(Number(t.id));
+        }
+      }
+      if (tankIds.length) {
+        const bhMap = await phase3Bulkhead.tankBulkheadSummaries(tankIds);
+        for (const team of body.active_teams || []) {
+          for (const t of team.tanks || []) {
+            const s = bhMap.get(Number(t.id));
+            if (s) t.bulkhead_summary = s;
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[assembly config] bulkhead summaries (noncritical):', err.message);
+    }
     // Keep eligible_tanks / confirmed_tanks from getMachineConfig (dropdown = FAB-ready only).
     return res.json({
-      ...result.body,
+      ...body,
       workflow: 'assembly_testing',
       pause_actions: ['BREAK', 'LUNCH'],
       end_shift: 'END_SHIFT',
@@ -7105,6 +7159,13 @@ app.post('/api/kiosk/assembly/action', async (req, res) => {
         performed_by: 'assembly_kiosk',
         machine_id: machine.id,
       });
+    } else if (action === 'list_available_bulkheads') {
+      result = await phase3Bulkhead.listAvailableBulkheads({ search: body.search });
+    } else if (action === 'install_bulkhead') {
+      result = await phase3Bulkhead.installBulkheadOnTank(
+        { tank_id: body.tank_id, bulkhead_id: body.bulkhead_id },
+        'assembly_kiosk'
+      );
     } else if (action === 'start_testing' || action === 'test_pass' || action === 'test_fail' || action === 'start_correction') {
       return res.status(403).json({
         ok: false,
@@ -7383,6 +7444,76 @@ app.get('/api/manager/domes/:id', domeManagerRoute('details', (req) => phase3.ge
 app.patch(
   '/api/manager/domes/:id',
   domeManagerRoute('edit', (req, auth) => phase3.updateDome(req.params.id, req.body || {}, auth.username))
+);
+app.delete(
+  '/api/manager/domes/:id',
+  domeManagerRoute('delete', (req, auth) => phase3.deleteDome(req.params.id, req.body || {}, auth.username))
+);
+
+function bulkheadManagerRoute(label, handler) {
+  return async (req, res) => {
+    const auth = currentManagerFromSession(req);
+    if (!auth) {
+      return res.status(401).json({ ok: false, error: 'not_authenticated', message: 'Manager login required.' });
+    }
+    try {
+      const result = await handler(req, auth);
+      return res.status(result.status || (result.ok ? 200 : 400)).json(result.body);
+    } catch (err) {
+      console.error(`[manager bulkheads ${label}]`, err);
+      return res.status(500).json({
+        ok: false,
+        error: 'server_error',
+        message: 'Could not process Bulkhead Inventory request.',
+      });
+    }
+  };
+}
+
+app.get(
+  '/api/manager/bulkheads',
+  bulkheadManagerRoute('list', (req) =>
+    phase3Bulkhead.listBulkheads({
+      search: req.query.search,
+      status: req.query.status,
+    })
+  )
+);
+app.post(
+  '/api/manager/bulkheads',
+  bulkheadManagerRoute('add', (req, auth) => phase3Bulkhead.addManualBulkhead(req.body || {}, auth.username))
+);
+app.get(
+  '/api/manager/bulkheads/:id',
+  bulkheadManagerRoute('details', (req) => phase3Bulkhead.getBulkheadDetails(req.params.id))
+);
+app.patch(
+  '/api/manager/bulkheads/:id',
+  bulkheadManagerRoute('edit', (req, auth) => phase3Bulkhead.updateBulkhead(req.params.id, req.body || {}, auth.username))
+);
+app.delete(
+  '/api/manager/bulkheads/:id',
+  bulkheadManagerRoute('delete', (req, auth) =>
+    phase3Bulkhead.deleteBulkhead(req.params.id, req.body || {}, auth.username)
+  )
+);
+app.post(
+  '/api/manager/bulkheads/:id/undo-install',
+  bulkheadManagerRoute('undo-install', (req, auth) =>
+    phase3Bulkhead.undoBulkheadInstall(
+      { bulkhead_id: req.params.id, reason: (req.body || {}).reason },
+      auth.username || 'manager'
+    )
+  )
+);
+app.post(
+  '/api/manager/tanks/:id/undo-bulkhead',
+  bulkheadManagerRoute('undo-install', (req, auth) =>
+    phase3Bulkhead.undoBulkheadInstall(
+      { tank_id: req.params.id, reason: (req.body || {}).reason },
+      auth.username || 'manager'
+    )
+  )
 );
 
 app.get('/api/manager/machines', async (req, res) => {
@@ -8412,6 +8543,9 @@ app.use((req, res, next) => {
     return requireManager(req, res, next);
   }
   if (p === '/dome-inventory' || p === '/dome-inventory.html' || p === '/dome-inventory.js') {
+    return requireManager(req, res, next);
+  }
+  if (p === '/bulkhead-inventory' || p === '/bulkhead-inventory.html' || p === '/bulkhead-inventory.js') {
     return requireManager(req, res, next);
   }
   if (
@@ -9916,6 +10050,15 @@ app.get('/api/tanks', async (req, res) => {
   } catch (err) {
     console.warn('[tanks list] dome summaries (noncritical):', err.message);
   }
+  try {
+    const bhMap = await phase3Bulkhead.tankBulkheadSummaries(tanks.map((t) => t.id));
+    for (const t of tanks) {
+      const b = bhMap.get(Number(t.id));
+      if (b) t.bulkhead_summary = b;
+    }
+  } catch (err) {
+    console.warn('[tanks list] bulkhead summaries (noncritical):', err.message);
+  }
   res.json({ ok: true, tanks, trash_count: trashCount });
 });
 
@@ -11129,14 +11272,27 @@ async function getTankReportPayload(id) {
   }
   const installedDomes = domeState ? domeState.installs.filter((i) => i.status === 'installed') : [];
 
+  let bulkheadState = null;
+  try {
+    bulkheadState = await phase3Bulkhead.getTankBulkheadState(id);
+  } catch (err) {
+    console.error('[tank report] bulkhead_state:', err.message);
+    bulkheadState = null;
+  }
+  const installedBulkheads = bulkheadState ? bulkheadState.installs || [] : [];
+
   return {
     ok: true,
     dome_state: domeState,
+    bulkhead_state: bulkheadState,
     tank: {
       domes_installed_display: installedDomes.length
         ? installedDomes
             .map((i) => `${i.dome_number} (${[i.dome_type, i.diameter_label].filter(Boolean).join(' ')}) · Piece ${i.piece_number}`)
             .join('; ')
+        : '',
+      bulkheads_installed_display: installedBulkheads.length
+        ? installedBulkheads.map((i) => i.bulkhead_number).join(', ')
         : '',
       id: tank.id,
       tank_number: tank.tank_number,
@@ -11999,6 +12155,15 @@ app.get('/dome-inventory', (_req, res) => {
 app.get('/dome-inventory.js', (_req, res) => {
   res.type('application/javascript');
   res.sendFile(path.join(PUBLIC_DIR, 'dome-inventory.js'));
+});
+
+app.get('/bulkhead-inventory', (_req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'bulkhead-inventory.html'));
+});
+
+app.get('/bulkhead-inventory.js', (_req, res) => {
+  res.type('application/javascript');
+  res.sendFile(path.join(PUBLIC_DIR, 'bulkhead-inventory.js'));
 });
 
 app.get('/phase2-qa-kiosk.html', (req, res) => {

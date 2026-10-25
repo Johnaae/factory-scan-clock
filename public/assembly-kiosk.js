@@ -48,6 +48,15 @@ const els = {
   employeeOutConfirmText: document.getElementById('employeeOutConfirmText'),
   btnCancelEmployeeOut: document.getElementById('btnCancelEmployeeOut'),
   btnConfirmEmployeeOut: document.getElementById('btnConfirmEmployeeOut'),
+  bhInstallModal: document.getElementById('bhInstallModal'),
+  bhInstallTitle: document.getElementById('bhInstallTitle'),
+  bhInstallTank: document.getElementById('bhInstallTank'),
+  bhInstallSearch: document.getElementById('bhInstallSearch'),
+  bhInstallList: document.getElementById('bhInstallList'),
+  bhInstallEmpty: document.getElementById('bhInstallEmpty'),
+  bhInstallError: document.getElementById('bhInstallError'),
+  btnBhInstallCancel: document.getElementById('btnBhInstallCancel'),
+  btnBhInstallConfirm: document.getElementById('btnBhInstallConfirm'),
 };
 
 let config = null;
@@ -68,6 +77,11 @@ let scanBuffer = '';
 let lastKeyTime = 0;
 let loadConfigSeq = 0;
 let loadConfigInFlight = null;
+let bhInstallTankId = null;
+let bhInstallTankNumber = null;
+let bhInstallPick = null;
+let bhInstallList = [];
+let bhInstallSearchTimer = null;
 
 function applyConfigData(data) {
   if (!data || !data.ok) return;
@@ -122,7 +136,8 @@ function isTextEntryModalOpen() {
   const confirmOpen = els.confirmModal && !els.confirmModal.hidden && els.confirmModal.classList.contains('show');
   const outOpen =
     els.employeeOutModal && !els.employeeOutModal.hidden && els.employeeOutModal.classList.contains('show');
-  return Boolean(confirmOpen || outOpen);
+  const bhOpen = els.bhInstallModal && !els.bhInstallModal.hidden && els.bhInstallModal.classList.contains('show');
+  return Boolean(confirmOpen || outOpen || bhOpen);
 }
 
 function blurScanInputs() {
@@ -307,6 +322,14 @@ function teamStatusBadge(team) {
   return `<span class="ak-badge ak-badge--active">${escapeHtml(tr('ak.badge.active'))}</span>`;
 }
 
+function tankInstalledBulkhead(tank) {
+  const list =
+    tank && tank.bulkhead_summary && Array.isArray(tank.bulkhead_summary.installed)
+      ? tank.bulkhead_summary.installed
+      : [];
+  return list.length ? list[0] : null;
+}
+
 function assemblyActionButtons(tank, teamId) {
   const status = String(tank.status || '').toLowerCase();
   const session = tank.active_session || null;
@@ -314,10 +337,18 @@ function assemblyActionButtons(tank, teamId) {
   const tid = Number(tank.id);
   const btns = [];
   const label = (key) => escapeHtml(tr(key));
+  const hasBh = Boolean(tankInstalledBulkhead(tank));
   if (status === 'assembly_in_progress' && !session) {
     btns.push(
       `<button type="button" class="btn-primary btn-touch btn-touch--start-work" data-ak-action="start" data-tank-id="${tid}" data-team-id="${teamId}" data-stage="ASSEMBLY">${label('ak.btn.start')}</button>`
     );
+    if (!hasBh) {
+      btns.push(
+        `<button type="button" class="btn-primary btn-touch btn-touch--bulkhead" data-ak-action="install_bulkhead" data-tank-id="${tid}" data-team-id="${teamId}" data-tank-number="${escapeHtml(
+          tank.tank_number || ''
+        )}">${label('ak.btn.installBulkhead')}</button>`
+      );
+    }
     btns.push(
       `<button type="button" class="btn-primary btn-touch btn-touch--complete" data-ak-action="finish" data-tank-id="${tid}" data-team-id="${teamId}">${label('ak.btn.finish')}</button>`
     );
@@ -329,6 +360,13 @@ function assemblyActionButtons(tank, teamId) {
     btns.push(
       `<button type="button" class="btn-secondary btn-touch" data-ak-action="stop" data-tank-id="${tid}" data-team-id="${teamId}">${label('ak.btn.stop')}</button>`
     );
+    if (!hasBh) {
+      btns.push(
+        `<button type="button" class="btn-primary btn-touch btn-touch--bulkhead" data-ak-action="install_bulkhead" data-tank-id="${tid}" data-team-id="${teamId}" data-tank-number="${escapeHtml(
+          tank.tank_number || ''
+        )}">${label('ak.btn.installBulkhead')}</button>`
+      );
+    }
     btns.push(
       `<button type="button" class="btn-primary btn-touch btn-touch--complete" data-ak-action="finish" data-tank-id="${tid}" data-team-id="${teamId}">${label('ak.btn.finish')}</button>`
     );
@@ -343,6 +381,7 @@ function renderTankCard(tank, teamId) {
   const status = String(tank.status || '').toLowerCase();
   const session = tank.active_session || null;
   const active = Boolean(session) && String(session.stage || '').toUpperCase() === 'ASSEMBLY';
+  const bh = tankInstalledBulkhead(tank);
   return `<article class="ak-tank-card ${active ? 'is-active' : ''}" data-tank-id="${Number(tank.id)}">
     <div class="ak-tank-head">
       <h3 class="ak-tank-title">${escapeHtml(tankLabel(tank.tank_number))}</h3>
@@ -352,6 +391,11 @@ function renderTankCard(tank, teamId) {
       <div class="ak-metric"><span class="ak-metric-label">${escapeHtml(tr('ak.metric.duration'))}</span><span class="ak-metric-value">${escapeHtml(liveAssemblyDurationDisplay(tank))}</span></div>
       <div class="ak-metric"><span class="ak-metric-label">${escapeHtml(tr('ak.metric.labor'))}</span><span class="ak-metric-value">${escapeHtml(laborDisplay(tank))}</span></div>
     </div>
+    ${
+      bh
+        ? `<p class="ak-tank-bulkhead">${escapeHtml(tr('ak.bulkhead.installed', { n: bh.bulkhead_number }))}</p>`
+        : ''
+    }
     ${
       Array.isArray(tank.assembly_other_teams) && tank.assembly_other_teams.length
         ? `<p class="ak-tank-stage">${escapeHtml(tr('ak.alsoWorking', { teams: otherTeamNames(tank.assembly_other_teams) }))}${
@@ -790,6 +834,11 @@ async function handleTeamCardsClick(ev) {
     );
     return;
   }
+  if (action === 'install_bulkhead') {
+    const tankNo = btn.getAttribute('data-tank-number') || tankLabel(tankId);
+    await openBhInstallModal(tankId, tankNo);
+    return;
+  }
   if (action === 'lunch') {
     if (!Number.isInteger(teamId) || teamId <= 0) {
       showWarning(say('ak.msg.lunchOnCard'));
@@ -959,6 +1008,105 @@ async function handleRecentlyFinishedClick(ev) {
   );
 }
 
+async function openBhInstallModal(tankId, tankNumber) {
+  bhInstallTankId = Number(tankId);
+  bhInstallTankNumber = String(tankNumber || '');
+  bhInstallPick = null;
+  bhInstallList = [];
+  if (els.bhInstallTank) {
+    els.bhInstallTank.textContent = tr('ak.bulkhead.forTank', { tank: tankLabel(bhInstallTankNumber) });
+  }
+  if (els.bhInstallTitle) els.bhInstallTitle.textContent = tr('ak.bulkhead.title');
+  if (els.bhInstallSearch) els.bhInstallSearch.value = '';
+  if (els.bhInstallError) {
+    els.bhInstallError.hidden = true;
+    els.bhInstallError.textContent = '';
+  }
+  if (els.btnBhInstallConfirm) els.btnBhInstallConfirm.disabled = true;
+  openModal(els.bhInstallModal);
+  await loadBhInstallList('');
+  setTimeout(() => els.bhInstallSearch && els.bhInstallSearch.focus(), 50);
+}
+
+function closeBhInstallModal() {
+  closeModal(els.bhInstallModal);
+  bhInstallTankId = null;
+  bhInstallTankNumber = null;
+  bhInstallPick = null;
+  bhInstallList = [];
+}
+
+function renderBhInstallList() {
+  if (!els.bhInstallList) return;
+  if (!bhInstallList.length) {
+    els.bhInstallList.innerHTML = '';
+    if (els.bhInstallEmpty) {
+      els.bhInstallEmpty.hidden = false;
+      els.bhInstallEmpty.textContent = tr('ak.bulkhead.empty');
+    }
+    return;
+  }
+  if (els.bhInstallEmpty) els.bhInstallEmpty.hidden = true;
+  els.bhInstallList.innerHTML = bhInstallList
+    .map((b) => {
+      const id = Number(b.id);
+      const on = bhInstallPick && Number(bhInstallPick.id) === id;
+      const meta = [b.team_name, b.notes].filter(Boolean).join(' · ');
+      return `<button type="button" class="ak-bh-row${on ? ' is-on' : ''}" data-bh-id="${id}">
+        <span class="ak-bh-num">${escapeHtml(b.bulkhead_number)}</span>
+        <small>${escapeHtml(meta || tr('ak.bulkhead.available'))}</small>
+      </button>`;
+    })
+    .join('');
+}
+
+async function loadBhInstallList(search) {
+  const { res, data } = await postAction({
+    action: 'list_available_bulkheads',
+    search: search || '',
+  });
+  if (!res.ok || !data.ok) {
+    bhInstallList = [];
+    renderBhInstallList();
+    if (els.bhInstallError) {
+      els.bhInstallError.hidden = false;
+      els.bhInstallError.textContent = (data && data.message) || tr('ak.bulkhead.loadFailed');
+    }
+    return;
+  }
+  if (els.bhInstallError) els.bhInstallError.hidden = true;
+  bhInstallList = Array.isArray(data.bulkheads) ? data.bulkheads : [];
+  if (bhInstallPick && !bhInstallList.some((b) => Number(b.id) === Number(bhInstallPick.id))) {
+    bhInstallPick = null;
+    if (els.btnBhInstallConfirm) els.btnBhInstallConfirm.disabled = true;
+  }
+  renderBhInstallList();
+}
+
+async function confirmBhInstall() {
+  if (!bhInstallPick || !Number.isInteger(bhInstallTankId) || bhInstallTankId <= 0 || actionBusy) return;
+  actionBusy = true;
+  try {
+    const { res, data } = await postAction({
+      action: 'install_bulkhead',
+      tank_id: bhInstallTankId,
+      bulkhead_id: Number(bhInstallPick.id),
+    });
+    if (!res.ok || !data.ok) {
+      if (els.bhInstallError) {
+        els.bhInstallError.hidden = false;
+        els.bhInstallError.textContent = (data && data.message) || tr('ak.bulkhead.installFailed');
+      }
+      return;
+    }
+    showWarning(data.message || tr('ak.bulkhead.installedMsg', { n: bhInstallPick.bulkhead_number }));
+    closeBhInstallModal();
+    await loadConfig();
+  } finally {
+    actionBusy = false;
+  }
+}
+
 function bindModals() {
   if (els.btnConfirmCancel) {
     els.btnConfirmCancel.addEventListener('click', () => {
@@ -986,6 +1134,26 @@ function bindModals() {
   if (els.btnReturnRemoved) {
     els.btnReturnRemoved.addEventListener('click', () => void returnRemovedTank());
     wireTouchPrevent(els.returnRemoved);
+  }
+  if (els.btnBhInstallCancel) els.btnBhInstallCancel.addEventListener('click', closeBhInstallModal);
+  if (els.btnBhInstallConfirm) els.btnBhInstallConfirm.addEventListener('click', () => void confirmBhInstall());
+  if (els.bhInstallList) {
+    els.bhInstallList.addEventListener('click', (ev) => {
+      const row = ev.target.closest('[data-bh-id]');
+      if (!row) return;
+      const id = Number(row.getAttribute('data-bh-id'));
+      bhInstallPick = bhInstallList.find((b) => Number(b.id) === id) || null;
+      if (els.btnBhInstallConfirm) els.btnBhInstallConfirm.disabled = !bhInstallPick;
+      renderBhInstallList();
+    });
+  }
+  if (els.bhInstallSearch) {
+    els.bhInstallSearch.addEventListener('input', () => {
+      clearTimeout(bhInstallSearchTimer);
+      bhInstallSearchTimer = setTimeout(() => {
+        void loadBhInstallList(els.bhInstallSearch.value || '');
+      }, 200);
+    });
   }
   if (els.logoutBtn) {
     els.logoutBtn.addEventListener('click', async () => {

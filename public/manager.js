@@ -419,8 +419,35 @@ function tankDomeLine(t) {
   return `<div class="tank-dome-line" style="font-size:12px;font-weight:700;color:#1e40af;margin-top:3px">${escapeHtml(parts.join(' · '))}</div>`;
 }
 
+function tankBulkheadLine(t) {
+  if (!t) return '';
+  const b = t.bulkhead_summary;
+  if (!b || !Array.isArray(b.installed) || !b.installed.length) return '';
+  const nums = b.installed.map((x) => x.bulkhead_number).filter(Boolean).join(', ');
+  if (!nums) return '';
+  return `<div class="tank-bulkhead-line" style="font-size:12px;font-weight:700;color:#0f766e;margin-top:3px">Bulkhead: ${escapeHtml(nums)}</div>`;
+}
+
 function tankStatusBadge(t) {
-  return tankStatusBadgeBase(t) + tankDomeLine(t);
+  return tankStatusBadgeBase(t) + tankDomeLine(t) + tankBulkheadLine(t);
+}
+
+function renderTankReportBulkheadItem(data) {
+  const bs = data && data.bulkhead_state;
+  const installs = bs && Array.isArray(bs.installs) ? bs.installs : [];
+  const tankId = data && data.tank ? data.tank.id : null;
+  if (!installs.length) return '';
+  const lines = installs.map((i) => escapeHtml(i.bulkhead_number)).join(', ');
+  const undoBtn =
+    tankId != null
+      ? `<button type="button" class="btn-secondary btn-sm" data-undo-bulkhead-tank="${Number(
+          tankId
+        )}" style="margin-top:8px">Remove Bulkhead (Manager)</button>`
+      : '';
+  return `<div class="tank-report-bulkhead" style="margin-top:10px;padding:10px;border:1px solid #99f6e4;border-radius:10px;background:#f0fdfa">
+    <strong style="color:#0f766e">Bulkhead:</strong> ${lines}
+    ${undoBtn}
+  </div>`;
 }
 
 function renderTankReportDomeItem(data) {
@@ -1734,6 +1761,7 @@ function renderTankReport(data) {
           <div class="tank-lifecycle-value">${escapeHtml(data.downtime_total_display || meta.downtime_display || '00:00')}</div>
         </div>
         ${renderTankReportDomeItem(data)}
+        ${renderTankReportBulkheadItem(data)}
         <div class="tank-lifecycle-item tank-lifecycle-item--wide">
           <div class="tank-lifecycle-label">Description</div>
           <div class="tank-lifecycle-value">${escapeHtml(tank.description || 'No description')}</div>
@@ -2020,6 +2048,35 @@ async function openTankReport(id) {
     btn.addEventListener('click', () => {
       const sessionId = btn.getAttribute('data-session-id');
       if (sessionId && window.SessionDetails) window.SessionDetails.open(sessionId);
+    });
+  });
+  tankReportBody.querySelectorAll('[data-undo-bulkhead-tank]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const tankId = Number(btn.getAttribute('data-undo-bulkhead-tank'));
+      if (!Number.isInteger(tankId) || tankId <= 0) return;
+      const reason = window.prompt('Reason for removing this bulkhead from the tank (required):', '');
+      if (reason == null) return;
+      if (String(reason).trim().length < 3) {
+        window.alert('Enter a short reason (at least 3 characters).');
+        return;
+      }
+      try {
+        const res = await fetch(`/api/manager/tanks/${tankId}/undo-bulkhead`, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({ reason: String(reason).trim() }),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok || !body.ok) {
+          window.alert((body && body.message) || 'Could not remove bulkhead.');
+          return;
+        }
+        if (currentTankReportId) void openTankReport(currentTankReportId);
+        if (typeof loadTanks === 'function') void loadTanks();
+      } catch (_err) {
+        window.alert('Could not reach the server.');
+      }
     });
   });
   const openEditor = (opts) => {

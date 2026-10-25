@@ -859,6 +859,8 @@ UPDATE machines SET workflow = 'winding' WHERE workflow = 'winding' OR name ILIK
 
   await ensureEmployeeShopsSchema(client, log);
   await ensurePhase3DomeSchema(client, log);
+  await ensurePhase3DomeSoftDelete(client, log);
+  await ensurePhase3BulkheadSchema(client, log);
 }
 
 /**
@@ -965,6 +967,75 @@ async function ensurePhase3DomeSchema(client, log = console) {
   }
 }
 
+/**
+ * Soft-delete columns + partial unique dome_number index. Always safe to re-run (IF NOT EXISTS).
+ * Runs even when base dome tables already exist so production can gain Delete Dome without
+ * recreating tables. Noncritical — delete API returns not-ready until columns exist.
+ */
+async function ensurePhase3DomeSoftDelete(client, log = console) {
+  if (!phase3SchemaSql) return { ok: false, error: 'phase3-schema-sql not loaded' };
+  const { PHASE3_DOME_SOFT_DELETE_SQL } = phase3SchemaSql;
+  try {
+    const { rows } = await client.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'domes' AND column_name = 'deleted_at'`
+    );
+    const hasDeletedAt = Boolean(rows.length);
+    // Still rewrite unique index if soft-delete columns already exist (idempotent CREATE).
+    await client.query('BEGIN');
+    try {
+      await client.query(`SELECT set_config('lock_timeout', '8000', true)`);
+      await client.query(`SELECT set_config('statement_timeout', '20000', true)`);
+      await client.query('SELECT pg_advisory_xact_lock($1)', [SCHEMA_LOCK_KEY]);
+      await client.query(PHASE3_DOME_SOFT_DELETE_SQL);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    }
+    if (!hasDeletedAt) log.log('[migration] Phase 3 dome soft-delete columns ready');
+    return { ok: true };
+  } catch (err) {
+    log.warn('[migration] Phase 3 dome soft-delete (noncritical, retried on next start):', err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
+/**
+ * Phase 3 Bulkhead tables. New tables only; same locking as dome schema.
+ */
+async function ensurePhase3BulkheadSchema(client, log = console) {
+  if (!phase3SchemaSql) return { created: false, error: 'phase3-schema-sql not loaded' };
+  const { PHASE3_BULKHEAD_SQL, PHASE3_BULKHEAD_ONE_LIVE_TANK_SQL, PHASE3_BULKHEAD_RELATIONS } =
+    phase3SchemaSql;
+  try {
+    if (await relationsPresent(client, PHASE3_BULKHEAD_RELATIONS)) return { created: false };
+    await client.query('BEGIN');
+    let created = false;
+    try {
+      await client.query(`SELECT set_config('lock_timeout', '8000', true)`);
+      await client.query(`SELECT set_config('statement_timeout', '20000', true)`);
+      await client.query('SELECT pg_advisory_xact_lock($1)', [SCHEMA_LOCK_KEY]);
+      if (!(await relationsPresent(client, PHASE3_BULKHEAD_RELATIONS))) {
+        // Base tables may already exist from an earlier pass — always apply full IF NOT EXISTS SQL,
+        // then the additive one-live-tank unique index for Assembly install uniqueness.
+        await client.query(PHASE3_BULKHEAD_SQL);
+        if (PHASE3_BULKHEAD_ONE_LIVE_TANK_SQL) await client.query(PHASE3_BULKHEAD_ONE_LIVE_TANK_SQL);
+        created = true;
+      }
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    }
+    if (created) log.log('[migration] Phase 3 bulkhead tables ready');
+    return { created };
+  } catch (err) {
+    log.warn('[migration] Phase 3 bulkhead tables (noncritical, retried on next start):', err.message);
+    return { created: false, error: err.message };
+  }
+}
+
 /** Verify tank soft-delete columns + audit table exist (throws if missing after additive pass). */
 async function ensureTankTrashSchema(client) {
   const { rows: colRows } = await client.query(
@@ -1065,6 +1136,8 @@ async function runSchemaMigration(client, options = {}) {
 
     await ensureEmployeeShopsSchema(client, log);
     await ensurePhase3DomeSchema(client, log);
+    await ensurePhase3DomeSoftDelete(client, log);
+    await ensurePhase3BulkheadSchema(client, log);
 
     if (!skipBackfills) {
       await runOptionalBackfills(client, log);
@@ -1105,6 +1178,8 @@ module.exports = {
   ensureEmployeeShopsSchema,
   EMPLOYEE_SHOPS_SQL,
   ensurePhase3DomeSchema,
+  ensurePhase3DomeSoftDelete,
+  ensurePhase3BulkheadSchema,
   ensureTankTrashSchema,
   runOptionalBackfills,
   verifyRequiredTables,

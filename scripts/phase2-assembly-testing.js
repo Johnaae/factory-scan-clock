@@ -1621,6 +1621,75 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
     return rows;
   }
 
+  /**
+   * Temporary Dome Shop Start handoff: leave this employee's open stage labor without
+   * stopping the tank job for remaining teammates. Safe to interrupt ASSEMBLY (and
+   * CORRECTION). TESTING (and other non-assembly stages) returns a conflict.
+   * Must run inside an open transaction (client required).
+   */
+  async function releaseEmployeeOpenStageLabor(client, employeeId, ts, opts = {}) {
+    const empId = Number(employeeId);
+    if (!client || !Number.isInteger(empId) || empId <= 0) {
+      return { ok: false, error: 'validation', message: 'employee_id is required.' };
+    }
+    const at = ts || nowIso();
+    const allow = new Set(
+      (opts.allowedStages || [STAGE_CODES.ASSEMBLY, STAGE_CODES.CORRECTION]).map((s) =>
+        String(s || '').toUpperCase()
+      )
+    );
+    const { rows: openLabor } = await client.query(
+      `SELECT p.id AS participant_id, p.session_id, p.employee_name, s.stage, s.team_id,
+              tk.tank_number
+       FROM stage_labor_participants p
+       JOIN stage_labor_sessions s ON s.id = p.session_id
+       JOIN tanks tk ON tk.id = s.tank_id
+       WHERE p.employee_id = $1 AND p.left_at IS NULL AND s.status = 'active'`,
+      [empId]
+    );
+    const blocked = openLabor.find((r) => !allow.has(String(r.stage || '').toUpperCase()));
+    if (blocked) {
+      const stage = String(blocked.stage || '').toUpperCase();
+      return {
+        ok: false,
+        error: 'employee_busy',
+        message: `${blocked.employee_name || 'Employee'} is in active ${stage.toLowerCase()} labor on Tank ${
+          blocked.tank_number || '?'
+        }. Finish or stop that work first.`,
+        stage,
+        tank_number: blocked.tank_number || null,
+      };
+    }
+    const left = [];
+    for (const lab of openLabor) {
+      await client.query(
+        `UPDATE stage_labor_participants SET left_at = $1::timestamptz WHERE id = $2 AND left_at IS NULL`,
+        [at, Number(lab.participant_id)]
+      );
+      left.push({
+        session_id: Number(lab.session_id),
+        stage: lab.stage,
+        tank_number: lab.tank_number,
+      });
+      const { rows: remaining } = await client.query(
+        `SELECT COUNT(*)::int AS n FROM stage_labor_participants WHERE session_id = $1 AND left_at IS NULL`,
+        [Number(lab.session_id)]
+      );
+      if (remaining[0] && remaining[0].n === 0) {
+        const session = await getSessionById(Number(lab.session_id), client);
+        if (session && session.status === 'active') {
+          await closeStageSession(
+            session,
+            at,
+            { statusTarget: 'stopped', notes: 'All participants moved to Dome Shop work' },
+            client
+          );
+        }
+      }
+    }
+    return { ok: true, left };
+  }
+
   async function resolveRosterForMachine(machine, client = pool) {
     const assignment = await getMachineAssignment(machine.id);
     if (!assignment || !assignment.team_id) {
@@ -5799,6 +5868,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
     listAssemblyKioskTeams,
     moveEmployeeToAssemblyTeam,
     endAssemblyTeamMoves,
+    releaseEmployeeOpenStageLabor,
     syncAssemblyKioskPresenceFromAssignment,
     confirmTank,
     confirmTest,

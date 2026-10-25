@@ -15,6 +15,24 @@ const els = {
   warning: $('scanWarning'),
   teamCards: $('teamCards'),
   teamsEmpty: $('teamsEmpty'),
+  legacyTeamsSection: $('legacyTeamsSection'),
+  activeDomes: $('activeDomes'),
+  domesEmpty: $('domesEmpty'),
+  activeBulkheads: $('activeBulkheads'),
+  bulkheadsEmpty: $('bulkheadsEmpty'),
+  btnCreateDome: $('btnCreateDome'),
+  btnCreateBulkhead: $('btnCreateBulkhead'),
+  btnBoardLunch: $('btnBoardLunch'),
+  bhCreateModal: $('bhCreateModal'),
+  bhCreateForm: $('bhCreateForm'),
+  bhCreateNumber: $('bhCreateNumber'),
+  bhCreateSelected: $('bhCreateSelected'),
+  bhCreateEmpSearch: $('bhCreateEmpSearch'),
+  bhCreateFabs: $('bhCreateFabs'),
+  bhCreateNotes: $('bhCreateNotes'),
+  bhCreateError: $('bhCreateError'),
+  btnBoardResume: $('btnBoardResume'),
+  btnBoardEndShift: $('btnBoardEndShift'),
   otherSection: $('otherSection'),
   otherHint: $('otherHint'),
   otherCards: $('otherCards'),
@@ -29,7 +47,10 @@ const els = {
   createDiameters: $('createDiameters'),
   createAutoFab: $('createAutoFab'),
   createFabHint: $('createFabHint'),
+  createSelected: $('createSelected'),
+  createEmpSearch: $('createEmpSearch'),
   createFabs: $('createFabs'),
+  createNotes: $('createNotes'),
   createError: $('createError'),
   completeModal: $('completeModal'),
   completeForm: $('completeForm'),
@@ -66,10 +87,15 @@ let lastWarning = null;
 let scanBuffer = '';
 let lastKeyTime = 0;
 let confirmResolve = null;
-const createState = { teamId: null, type: null, diameter: null, fabs: new Set(), manual: false };
+const createState = { teamId: null, type: null, diameter: null, fabs: new Set(), manual: true, search: '' };
+const bhCreateState = { fabs: new Set(), search: '' };
+const MAX_FABRICATORS = 3;
 let fabsDome = null;
 const fabsSelected = new Set();
 let completeDomeRef = null;
+let fabsBulkhead = null;
+/** Transfer notices already shown on this kiosk session (from config.transfer_notices). */
+const seenTransferNoticeIds = new Set();
 let outTeam = null;
 let outPick = null;
 
@@ -127,7 +153,7 @@ function postAction(body) {
 }
 
 function anyModalOpen() {
-  return [els.createModal, els.completeModal, els.fabsModal, els.outModal, els.confirmModal].some(
+  return [els.createModal, els.bhCreateModal, els.completeModal, els.fabsModal, els.outModal, els.confirmModal].some(
     (m) => m && !m.hidden
   );
 }
@@ -227,7 +253,7 @@ function domeCardClass(d) {
   return '';
 }
 
-/** One dome inside a team card (or the Other Domes list). teamId = team that Start Dome uses. */
+/** One dome card. teamId optional (legacy); Start Dome uses selected fabricators when omitted. */
 function renderDomeCard(d, teamId) {
   const spec = [DI.typeLabel(d.dome_type), d.diameter_label].filter(Boolean).join(' · ');
   const running = d.production_status === 'in_progress';
@@ -235,15 +261,15 @@ function renderDomeCard(d, teamId) {
   const peopleLabel = running && d.working && d.working.length ? tr('dk.working') : tr('dome.field.fabricators');
   const names = people.map((f) => f.name).join(', ') || '—';
   const since = running && d.active_since ? ` · ${tr('dk.since', { time: formatClock(d.active_since) })}` : '';
-  const tid = teamId != null ? Number(teamId) : '';
+  const tidAttr = teamId != null && teamId !== '' ? ` data-team-id="${Number(teamId)}"` : '';
   const btns = [];
   if (running) {
     btns.push(
-      `<button type="button" class="btn-secondary btn-touch" data-dk-dome="stop" data-dome-id="${d.id}" data-team-id="${tid}">${escapeHtml(tr('dk.btn.stop'))}</button>`
+      `<button type="button" class="btn-secondary btn-touch" data-dk-dome="stop" data-dome-id="${d.id}"${tidAttr}>${escapeHtml(tr('dk.btn.stop'))}</button>`
     );
   } else {
     btns.push(
-      `<button type="button" class="btn-primary btn-touch btn-touch--start-work" data-dk-dome="start" data-dome-id="${d.id}" data-team-id="${tid}">${escapeHtml(tr('dk.btn.start'))}</button>`
+      `<button type="button" class="btn-primary btn-touch btn-touch--start-work" data-dk-dome="start" data-dome-id="${d.id}"${tidAttr}>${escapeHtml(tr('dk.btn.start'))}</button>`
     );
   }
   if (d.started_at) {
@@ -252,8 +278,11 @@ function renderDomeCard(d, teamId) {
     );
   }
   btns.push(
-    `<button type="button" class="btn-secondary btn-touch" data-dk-dome="fabricators" data-dome-id="${d.id}"${btns.length === 1 ? '' : ' style="grid-column: 1 / -1"'}>${escapeHtml(tr('dk.btn.fabricators'))}</button>`
+    `<button type="button" class="btn-secondary btn-touch" data-dk-dome="fabricators" data-dome-id="${d.id}" style="grid-column: 1 / -1">${escapeHtml(tr('dk.btn.fabricators'))}</button>`
   );
+  const notesHtml = d.notes
+    ? `<p class="dk-notes-preview"><span class="ak-roster-label">${escapeHtml(tr('dome.field.notes'))}:</span> ${escapeHtml(d.notes)}</p>`
+    : '';
   return `<article class="ak-tank-card ${domeCardClass(d)}" data-dome-id="${d.id}">
     <div class="ak-tank-head">
       <h3 class="ak-tank-title">${escapeHtml(tr('dome.label', { dome: d.dome_number }))}</h3>
@@ -261,6 +290,7 @@ function renderDomeCard(d, teamId) {
     </div>
     <p class="ak-tank-stage">${escapeHtml(spec)}${escapeHtml(since)}</p>
     <p class="ak-tank-stage"><span class="ak-roster-label">${escapeHtml(peopleLabel)}:</span> ${escapeHtml(names)}</p>
+    ${notesHtml}
     <div class="ak-metrics">
       <div class="ak-metric">
         <span class="ak-metric-label">${escapeHtml(tr('dome.field.productionTime'))}</span>
@@ -313,13 +343,82 @@ function renderTeamCard(team) {
   </section>`;
 }
 
+function renderActiveDomes() {
+  const list = (config && Array.isArray(config.domes) ? config.domes : []).slice();
+  if (els.domesEmpty) els.domesEmpty.hidden = list.length > 0;
+  if (els.activeDomes) {
+    els.activeDomes.innerHTML = list.map((d) => renderDomeCard(d, null)).join('');
+    wireTouchPrevent(els.activeDomes);
+  }
+}
+
+function renderBulkheadCard(b) {
+  const running = b.production_status === 'in_progress';
+  const people = running && b.working && b.working.length ? b.working : b.workers || [];
+  const peopleLabel = running && b.working && b.working.length ? tr('dk.working') : tr('dome.field.fabricators');
+  const names = people.map((f) => f.name || f.employee_name).join(', ') || '—';
+  const since = running && b.active_since ? ` · ${tr('dk.since', { time: formatClock(b.active_since) })}` : '';
+  const btns = [];
+  if (running) {
+    btns.push(
+      `<button type="button" class="btn-secondary btn-touch" data-dk-bh="stop" data-bh-id="${b.id}">${escapeHtml(tr('dk.btn.stop'))}</button>`
+    );
+  } else {
+    btns.push(
+      `<button type="button" class="btn-primary btn-touch btn-touch--start-work" data-dk-bh="start" data-bh-id="${b.id}">${escapeHtml(tr('dk.btn.start'))}</button>`
+    );
+  }
+  if (b.started_at) {
+    btns.push(
+      `<button type="button" class="btn-primary btn-touch btn-touch--complete" data-dk-bh="finish" data-bh-id="${b.id}">${escapeHtml(tr('dk.btn.finishBulkhead'))}</button>`
+    );
+  }
+  btns.push(
+    `<button type="button" class="btn-secondary btn-touch" data-dk-bh="workers" data-bh-id="${b.id}" style="grid-column: 1 / -1">${escapeHtml(tr('dk.btn.fabricators'))}</button>`
+  );
+  const notesHtml = b.notes
+    ? `<p class="dk-notes-preview"><span class="ak-roster-label">${escapeHtml(tr('dome.field.notes'))}:</span> ${escapeHtml(b.notes)}</p>`
+    : '';
+  return `<article class="ak-tank-card ${domeCardClass(b)}" data-bh-id="${b.id}">
+    <div class="ak-tank-head">
+      <h3 class="ak-tank-title">${escapeHtml(tr('bi.label', { n: b.bulkhead_number }))}</h3>
+      <span class="ak-tank-status">${escapeHtml(DI.productionLabel(b))}</span>
+    </div>
+    <p class="ak-tank-stage">${escapeHtml(tr('dk.bulkhead.kind'))}${escapeHtml(since)}</p>
+    <p class="ak-tank-stage"><span class="ak-roster-label">${escapeHtml(peopleLabel)}:</span> ${escapeHtml(names)}</p>
+    ${notesHtml}
+    <div class="ak-metrics">
+      <div class="ak-metric">
+        <span class="ak-metric-label">${escapeHtml(tr('dome.field.productionTime'))}</span>
+        <span class="ak-metric-value" data-live-bh-ms="${b.id}">${escapeHtml(formatMs(liveProductionMs(b)))}</span>
+      </div>
+      <div class="ak-metric">
+        <span class="ak-metric-label">${escapeHtml(tr('dome.field.labor'))}</span>
+        <span class="ak-metric-value">${escapeHtml(b.labor_display || '0h 0m')}</span>
+      </div>
+    </div>
+    <div class="dk-dome-actions">${btns.join('')}</div>
+  </article>`;
+}
+
+function renderActiveBulkheads() {
+  const list = (config && Array.isArray(config.bulkheads) ? config.bulkheads : []).slice();
+  if (els.bulkheadsEmpty) els.bulkheadsEmpty.hidden = list.length > 0;
+  if (els.activeBulkheads) {
+    els.activeBulkheads.innerHTML = list.map((b) => renderBulkheadCard(b)).join('');
+    wireTouchPrevent(els.activeBulkheads);
+  }
+}
+
 function renderTeams() {
-  els.teamsEmpty.hidden = activeTeams.length > 0;
+  const showLegacy = activeTeams.length > 0;
+  if (els.legacyTeamsSection) els.legacyTeamsSection.hidden = !showLegacy;
+  if (!els.teamCards) return;
+  if (els.teamsEmpty) els.teamsEmpty.hidden = activeTeams.length > 0;
   els.teamCards.innerHTML = activeTeams.map(renderTeamCard).join('');
   wireTouchPrevent(els.teamCards);
   els.teamCards.querySelectorAll('section.ak-team-card[data-team-id]').forEach((card) => {
     card.addEventListener('click', (ev) => {
-      // Buttons act on their own card without changing the selection (Assembly rule).
       if (ev.target.closest('button, select, option, input, label')) return;
       selectTeam(Number(card.getAttribute('data-team-id')));
     });
@@ -327,16 +426,9 @@ function renderTeams() {
 }
 
 function renderOther() {
-  const list = (config && config.other_domes) || [];
-  els.otherSection.hidden = !list.length;
-  if (!list.length) {
-    els.otherCards.innerHTML = '';
-    return;
-  }
-  const team = teamById(focusedTeamId);
-  els.otherHint.textContent = tr('dk.other.hint', { team: team ? team.team_name : tr('dk.other.noTeam') });
-  els.otherCards.innerHTML = list.map((d) => renderDomeCard(d, focusedTeamId)).join('');
-  wireTouchPrevent(els.otherCards);
+  // Domes already listed on the active board — hide legacy "other" section.
+  if (els.otherSection) els.otherSection.hidden = true;
+  if (els.otherCards) els.otherCards.innerHTML = '';
 }
 
 function renderRecent() {
@@ -345,7 +437,9 @@ function renderRecent() {
   els.recentList.innerHTML = list
     .map(
       (d) => `<div class="dk-recent-row">
-        <span>${escapeHtml(tr('dome.label', { dome: d.dome_number }))} · ${escapeHtml(DI.describe(d))}${d.team_name ? ` · ${escapeHtml(d.team_name)}` : ''}</span>
+        <span>${escapeHtml(tr('dome.label', { dome: d.dome_number }))} · ${escapeHtml(DI.describe(d))}${
+          d.notes ? ` · ${escapeHtml(d.notes)}` : ''
+        }</span>
         <span class="ak-badge ak-badge--available">${escapeHtml(DI.inventoryLabel(d.inventory_status))}</span>
       </div>`
     )
@@ -354,6 +448,8 @@ function renderRecent() {
 
 function renderAll() {
   renderMachineLabel();
+  renderActiveDomes();
+  renderActiveBulkheads();
   renderTeams();
   renderOther();
   renderRecent();
@@ -374,11 +470,21 @@ function selectTeam(teamId) {
   showWarning(() => tr('dk.teamSelected', { team: team ? team.team_name : '' }));
 }
 
+function allBulkheads() {
+  return (config && Array.isArray(config.bulkheads) ? config.bulkheads : []).slice();
+}
+
 function tickLiveTimers() {
   for (const d of allDomes()) {
     if (d.production_status !== 'in_progress') continue;
     document.querySelectorAll(`[data-live-ms="${d.id}"]`).forEach((el) => {
       el.textContent = formatMs(liveProductionMs(d));
+    });
+  }
+  for (const b of allBulkheads()) {
+    if (b.production_status !== 'in_progress') continue;
+    document.querySelectorAll(`[data-live-bh-ms="${b.id}"]`).forEach((el) => {
+      el.textContent = formatMs(liveProductionMs(b));
     });
   }
 }
@@ -399,6 +505,20 @@ function applyConfig(data) {
     }
   }
   renderAll();
+  showNewTransferNotices(data.transfer_notices || []);
+  // Keep open Create modals in sync when config arrives/refreshes.
+  if (els.createModal && !els.createModal.hidden) renderCreateFabs();
+  if (els.bhCreateModal && !els.bhCreateModal.hidden) renderBhCreateFabs();
+}
+
+/** Superseded kiosk: show that a worker was assigned elsewhere (from recent events). */
+function showNewTransferNotices(notices) {
+  if (!Array.isArray(notices) || !notices.length) return;
+  const fresh = notices.filter((n) => n && n.id && !seenTransferNoticeIds.has(String(n.id)));
+  if (!fresh.length) return;
+  for (const n of fresh) seenTransferNoticeIds.add(String(n.id));
+  const msg = fresh.map((n) => n.message || tr('dk.transfer.elsewhereShort')).join(' ');
+  showWarning(() => msg);
 }
 
 async function loadConfig() {
@@ -429,6 +549,27 @@ async function runAction(body, ctx) {
     busy = false;
     await loadConfig();
   }
+}
+
+/**
+ * Start Dome/Bulkhead. If the employee is already on another Dome/Bulkhead job,
+ * prompt to confirm intentional transfer, then retry with confirm_transfer.
+ */
+async function runStartWithTransferConfirm(body, ctx) {
+  let data = await runAction(body, ctx);
+  if (data && data.ok === false && data.error === 'employee_assigned_elsewhere' && data.confirm_transfer_required) {
+    const who = data.employee_name || tr('dk.transfer.aWorker');
+    const where = data.assigned_to || tr('dk.transfer.anotherJob');
+    const ok = await askConfirm(
+      tr('dk.transfer.title'),
+      tr('dk.transfer.text', { name: who, where }),
+      tr('dk.transfer.confirm')
+    );
+    if (ok) {
+      data = await runAction({ ...body, confirm_transfer: true }, ctx);
+    }
+  }
+  return data;
 }
 
 function isScanActionKeyword(raw) {
@@ -473,39 +614,138 @@ function renderCreateChips() {
   renderCreateFabs();
 }
 
-/** The team's on-shift employees are assigned automatically; chips only when nobody is on shift. */
-function renderCreateFabs() {
-  const team = teamById(createState.teamId);
-  const roster = (team && team.roster) || [];
-  const teamName = team ? team.team_name : '';
-  els.createTitle.textContent = teamName ? tr('dk.create.titleTeam', { team: teamName }) : tr('dk.create.title');
-  createState.manual = roster.length === 0;
-  els.createAutoFab.hidden = createState.manual;
-  els.createAutoFab.textContent = createState.manual
-    ? ''
-    : tr('dk.create.autoFab', { team: teamName, n: roster.length, names: roster.map((e) => e.name).join(', ') });
-  els.createFabHint.hidden = !createState.manual;
-  els.createFabHint.textContent = createState.manual ? tr('dk.create.pickFab', { team: teamName }) : '';
-  els.createFabs.hidden = !createState.manual;
-  els.createFabs.innerHTML = createState.manual ? fabChipsHtml(createState.fabs, null) : '';
+function employeePickerOptions() {
+  const all = (config && config.all_employees) || [];
+  if (all.length) return all;
+  const shop = (config && config.dome_shop_employees) || [];
+  if (shop.length) return shop;
+  return (config && config.fabricator_options) || [];
 }
 
-function fabChipsHtml(selected, domeId) {
-  const opts = (config && config.fabricator_options) || [];
-  if (!opts.length) return `<p class="dk-modal-hint">${escapeHtml(tr('dk.create.noFab'))}</p>`;
-  return opts
+function maxFabricators() {
+  const n = config && config.max_fabricators != null ? Number(config.max_fabricators) : MAX_FABRICATORS;
+  return Number.isInteger(n) && n > 0 ? n : MAX_FABRICATORS;
+}
+
+function employeeMetaNote(o, domeId) {
+  const busyDome = o.busy_on_dome && (domeId == null || Number(o.busy_on_dome.dome_id) !== Number(domeId));
+  const busyBh = o.busy_on_bulkhead || (o.busy && o.busy.kind === 'bulkhead' ? o.busy : null);
+  if (busyDome) return tr('dk.fab.busy', { dome: o.busy_on_dome.dome_number });
+  if (busyBh) return tr('dk.fab.busyBh', { n: busyBh.bulkhead_number });
+  const dept = o.department || null;
+  const home = o.home_team_name || null;
+  const team = o.team_name || null;
+  if (dept && home) return tr('dk.fab.teamDept', { team: home, dept });
+  if (dept && team) return tr('dk.fab.teamDept', { team, dept });
+  if (home) return tr('dk.fab.homeTeam', { team: home });
+  if (team) return tr('dk.fab.team', { team });
+  if (dept) return String(dept);
+  return tr('dk.fab.noTeam');
+}
+
+function selectedPicksHtml(selectedIds) {
+  const opts = employeePickerOptions();
+  const chips = [...selectedIds]
+    .map((id) => {
+      const o = opts.find((e) => Number(e.id) === Number(id));
+      const name = o ? o.name : `#${id}`;
+      return `<button type="button" class="dk-emp-pick" data-fab-remove="${id}" aria-label="${escapeHtml(
+        tr('dk.create.removeWorker', { name })
+      )}"><span>${escapeHtml(name)}</span><span class="dk-emp-pick-x" aria-hidden="true">×</span></button>`;
+    })
+    .join('');
+  if (!chips) return '';
+  return `${chips}<span class="dk-emp-pick-count">${escapeHtml(
+    tr('dk.create.selectedCount', { n: selectedIds.size, max: maxFabricators() })
+  )}</span>`;
+}
+
+/** Always show searchable 1–3 employee picker (no team login). */
+function renderCreateFabs() {
+  if (els.createTitle) els.createTitle.textContent = tr('dk.create.title');
+  createState.manual = true;
+  if (els.createAutoFab) {
+    els.createAutoFab.hidden = true;
+    els.createAutoFab.textContent = '';
+  }
+  if (els.createFabHint) {
+    els.createFabHint.hidden = false;
+    els.createFabHint.textContent = tr('dk.create.pickFab');
+  }
+  if (els.createSelected) {
+    const html = selectedPicksHtml(createState.fabs);
+    els.createSelected.hidden = !html;
+    els.createSelected.innerHTML = html;
+  }
+  if (els.createFabs) {
+    els.createFabs.hidden = false;
+    els.createFabs.classList.add('dk-emp-dropdown');
+    els.createFabs.setAttribute('role', 'listbox');
+    els.createFabs.innerHTML = fabChipsHtml(createState.fabs, null, createState.search);
+  }
+}
+
+function fabChipsHtml(selected, domeId, searchText) {
+  const q = String(searchText || '')
+    .trim()
+    .toLowerCase();
+  let opts = employeePickerOptions();
+  if (q) {
+    opts = opts.filter((o) => {
+      const hay = `${o.name || ''} ${o.team_name || ''} ${o.home_team_name || ''} ${o.department || ''} ${
+        o.code || ''
+      }`.toLowerCase();
+      return hay.includes(q);
+    });
+  }
+  if (!opts.length) {
+    return `<p class="dk-modal-hint">${escapeHtml(q ? tr('dk.create.noSearch') : tr('dk.create.noFab'))}</p>`;
+  }
+  // Cap visible rows for touch performance; search narrows the full list.
+  const limit = q ? 200 : 120;
+  const shown = opts.slice(0, limit);
+  const more = opts.length > shown.length ? opts.length - shown.length : 0;
+  const rows = shown
     .map((o) => {
-      const busyElsewhere = o.busy_on_dome && (domeId == null || Number(o.busy_on_dome.dome_id) !== Number(domeId));
-      const note = busyElsewhere
-        ? tr('dk.fab.busy', { dome: o.busy_on_dome.dome_number })
-        : o.team_name
-          ? tr('dk.fab.team', { team: o.team_name })
-          : tr('dk.fab.offShift');
-      return `<button type="button" class="dk-chip dk-fab-chip${selected.has(o.id) ? ' is-on' : ''}" data-fab="${o.id}">
+      const id = Number(o.id);
+      const on = selected.has(id);
+      const note = employeeMetaNote(o, domeId);
+      return `<button type="button" class="dk-chip dk-fab-chip${on ? ' is-on' : ''}" data-fab="${id}" role="option" aria-selected="${
+        on ? 'true' : 'false'
+      }">
         <span>${escapeHtml(o.name)}</span><small>${escapeHtml(note)}</small>
       </button>`;
     })
     .join('');
+  return more
+    ? `${rows}<p class="dk-modal-hint">${escapeHtml(tr('dk.create.moreResults', { n: more }))}</p>`
+    : rows;
+}
+
+/** Toggle employee id in a selection Set (shared by Create Dome / Bulkhead / Set Fabricators). */
+function toggleFab(getSet, afterToggle, container, domeId, searchFn) {
+  return (ev) => {
+    const remove = ev.target.closest('[data-fab-remove]');
+    if (remove) {
+      const set = getSet();
+      const id = Number(remove.getAttribute('data-fab-remove'));
+      if (set.has(id)) set.delete(id);
+      if (typeof afterToggle === 'function') afterToggle();
+      else container.innerHTML = fabChipsHtml(set, domeId(), searchFn ? searchFn() : '');
+      return;
+    }
+    const b = ev.target.closest('[data-fab]');
+    if (!b) return;
+    const set = getSet();
+    const id = Number(b.getAttribute('data-fab'));
+    if (set.has(id)) set.delete(id);
+    else if (set.size >= maxFabricators()) {
+      showWarning(() => tr('dk.create.tooMany', { max: maxFabricators() }));
+      return;
+    } else set.add(id);
+    if (typeof afterToggle === 'function') afterToggle();
+    else container.innerHTML = fabChipsHtml(set, domeId(), searchFn ? searchFn() : '');
+  };
 }
 
 function setModalError(el, msg) {
@@ -513,40 +753,57 @@ function setModalError(el, msg) {
   el.textContent = msg || '';
 }
 
-function openCreate(teamId) {
-  createState.teamId = teamId;
+async function openCreate(teamId) {
+  createState.teamId = teamId != null ? teamId : null;
   createState.type = null;
   createState.diameter = null;
   createState.fabs = new Set();
+  createState.search = '';
+  createState.manual = true;
   els.createNumber.value = '';
+  if (els.createNotes) els.createNotes.value = '';
+  if (els.createEmpSearch) els.createEmpSearch.value = '';
   setModalError(els.createError, '');
+  if (!employeePickerOptions().length) await loadConfig();
   renderCreateChips();
   openModal(els.createModal);
-  setTimeout(() => els.createNumber.focus(), 50);
+  setTimeout(() => {
+    if (els.createEmpSearch) els.createEmpSearch.focus();
+    else els.createNumber.focus();
+  }, 50);
 }
 
 async function submitCreate(ev) {
   ev.preventDefault();
   if (busy) return;
+  const ids = [...createState.fabs];
+  if (!ids.length) {
+    setModalError(els.createError, tr('dk.create.needWorkers'));
+    return;
+  }
+  if (ids.length > maxFabricators()) {
+    setModalError(els.createError, tr('dk.create.tooMany', { max: maxFabricators() }));
+    return;
+  }
   busy = true;
   try {
-    const team = teamById(createState.teamId);
     const body = {
       action: 'create_dome',
-      team_id: createState.teamId,
       dome_number: els.createNumber.value,
       dome_type: createState.type,
       diameter_ft: createState.diameter,
+      fabricator_ids: ids,
+      notes: els.createNotes ? els.createNotes.value : null,
     };
-    if (createState.manual) body.fabricator_ids = [...createState.fabs];
+    // Legacy optional team card create still sends team_id when opened from a team card.
+    if (createState.teamId) body.team_id = createState.teamId;
     const { data } = await postAction(body);
-    const ctx = { team: team ? team.team_name : null };
     if (!data || !data.ok) {
-      setModalError(els.createError, DI.msg(data, ctx));
+      setModalError(els.createError, DI.msg(data, {}));
       return;
     }
     closeModal(els.createModal);
-    showWarning(responseMessage(data, ctx));
+    showWarning(responseMessage(data, {}));
   } finally {
     busy = false;
     await loadConfig();
@@ -585,6 +842,7 @@ async function submitComplete(ev) {
 
 function openFabs(d) {
   fabsDome = d;
+  fabsBulkhead = null;
   fabsSelected.clear();
   for (const f of d.fabricators || []) fabsSelected.add(Number(f.id));
   els.fabsTitle.textContent = tr('dk.fab.title', { dome: d.dome_number });
@@ -593,38 +851,155 @@ function openFabs(d) {
   openModal(els.fabsModal);
 }
 
+function openBhWorkers(b) {
+  fabsBulkhead = b;
+  fabsDome = null;
+  fabsSelected.clear();
+  for (const f of b.workers || []) fabsSelected.add(Number(f.id));
+  els.fabsTitle.textContent = tr('dk.bhFab.title', { n: b.bulkhead_number });
+  els.fabsChips.innerHTML = fabChipsHtml(fabsSelected, null);
+  setModalError(els.fabsError, '');
+  openModal(els.fabsModal);
+}
+
 async function submitFabs(ev) {
   ev.preventDefault();
-  if (busy || !fabsDome) return;
+  if (busy || (!fabsDome && !fabsBulkhead)) return;
+  const ids = [...fabsSelected];
+  if (!ids.length) {
+    setModalError(els.fabsError, tr('dk.create.needWorkers'));
+    return;
+  }
+  if (ids.length > maxFabricators()) {
+    setModalError(els.fabsError, tr('dk.create.tooMany', { max: maxFabricators() }));
+    return;
+  }
   busy = true;
   try {
-    const d = fabsDome;
-    const { data } = await postAction({ action: 'set_fabricators', dome_id: d.id, fabricator_ids: [...fabsSelected] });
-    if (!data || !data.ok) {
-      setModalError(els.fabsError, DI.msg(data, { dome: d.dome_number }));
-      return;
+    if (fabsBulkhead) {
+      const b = fabsBulkhead;
+      const { data } = await postAction({
+        action: 'set_bulkhead_workers',
+        bulkhead_id: b.id,
+        worker_ids: ids,
+      });
+      if (!data || !data.ok) {
+        setModalError(els.fabsError, DI.msg(data, {}) || (data && data.message) || '');
+        return;
+      }
+      closeModal(els.fabsModal);
+      showWarning(responseMessage(data, {}));
+    } else {
+      const d = fabsDome;
+      const { data } = await postAction({ action: 'set_fabricators', dome_id: d.id, fabricator_ids: ids });
+      if (!data || !data.ok) {
+        setModalError(els.fabsError, DI.msg(data, { dome: d.dome_number }));
+        return;
+      }
+      closeModal(els.fabsModal);
+      showWarning(responseMessage(data, { dome: d.dome_number }));
     }
-    closeModal(els.fabsModal);
-    showWarning(responseMessage(data, { dome: d.dome_number }));
   } finally {
     busy = false;
     await loadConfig();
   }
 }
 
+function renderBhCreateFabs() {
+  if (els.bhCreateSelected) {
+    const html = selectedPicksHtml(bhCreateState.fabs);
+    els.bhCreateSelected.hidden = !html;
+    els.bhCreateSelected.innerHTML = html;
+  }
+  if (els.bhCreateFabs) {
+    els.bhCreateFabs.hidden = false;
+    els.bhCreateFabs.classList.add('dk-emp-dropdown');
+    els.bhCreateFabs.setAttribute('role', 'listbox');
+    els.bhCreateFabs.innerHTML = fabChipsHtml(bhCreateState.fabs, null, bhCreateState.search);
+  }
+}
+
+async function openBhCreate() {
+  bhCreateState.fabs = new Set();
+  bhCreateState.search = '';
+  if (els.bhCreateNumber) els.bhCreateNumber.value = '';
+  if (els.bhCreateNotes) els.bhCreateNotes.value = '';
+  if (els.bhCreateEmpSearch) els.bhCreateEmpSearch.value = '';
+  setModalError(els.bhCreateError, '');
+  if (!employeePickerOptions().length) await loadConfig();
+  renderBhCreateFabs();
+  openModal(els.bhCreateModal);
+  setTimeout(() => {
+    if (els.bhCreateEmpSearch) els.bhCreateEmpSearch.focus();
+    else if (els.bhCreateNumber) els.bhCreateNumber.focus();
+  }, 50);
+}
+
+async function submitBhCreate(ev) {
+  ev.preventDefault();
+  if (busy) return;
+  const ids = [...bhCreateState.fabs];
+  if (!ids.length) {
+    setModalError(els.bhCreateError, tr('dk.create.needWorkers'));
+    return;
+  }
+  if (ids.length > maxFabricators()) {
+    setModalError(els.bhCreateError, tr('dk.create.tooMany', { max: maxFabricators() }));
+    return;
+  }
+  busy = true;
+  try {
+    const { data } = await postAction({
+      action: 'create_bulkhead',
+      bulkhead_number: els.bhCreateNumber.value,
+      worker_ids: ids,
+      notes: els.bhCreateNotes ? els.bhCreateNotes.value : null,
+    });
+    if (!data || !data.ok) {
+      setModalError(els.bhCreateError, DI.msg(data, {}) || (data && data.message) || '');
+      return;
+    }
+    closeModal(els.bhCreateModal);
+    showWarning(responseMessage(data, {}));
+  } finally {
+    busy = false;
+    await loadConfig();
+  }
+}
+
+function bulkheadById(id) {
+  return allBulkheads().find((b) => Number(b.id) === Number(id)) || null;
+}
+
+async function handleBulkheadButton(btn) {
+  const b = bulkheadById(btn.getAttribute('data-bh-id'));
+  if (!b) return;
+  const what = btn.getAttribute('data-dk-bh');
+  const ctx = {};
+  if (what === 'start') await runStartWithTransferConfirm({ action: 'start_bulkhead', bulkhead_id: b.id }, ctx);
+  else if (what === 'stop') await runAction({ action: 'stop_bulkhead', bulkhead_id: b.id }, ctx);
+  else if (what === 'finish') {
+    const ok = await askConfirm(
+      tr('dk.bhFinish.title'),
+      tr('dk.bhFinish.text', { n: b.bulkhead_number }),
+      tr('dk.btn.finishBulkhead')
+    );
+    if (ok) await runAction({ action: 'finish_bulkhead', bulkhead_id: b.id }, ctx);
+  } else if (what === 'workers') openBhWorkers(b);
+}
+
 async function handleDomeButton(btn) {
   const d = domeById(btn.getAttribute('data-dome-id'));
   if (!d) return;
   const what = btn.getAttribute('data-dk-dome');
-  const teamId = Number(btn.getAttribute('data-team-id')) || null;
-  const team = teamById(teamId);
+  const teamAttr = btn.getAttribute('data-team-id');
+  const teamId = teamAttr != null && teamAttr !== '' ? Number(teamAttr) : null;
+  const team = teamId != null ? teamById(teamId) : null;
   const ctx = { dome: d.dome_number, team: team ? team.team_name : null };
   if (what === 'start') {
-    if (!teamId) {
-      showWarning(() => tr('dome.err.select_team'));
-      return;
-    }
-    await runAction({ action: 'start_dome', dome_id: d.id, team_id: teamId }, ctx);
+    const body = { action: 'start_dome', dome_id: d.id };
+    if (Number.isInteger(teamId) && teamId > 0) body.team_id = teamId;
+    await runStartWithTransferConfirm(body, ctx);
   } else if (what === 'stop') {
     await runAction({ action: 'stop_dome', dome_id: d.id }, ctx);
   } else if (what === 'complete') openComplete(d);
@@ -688,6 +1063,11 @@ async function handleBoardClick(ev) {
     await handleDomeButton(domeBtn);
     return;
   }
+  const bhBtn = ev.target.closest('[data-dk-bh]');
+  if (bhBtn) {
+    await handleBulkheadButton(bhBtn);
+    return;
+  }
   const teamBtn = ev.target.closest('[data-dk]');
   if (teamBtn && !teamBtn.disabled) await handleTeamButton(teamBtn);
 }
@@ -707,17 +1087,50 @@ function bindChips() {
     createState.diameter = Number(b.getAttribute('data-diameter'));
     renderCreateChips();
   });
-  const toggleFab = (getSet, container, domeId) => (ev) => {
-    const b = ev.target.closest('[data-fab]');
-    if (!b) return;
-    const set = getSet();
-    const id = Number(b.getAttribute('data-fab'));
-    if (set.has(id)) set.delete(id);
-    else set.add(id);
-    container.innerHTML = fabChipsHtml(set, domeId());
-  };
-  els.createFabs.addEventListener('click', toggleFab(() => createState.fabs, els.createFabs, () => null));
-  els.fabsChips.addEventListener('click', toggleFab(() => fabsSelected, els.fabsChips, () => (fabsDome ? fabsDome.id : null)));
+  els.createFabs.addEventListener(
+    'click',
+    toggleFab(
+      () => createState.fabs,
+      () => renderCreateFabs(),
+      els.createFabs,
+      () => null,
+      () => createState.search
+    )
+  );
+  if (els.createSelected) {
+    els.createSelected.addEventListener(
+      'click',
+      toggleFab(
+        () => createState.fabs,
+        () => renderCreateFabs(),
+        els.createFabs,
+        () => null,
+        () => createState.search
+      )
+    );
+  }
+  els.fabsChips.addEventListener(
+    'click',
+    toggleFab(
+      () => fabsSelected,
+      null,
+      els.fabsChips,
+      () => (fabsDome ? fabsDome.id : null),
+      () => ''
+    )
+  );
+  if (els.createEmpSearch) {
+    const showList = () => {
+      if (els.createFabs) els.createFabs.hidden = false;
+      renderCreateFabs();
+    };
+    els.createEmpSearch.addEventListener('input', () => {
+      createState.search = els.createEmpSearch.value || '';
+      renderCreateFabs();
+    });
+    els.createEmpSearch.addEventListener('focus', showList);
+    els.createEmpSearch.addEventListener('click', showList);
+  }
 }
 
 function bindModals() {
@@ -725,6 +1138,7 @@ function bindModals() {
     b.addEventListener('click', () => closeModal($(b.getAttribute('data-close'))))
   );
   els.createForm.addEventListener('submit', (ev) => void submitCreate(ev));
+  if (els.bhCreateForm) els.bhCreateForm.addEventListener('submit', (ev) => void submitBhCreate(ev));
   els.completeForm.addEventListener('submit', (ev) => void submitComplete(ev));
   els.fabsForm.addEventListener('submit', (ev) => void submitFabs(ev));
   els.outList.addEventListener('click', (ev) => {
@@ -734,8 +1148,60 @@ function bindModals() {
   els.outSubmit.addEventListener('click', () => void submitEmployeeOut());
   els.confirmOk.addEventListener('click', () => finishConfirm(true));
   els.confirmCancel.addEventListener('click', () => finishConfirm(false));
-  els.teamCards.addEventListener('click', (ev) => void handleBoardClick(ev));
-  els.otherCards.addEventListener('click', (ev) => void handleBoardClick(ev));
+  if (els.btnCreateDome) els.btnCreateDome.addEventListener('click', () => void openCreate(null));
+  if (els.btnCreateBulkhead) els.btnCreateBulkhead.addEventListener('click', () => void openBhCreate());
+  if (els.bhCreateFabs) {
+    els.bhCreateFabs.addEventListener(
+      'click',
+      toggleFab(
+        () => bhCreateState.fabs,
+        () => renderBhCreateFabs(),
+        els.bhCreateFabs,
+        () => null,
+        () => bhCreateState.search
+      )
+    );
+  }
+  if (els.bhCreateSelected) {
+    els.bhCreateSelected.addEventListener(
+      'click',
+      toggleFab(
+        () => bhCreateState.fabs,
+        () => renderBhCreateFabs(),
+        els.bhCreateFabs,
+        () => null,
+        () => bhCreateState.search
+      )
+    );
+  }
+  if (els.bhCreateEmpSearch) {
+    const showList = () => {
+      if (els.bhCreateFabs) els.bhCreateFabs.hidden = false;
+      renderBhCreateFabs();
+    };
+    els.bhCreateEmpSearch.addEventListener('input', () => {
+      bhCreateState.search = els.bhCreateEmpSearch.value || '';
+      renderBhCreateFabs();
+    });
+    els.bhCreateEmpSearch.addEventListener('focus', showList);
+    els.bhCreateEmpSearch.addEventListener('click', showList);
+  }
+  if (els.btnBoardLunch) {
+    els.btnBoardLunch.addEventListener('click', () => void runAction({ action: 'lunch' }, {}));
+  }
+  if (els.btnBoardResume) {
+    els.btnBoardResume.addEventListener('click', () => void runAction({ action: 'resume' }, {}));
+  }
+  if (els.btnBoardEndShift) {
+    els.btnBoardEndShift.addEventListener('click', async () => {
+      const ok = await askConfirm(tr('dk.endShift.title'), tr('dk.endShift.boardText'), tr('dk.btn.endShift'));
+      if (ok) await runAction({ action: 'end_shift' }, {});
+    });
+  }
+  if (els.activeDomes) els.activeDomes.addEventListener('click', (ev) => void handleBoardClick(ev));
+  if (els.activeBulkheads) els.activeBulkheads.addEventListener('click', (ev) => void handleBoardClick(ev));
+  if (els.teamCards) els.teamCards.addEventListener('click', (ev) => void handleBoardClick(ev));
+  if (els.otherCards) els.otherCards.addEventListener('click', (ev) => void handleBoardClick(ev));
   els.logoutBtn.addEventListener('click', async () => {
     await api('/api/auth/kiosk-logout', { method: 'POST', body: '{}' });
     window.location.href = '/kiosk-login';

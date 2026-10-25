@@ -106,11 +106,72 @@
       .dk-chip.is-on { background: #1d4ed8; border-color: #1d4ed8; color: #fff; }
       .dk-fab-chip { display: grid; text-align: left; min-width: 150px; }
       .dk-fab-chip small { font-size: 0.78rem; font-weight: 700; opacity: 0.85; }
+      .dk-emp-dropdown {
+        display: flex;
+        flex-direction: column;
+        flex-wrap: nowrap;
+        gap: 6px;
+        max-height: min(42vh, 340px);
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
+        border: 2px solid #cbd5e1;
+        border-radius: 12px;
+        padding: 8px;
+        background: #fff;
+        margin-top: 8px;
+      }
+      .dk-emp-dropdown .dk-fab-chip {
+        width: 100%;
+        min-width: 0;
+        min-height: 52px;
+      }
+      .dk-emp-pick {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 44px;
+        padding: 8px 12px;
+        border: 2px solid #0ea5e9;
+        border-radius: 999px;
+        background: #e0f2fe;
+        color: #0c4a6e;
+        font-weight: 800;
+        font-size: 0.95rem;
+        cursor: pointer;
+        touch-action: manipulation;
+      }
+      .dk-emp-pick-x { font-size: 1.2rem; line-height: 1; opacity: 0.8; }
+      .dk-emp-pick-count { font-weight: 800; color: #334155; font-size: 0.9rem; }
       .dk-auto-fab { margin: 0; padding: 10px 12px; border: 2px solid #86efac; border-radius: 10px; background: #f0fdf4; font-weight: 800; color: #166534; overflow-wrap: anywhere; }
       .dk-modal-hint { margin: 0; font-weight: 700; color: #475569; }
       .dk-modal-error { margin: 0; font-weight: 800; color: #b91c1c; }
       .dk-modal-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }
       .dk-modal-actions button { min-height: 56px; min-width: 130px; font-size: 16px; font-weight: 800; }
+      .dk-board-actions { display: grid; grid-template-columns: 1.4fr repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
+      .dk-board-actions .btn-touch { min-height: 60px; font-size: 1.05rem; font-weight: 800; border-radius: 12px; }
+      .dk-board-actions .btn-touch--create { width: auto; }
+      .dk-active-board { margin-top: 16px; }
+      .dk-active-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); align-items: start; }
+      .dk-field textarea {
+        min-height: 96px; font-size: 1.05rem; font-weight: 700; border: 2px solid #94a3b8; border-radius: 10px;
+        padding: 10px 12px; resize: vertical; font-family: inherit;
+      }
+      .dk-emp-search { min-height: 52px !important; font-size: 1.05rem !important; font-weight: 700 !important; }
+      .dk-emp-selected {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        margin: 0 0 8px;
+        font-weight: 800;
+        color: #166534;
+      }
+      .dk-notes-preview { margin: 0; font-size: 0.9rem; font-weight: 700; color: #475569; overflow-wrap: anywhere; }
+      .dk-legacy-teams { margin-top: 22px; border-top: 2px dashed #cbd5e1; padding-top: 14px; }
+      @media (max-width: 720px) {
+        .dk-board-actions { grid-template-columns: 1fr 1fr; }
+        .dk-board-actions .btn-touch--create { grid-column: 1 / -1; }
+      }
       #confirmText { white-space: pre-line; font-weight: 700; color: #334155; margin: 0; }
       .employee-out-list { display: grid; gap: 10px; max-height: min(52vh, 420px); overflow-y: auto; }
       .employee-out-row {
@@ -137,21 +198,38 @@
       </header>
       <section class="kiosk-card scan-panel">
         <div class="scan-panel-head">
-          <h2 data-i18n="dk.scanTitle">Scan Team or Employee</h2>
-          <p data-i18n="dk.scanSub">Scan a Dome Team barcode to add its card. Tap a Team card to select it, then scan employee badges to add or move them to that team.</p>
+          <h2 data-i18n="dk.scanTitle">Dome Shop</h2>
+          <p data-i18n="dk.scanSub">Tap Create Dome or Create Bulkhead, select 1 to 3 employees, then Start. No team login required.</p>
         </div>
         <input id="scannerTrap" type="text" class="scanner-trap-input" tabindex="0" inputmode="none" autocomplete="off" readonly aria-label="Scanner" />
         <form id="scanForm" class="scan-input-row" autocomplete="off">
           <label for="manualBarcodeInput" data-i18n="dk.scanLabel">Scan barcode</label>
           <div class="scan-input-wrap scan-input-wrap--scanner">
-            <input id="manualBarcodeInput" type="text" placeholder="TEAM or EMPLOYEE barcode" data-i18n-placeholder="dk.scanPlaceholder" autocomplete="off" />
+            <input id="manualBarcodeInput" type="text" placeholder="EMPLOYEE barcode (optional)" data-i18n-placeholder="dk.scanPlaceholder" autocomplete="off" />
             <button id="scanButton" type="submit" class="scan-submit-btn" data-i18n="dk.scanBtn">Scan</button>
           </div>
         </form>
         <p id="scanWarning" class="scan-warning" role="alert" hidden></p>
 
-        <p id="teamsEmpty" class="ak-empty" data-i18n="dk.teamsEmpty" style="margin-top: 14px" hidden>No team on shift — scan your Dome Team barcode.</p>
-        <div id="teamCards" class="ak-team-grid" aria-live="polite"></div>
+        <div class="dk-board-actions">
+          <button type="button" class="btn-touch btn-touch--create" id="btnCreateDome" data-i18n="dk.btn.create">Create Dome</button>
+          <button type="button" class="btn-touch btn-touch--create" id="btnCreateBulkhead" data-i18n="dk.btn.createBulkhead">Create Bulkhead</button>
+          <button type="button" class="btn-secondary btn-touch" id="btnBoardLunch" data-i18n="dk.btn.lunch">Lunch</button>
+          <button type="button" class="btn-primary btn-touch" id="btnBoardResume" data-i18n="dk.btn.resume">Resume</button>
+          <button type="button" class="btn-secondary btn-touch" id="btnBoardEndShift" data-i18n="dk.btn.endShift">End Shift</button>
+        </div>
+
+        <section class="dk-active-board" aria-live="polite">
+          <h2 class="dk-section-title" data-i18n="dk.active.title">Domes in Production</h2>
+          <p id="domesEmpty" class="ak-empty" data-i18n="dk.active.empty" hidden>No domes in production. Tap Create Dome to begin.</p>
+          <div id="activeDomes" class="dk-active-grid"></div>
+        </section>
+
+        <section class="dk-active-board" aria-live="polite">
+          <h2 class="dk-section-title" data-i18n="dk.bulkhead.title">Bulkheads in Production</h2>
+          <p id="bulkheadsEmpty" class="ak-empty" data-i18n="dk.bulkhead.empty" hidden>No bulkheads in production. Tap Create Bulkhead to begin.</p>
+          <div id="activeBulkheads" class="dk-active-grid"></div>
+        </section>
 
         <section id="otherSection" class="dk-other" hidden>
           <h2 class="dk-section-title" data-i18n="dk.other.title">Other Domes in Production</h2>
@@ -162,6 +240,12 @@
         <section id="recentSection" class="dk-recent" hidden>
           <h2 class="dk-section-title" style="margin-top: 0" data-i18n="dk.recent">Recently Completed</h2>
           <div id="recentList"></div>
+        </section>
+
+        <section id="legacyTeamsSection" class="dk-legacy-teams" hidden>
+          <h2 class="dk-section-title" data-i18n="dk.legacyTeams">Optional Team Cards</h2>
+          <p id="teamsEmpty" class="ak-empty" data-i18n="dk.teamsEmpty" hidden>No team on shift.</p>
+          <div id="teamCards" class="ak-team-grid" aria-live="polite"></div>
         </section>
       </section>
     </main>
@@ -182,15 +266,47 @@
           <div id="createDiameters" class="dk-chips"></div>
         </div>
         <div class="dk-field">
-          <span data-i18n="dome.field.fabricators">Fabricators</span>
+          <span data-i18n="dk.create.workers">Workers (select 1 to 3)</span>
+          <p id="createFabHint" class="dk-modal-hint" data-i18n="dk.create.pickFab">Tap employee names. Same person cannot be selected twice.</p>
+          <p id="createSelected" class="dk-emp-selected" hidden></p>
+          <input id="createEmpSearch" class="dk-emp-search" type="search" autocomplete="off" data-i18n-placeholder="dk.create.searchPh" placeholder="Search employee name…" />
           <p id="createAutoFab" class="dk-auto-fab" hidden></p>
-          <p id="createFabHint" class="dk-modal-hint" hidden></p>
           <div id="createFabs" class="dk-chips"></div>
         </div>
+        <label class="dk-field">
+          <span data-i18n="dome.field.notes">Notes (optional)</span>
+          <textarea id="createNotes" maxlength="1000" data-i18n-placeholder="dk.create.notesPh" placeholder="Production notes…"></textarea>
+        </label>
         <p id="createError" class="dk-modal-error" hidden></p>
         <div class="dk-modal-actions">
           <button type="button" class="btn-secondary" data-close="createModal" data-i18n="dome.cancel">Cancel</button>
           <button type="submit" class="btn-primary" id="createSubmit" data-i18n="dk.create.title">Create Dome</button>
+        </div>
+      </form>
+    </div>
+
+    <div id="bhCreateModal" class="modal-note" hidden>
+      <form id="bhCreateForm" class="modal-note-card" autocomplete="off">
+        <h3 data-i18n="dk.bhCreate.title">Create Bulkhead</h3>
+        <label class="dk-field">
+          <span data-i18n="bi.field.number">Bulkhead Number</span>
+          <input id="bhCreateNumber" type="text" maxlength="40" placeholder="e.g. BH-1042" data-i18n-placeholder="dk.bhCreate.numberPh" />
+        </label>
+        <div class="dk-field">
+          <span data-i18n="dk.create.workers">Workers (select 1 to 3)</span>
+          <p class="dk-modal-hint" data-i18n="dk.create.pickFab">Tap employee names. Same person cannot be selected twice.</p>
+          <p id="bhCreateSelected" class="dk-emp-selected" hidden></p>
+          <input id="bhCreateEmpSearch" class="dk-emp-search" type="search" autocomplete="off" data-i18n-placeholder="dk.create.searchPh" placeholder="Search employee name…" />
+          <div id="bhCreateFabs" class="dk-chips"></div>
+        </div>
+        <label class="dk-field">
+          <span data-i18n="dome.field.notes">Notes (optional)</span>
+          <textarea id="bhCreateNotes" maxlength="1000" data-i18n-placeholder="dk.create.notesPh" placeholder="Production notes…"></textarea>
+        </label>
+        <p id="bhCreateError" class="dk-modal-error" hidden></p>
+        <div class="dk-modal-actions">
+          <button type="button" class="btn-secondary" data-close="bhCreateModal" data-i18n="dome.cancel">Cancel</button>
+          <button type="submit" class="btn-primary" data-i18n="dk.bhCreate.title">Create Bulkhead</button>
         </div>
       </form>
     </div>
@@ -250,7 +366,7 @@
     </div>
 
     <script src="/i18n.js"></script>
-    <script src="/dome-i18n.js?v=4"></script>
-    <script src="/dome-kiosk.js?v=2"></script>
+    <script src="/dome-i18n.js?v=10"></script>
+    <script src="/dome-kiosk.js?v=7"></script>
   </body>
 </html>
