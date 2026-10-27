@@ -6495,14 +6495,37 @@ app.post('/api/kiosk/winding/action', async (req, res) => {
           ? await phase3.finishInstall(machine, body)
           : await phase3.cancelInstall(machine, body);
       if (result.ok) {
-        await pool.query(
-          `UPDATE machines SET active_tank_id = NULL
-           WHERE id = $1 AND active_tank_id = (SELECT tank_id FROM dome_installations WHERE id = $2)
-             AND NOT EXISTS (SELECT 1 FROM machine_sessions ms
-                             WHERE ms.machine_id = $1 AND ms.tank_id = machines.active_tank_id AND ms.status IN ('running', 'stopped'))`,
-          [machine.id, Number(body.installation_id)]
-        );
-        Object.assign(result.body, await mapOpenSessionsPayload(machine.id, null));
+        const keepTank = result.body.keep_kiosk_tank === true;
+        const keepTankId =
+          result.body.tank_id != null
+            ? Number(result.body.tank_id)
+            : null;
+        if (keepTank && keepTankId) {
+          // FAB path: stay on this tank so Change Phase can continue without rescanning.
+          await phase1.setMachineActiveTank(machine.id, keepTankId);
+          const assignment = await phase1.getMachineAssignment(machine.id);
+          Object.assign(
+            result.body,
+            await mapOpenSessionsPayload(machine.id, keepTankId),
+            {
+              assignment,
+              pending: {
+                tank: result.body.tank_number || null,
+                piece: result.body.piece_number != null ? Number(result.body.piece_number) : null,
+              },
+            }
+          );
+        } else {
+          // Legacy post-QA Ready-for-Dome path: clear focus when no open FAB session remains.
+          await pool.query(
+            `UPDATE machines SET active_tank_id = NULL
+             WHERE id = $1 AND active_tank_id = (SELECT tank_id FROM dome_installations WHERE id = $2)
+               AND NOT EXISTS (SELECT 1 FROM machine_sessions ms
+                               WHERE ms.machine_id = $1 AND ms.tank_id = machines.active_tank_id AND ms.status IN ('running', 'stopped'))`,
+            [machine.id, Number(body.installation_id)]
+          );
+          Object.assign(result.body, await mapOpenSessionsPayload(machine.id, null));
+        }
       }
     } else if (
       (action === 'change_phase' || action === 'part_complete') &&

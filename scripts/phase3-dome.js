@@ -2268,13 +2268,16 @@ function createPhase3Dome(pool, helpers = {}) {
       return okResult({
         action: 'dome_install_finished',
         installation_id: Number(inst.id),
+        tank_id: inst.tank_id != null ? Number(inst.tank_id) : null,
         tank_number: inst.tank_number,
         piece_number: Number(inst.piece_number),
         dome_number: dome.dome_number,
         tank_status: nextTankStatus,
         fab_dome_install: fabPath,
+        // FAB path: keep kiosk on this tank so Change Phase can continue without rescanning.
+        keep_kiosk_tank: fabPath,
         message: fabPath
-          ? `Dome ${dome.dome_number} installed on Tank ${inst.tank_number}. Continue FAB — Tank Complete when ready for Assembly.`
+          ? `Dome ${dome.dome_number} installed on Tank ${inst.tank_number}. Select the next FAB phase when ready.`
           : `Dome ${dome.dome_number} installed on Tank ${inst.tank_number}. Tank status: Dome Installed.`,
       });
     });
@@ -2290,6 +2293,12 @@ function createPhase3Dome(pool, helpers = {}) {
       if (error) return error;
       const dome = await lockDome(client, inst.dome_id);
       const ts = nowIso();
+      const { rows: curTank } = await client.query(
+        `SELECT status FROM tanks WHERE id = $1 AND deleted_at IS NULL`,
+        [inst.tank_id]
+      );
+      const curStatus = curTank[0] ? curTank[0].status : null;
+      const fabPath = Boolean(curTank[0]) && !isDomeTankStatus(curStatus) && normalizeTankStatusKey(curStatus) !== 'dome_installed';
       await closeInstallSession(client, inst.current_session_id, ts);
       await client.query(
         `UPDATE dome_installations SET status = 'cancelled', cancelled_at = $2::timestamptz, cancel_reason = $3,
@@ -2304,6 +2313,11 @@ function createPhase3Dome(pool, helpers = {}) {
       return okResult({
         action: 'dome_install_cancelled',
         installation_id: Number(inst.id),
+        tank_id: inst.tank_id != null ? Number(inst.tank_id) : null,
+        tank_number: inst.tank_number,
+        piece_number: Number(inst.piece_number),
+        fab_dome_install: fabPath,
+        keep_kiosk_tank: fabPath,
         message: `Dome Install cancelled. Dome ${dome.dome_number} is back in available inventory.`,
       });
     });

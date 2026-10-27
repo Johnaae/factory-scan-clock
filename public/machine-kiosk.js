@@ -2354,17 +2354,47 @@ async function domeInstallAction(kind, inst) {
       installation_id: inst.installation_id,
     });
     if (data) {
-      const tankNorm = String(inst.tank_number || '').toUpperCase();
-      if (String(pendingTank || '').toUpperCase() === tankNorm) {
-        pendingTank = null;
-        pendingPiece = null;
-        resumablePhase = null;
-      }
+      const keepKiosk =
+        data.keep_kiosk_tank === true ||
+        data.fab_dome_install === true ||
+        (kind === 'finish' && data.tank_status && String(data.tank_status).toLowerCase() !== 'dome_installed');
       domeInstallMode = false;
-      if (kind === 'finish') showFinishBanner(DOME_I18N ? DOME_I18N.msg(data, vars) : data.message);
-      else warn(DOME_I18N ? DOME_I18N.msg(data, vars) : data.message);
+      domeInstallInProgress = null;
+      if (keepKiosk) {
+        // FAB path: stay on the same tank/piece — Change Phase can start the next phase.
+        pendingTank = data.tank_number || inst.tank_number || pendingTank;
+        if (data.piece_number != null) pendingPiece = Number(data.piece_number);
+        else if (inst.piece_number != null) pendingPiece = Number(inst.piece_number);
+        resumablePhase = null;
+        domeInstallAvailable = false;
+        if (data.pending && data.pending.tank) pendingTank = data.pending.tank;
+        if (data.pending && data.pending.piece != null) pendingPiece = Number(data.pending.piece);
+        if (Array.isArray(data.open_sessions)) openSessions = data.open_sessions;
+        if (Array.isArray(data.tank_open_sessions)) tankOpenSessions = data.tank_open_sessions;
+        warn(DOME_I18N ? DOME_I18N.msg(data, vars) : data.message);
+      } else {
+        // Legacy post-QA Ready-for-Dome: clear focus after install completes.
+        const tankNorm = String(inst.tank_number || '').toUpperCase();
+        if (String(pendingTank || '').toUpperCase() === tankNorm) {
+          pendingTank = null;
+          pendingPiece = null;
+          resumablePhase = null;
+        }
+        if (kind === 'finish') showFinishBanner(DOME_I18N ? DOME_I18N.msg(data, vars) : data.message);
+        else warn(DOME_I18N ? DOME_I18N.msg(data, vars) : data.message);
+      }
     }
     await loadConfig();
+    // loadConfig may overwrite pending from active_tank_number — restore FAB context if needed.
+    if (data && (data.keep_kiosk_tank === true || data.fab_dome_install === true)) {
+      if (!pendingTank && (data.tank_number || inst.tank_number)) {
+        pendingTank = data.tank_number || inst.tank_number;
+      }
+      if (pendingPiece == null && (data.piece_number != null || inst.piece_number != null)) {
+        pendingPiece = Number(data.piece_number != null ? data.piece_number : inst.piece_number);
+      }
+      renderUi();
+    }
     focusScanInput();
   } finally {
     domeActionBusy = false;
