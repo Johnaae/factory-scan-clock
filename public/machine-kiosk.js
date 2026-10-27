@@ -122,8 +122,10 @@ let noteMode = 'general'; // general | correction
 let pendingCorrectionBarcode = null;
 let downtimeReasons = [];
 let openQaQc = null;
-/** Phase 3: the selected tank passed Assembly/Testing/QA and only accepts Dome Install. */
+/** Legacy exclusive: post-QA Ready for Dome Install (tank-level only). */
 let domeInstallMode = false;
+/** FAB path: dome inventory install is available alongside normal FAB piece/phase UI. */
+let domeInstallAvailable = false;
 let domeInstallInProgress = null;
 let domeInstalls = [];
 let domePick = null;
@@ -601,12 +603,11 @@ function showChangePhaseConfirm(ph) {
     changePhaseContext.piece != null ? `Piece ${changePhaseContext.piece}` : `Tank ${changePhaseContext.tank}`;
   const fromLabel = changePhaseContext.currentPhase || '—';
   const toLabel = ph.label || ph.code || 'phase';
-  const isDomePick =
-    changePhaseContext.domeInstallMode && String(ph.code || '').toUpperCase() === 'DOME_INSTALL';
+  const isDomePick = String(ph.code || '').toUpperCase() === 'DOME_INSTALL';
   if (els.changePhaseConfirm) {
     els.changePhaseConfirm.hidden = false;
     els.changePhaseConfirm.textContent = isDomePick
-      ? `Open Dome Inventory to install a dome on Tank ${changePhaseContext.tank}?`
+      ? `Open Dome Inventory for Tank ${changePhaseContext.tank}? Current phase stays running until you select a dome.`
       : changePhaseContext.hasCurrentPhase
         ? `Change ${pieceLabel} from ${fromLabel} to ${toLabel}?`
         : `Start ${toLabel} on ${pieceLabel}?`;
@@ -1678,6 +1679,9 @@ async function loadConfig() {
   ) {
     const wasDome = domeInstallMode;
     domeInstallMode = data.active_tank_dome_install === true;
+    if (data.active_tank_dome_install_available != null) {
+      domeInstallAvailable = data.active_tank_dome_install_available === true;
+    }
     if (domeInstallMode) {
       pendingPiece = null;
       tankReworkRequired = false;
@@ -1710,6 +1714,7 @@ async function loadConfig() {
     tankReworkRequired = false;
     latestFailureNote = null;
     domeInstallMode = false;
+    domeInstallAvailable = false;
   }
   if (data.pending && data.pending.tank) pendingTank = data.pending.tank;
   if (data.pending && data.pending.piece != null) pendingPiece = Number(data.pending.piece);
@@ -1816,7 +1821,11 @@ async function consumeScanResult(data) {
   }
   if (data.action === 'dome_install_select') {
     closePieceSelectModal();
-    domeInstallMode = true;
+    // Exclusive mode only for legacy Ready-for-Dome tanks; FAB keeps normal piece UI.
+    if (data.dome_install_exclusive === true || data.dome_install_mode === true) {
+      domeInstallMode = true;
+    }
+    domeInstallAvailable = true;
     if (data.tank_number) pendingTank = data.tank_number;
     if (data.piece_number != null) pendingPiece = Number(data.piece_number);
     renderUi();
@@ -1826,6 +1835,7 @@ async function consumeScanResult(data) {
   if (data.action === 'team_assigned') {
     closePieceSelectModal();
     domeInstallMode = false;
+    domeInstallAvailable = false;
     pendingTank = null;
     pendingPiece = null;
     resumablePhase = null;
@@ -1976,6 +1986,10 @@ async function consumeScanResult(data) {
     pendingPiece = data.pending && data.pending.piece != null ? Number(data.pending.piece) : null;
     resumablePhase = data.resumable_phase || null;
     domeInstallMode = data.dome_install_mode === true;
+    domeInstallAvailable =
+      data.dome_install_available === true ||
+      data.dome_install_mode === true ||
+      data.active_tank_dome_install_available === true;
     tankReworkRequired =
       !domeInstallMode &&
       (data.rework_required === true || String(data.tank_status || '').toLowerCase() === 'rework_required');
@@ -1994,7 +2008,7 @@ async function consumeScanResult(data) {
       );
     }
     if (domeInstallMode) {
-      // Dome Install is tank-level: no Select Piece popup.
+      // Legacy Ready-for-Dome: tank-level only — no Select Piece popup.
       closePieceSelectModal();
       pendingPiece = null;
       domeInstallInProgress = data.dome_install_in_progress || null;
@@ -2148,11 +2162,12 @@ function pendingTankDomeInstallRunning() {
   );
 }
 
-/** Large green CTA — only when selected tank is Ready for Dome Install and no install is running. */
+/** Large green CTA — Ready-for-Dome exclusive mode OR FAB tank with dome_install_available. */
 function renderDomeInstallCta() {
   const wrap = domeEls.cta;
   if (!wrap) return;
-  const show = Boolean(domeInstallMode && pendingTank && !pendingTankDomeInstallRunning());
+  const eligible = Boolean(domeInstallMode || domeInstallAvailable);
+  const show = Boolean(eligible && pendingTank && !pendingTankDomeInstallRunning());
   wrap.hidden = !show;
   if (!show) return;
   if (domeEls.ctaTitle) domeEls.ctaTitle.textContent = domeTr('fdi.ctaTitle');
@@ -2171,7 +2186,7 @@ function findDomeInstallPhase() {
 
 /** Reuses the existing PHASE:DOME_INSTALL scan → dome_install_select → openDomePickModal path. */
 async function openDomeInstallFromCta() {
-  if (!domeInstallMode || !pendingTank || domeActionBusy || domePick) return;
+  if (!(domeInstallMode || domeInstallAvailable) || !pendingTank || domeActionBusy || domePick) return;
   if (pendingTankDomeInstallRunning()) return;
   if (domeEls.pickModal && !domeEls.pickModal.hidden && domeEls.pickModal.classList.contains('show')) {
     return;

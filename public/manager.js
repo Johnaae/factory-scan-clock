@@ -406,14 +406,24 @@ function tankDomeLine(t) {
   const d = t.dome_summary;
   const parts = [];
   if (d && d.installed && d.installed.length) {
-    parts.push(`${DI.tr('mgr.dome.domes')}: ${d.installed.map((x) => x.dome_number).join(', ')}`);
+    parts.push(
+      `${DI.tr('mgr.dome.installed')}: ${d.installed.map((x) => x.dome_number).join(', ')}`
+    );
   }
   if (d && d.in_progress && d.in_progress.length) {
     parts.push(DI.tr('mgr.dome.installing', { list: d.in_progress.map((x) => x.dome_number).join(', ') }));
   }
   if (d && d.override) parts.push(DI.tr('mgr.dome.override'));
   if (!parts.length && (st === 'ready_for_dome_install' || st === 'ready_for_final_completion')) {
-    parts.push(DI.tr('mgr.dome.none'));
+    parts.push(DI.tr('mgr.dome.pending'));
+  } else if (
+    !parts.length &&
+    st !== 'archived' &&
+    st !== 'completed' &&
+    st !== 'dome_installed'
+  ) {
+    // FAB → QA active tanks without a dome yet: Pending (Dome Install is optional before Assembly).
+    parts.push(DI.tr('mgr.dome.pending'));
   }
   if (!parts.length) return '';
   return `<div class="tank-dome-line" style="font-size:12px;font-weight:700;color:#1e40af;margin-top:3px">${escapeHtml(parts.join(' · '))}</div>`;

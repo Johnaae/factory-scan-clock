@@ -5339,8 +5339,9 @@ async function resolvePhaseTargetSession(machine, pending, openRows) {
 }
 
 /**
- * Fabrication scan of a tank that passed Assembly/Testing/QA: Dome Install only, at tank level
- * (no piece selection). A tank with a dome already installed has no Fabrication work left.
+ * Fabrication scan of a legacy post-QA Ready-for-Dome-Install tank: Dome Install only, at tank
+ * level (no piece selection). New workflow installs the dome during FAB before Assembly; those
+ * tanks use the normal FAB tank_selected path plus dome_install_available.
  */
 async function domeInstallTankSelected(machine, tankRow, assignment) {
   const live = await phase3.tankLiveInstallStatus(tankRow.id);
@@ -5371,6 +5372,8 @@ async function domeInstallTankSelected(machine, tankRow, assignment) {
       ok: true,
       action: 'tank_selected',
       dome_install_mode: true,
+      dome_install_exclusive: true,
+      dome_install_available: true,
       dome_install_tank_level: true,
       dome_install_in_progress: inProgress,
       assignment,
@@ -5393,13 +5396,11 @@ async function domeInstallTankSelected(machine, tankRow, assignment) {
 
 /**
  * Phase scan guard for Dome Install. Returns null to continue the normal Fabrication flow.
- * A running Dome Install session only accepts Finish/Cancel Install; a Ready for Dome Install
- * tank only accepts the Dome Install phase (which opens the dome picker); a Dome Installed tank
- * accepts no phase.
- *
- * Important: never fall through to changePhase/startSession for Ready-for-Dome tanks. An open
- * FAB session on the same tank used to skip this intercept and silently rename the phase to
- * Dome Install without the inventory picker — that path is closed.
+ * - Running Dome Install session → Finish/Cancel only.
+ * - Legacy Ready-for-Dome (post-QA) → exclusive: only DOME_INSTALL opens the inventory picker.
+ * - FAB tanks (before Assembly) → DOME_INSTALL opens the same inventory picker; other phases continue.
+ * - Legacy Dome Installed (post-QA finish) → no phases.
+ * Never fall through to changePhase for Ready-for-Dome or FAB DOME_INSTALL picker opens.
  */
 async function domeInstallPhaseIntercept(machine, ph, pending, focusedSession, body) {
   if (focusedSession && String(focusedSession.activity_code || '').toUpperCase() === 'DOME_INSTALL') {
@@ -5425,13 +5426,14 @@ async function domeInstallPhaseIntercept(machine, ph, pending, focusedSession, b
     tankRow = r.rows[0] || null;
   }
   if (!tankRow || isTankDeleted(tankRow)) return null;
-  // The phase after Dome Installed is not defined yet: refuse every phase (incl. Tank Complete).
+  // Legacy post-QA Dome Installed: refuse every phase (incl. Tank Complete).
   if (normalizeTankStatus(tankRow.status) === 'dome_installed') {
     return { ok: false, status: 409, body: tankProductionBlockBody(tankRow) };
   }
-  // Mid-FAB tanks keep the legacy "Dome Install" winding phase (changePhase / startSession).
-  if (!phase3.isDomeTankStatus(tankRow.status)) return null;
-  if (ph.code !== 'DOME_INSTALL') {
+  const legacyExclusive = phase3.isDomeTankStatus(tankRow.status);
+  const fabEligible = phase3.canStartDomeInstallOnTank(tankRow);
+  if (!legacyExclusive && !fabEligible) return null;
+  if (legacyExclusive && ph.code !== 'DOME_INSTALL') {
     return {
       ok: false,
       status: 409,
@@ -5443,7 +5445,8 @@ async function domeInstallPhaseIntercept(machine, ph, pending, focusedSession, b
       },
     };
   }
-  // Ready for Dome Install + DOME_INSTALL: open picker, or a clear 409 — never changePhase.
+  // FAB tanks: only intercept DOME_INSTALL (open picker); other phases use normal FAB flow.
+  if (!legacyExclusive && ph.code !== 'DOME_INSTALL') return null;
   if (focusedSession && String(focusedSession.activity_code || '').toUpperCase() === 'DOME_INSTALL') {
     return {
       ok: false,
@@ -5456,24 +5459,9 @@ async function domeInstallPhaseIntercept(machine, ph, pending, focusedSession, b
       },
     };
   }
-  const blocked = await phase3.tankInstallBlock(tankRow);
-  if (blocked) {
-    if (blocked.body && blocked.body.error === 'tank_in_use') {
-      return {
-        ok: false,
-        status: 409,
-        body: {
-          ok: false,
-          error: 'tank_in_use',
-          tank_number: tankRow.tank_number,
-          message:
-            `Tank ${tankRow.tank_number} still has an open Fabrication session. ` +
-            `Finish that work or End Shift before Dome Install. The phase was not changed.`,
-        },
-      };
-    }
-    return blocked;
-  }
+  // Open picker without finishing Chop/Wind/etc. Confirm (dome_install_start) transitions later.
+  const blocked = await phase3.tankInstallBlock(tankRow, { allowOpenFabWork: true });
+  if (blocked) return blocked;
   const available = await phase3.listAvailableDomes({});
   if (!available.ok) return available;
   return {
@@ -5484,15 +5472,38 @@ async function domeInstallPhaseIntercept(machine, ph, pending, focusedSession, b
       action: 'dome_install_select',
       tank_id: Number(tankRow.id),
       tank_number: tankRow.tank_number,
-      piece_number: null,
+      piece_number: pending.piece != null ? Number(pending.piece) : null,
+      dome_install_exclusive: legacyExclusive,
+      fab_phase_unchanged: true,
       domes: available.body.domes,
       diameters: available.body.diameters,
-      pending: { tank: tankRow.tank_number, piece: null },
+      pending: {
+        tank: tankRow.tank_number,
+        piece: pending.piece != null ? Number(pending.piece) : null,
+      },
       message: available.body.domes.length
-        ? 'Select the dome to install.'
-        : 'No completed domes are available in Dome Inventory.',
+        ? 'Select the dome to install. Current FAB phase stays running until you confirm.'
+        : 'No completed domes are available in Dome Inventory. Current FAB phase was not changed.',
     },
   };
+}
+
+/** Attach dome_install_available on normal FAB tank_selected responses. */
+async function withDomeInstallAvailability(body, tankRow) {
+  if (!body || !tankRow) return body;
+  try {
+    const eligible = phase3.canStartDomeInstallOnTank(tankRow);
+    const live = eligible ? await phase3.tankLiveInstallStatus(tankRow.id) : null;
+    const available = Boolean(eligible && (!live || live.status === 'in_progress'));
+    return {
+      ...body,
+      dome_install_available: available,
+      dome_install_exclusive: false,
+      dome_state: body.dome_state || (await phase3.getTankDomeState(tankRow.id)),
+    };
+  } catch (_err) {
+    return { ...body, dome_install_available: false };
+  }
 }
 
 async function focusedDomeInstallForMachine(machine) {
@@ -5773,27 +5784,30 @@ async function handleWindingScanAction(machine, body) {
       return {
         ok: true,
         status: 200,
-        body: {
-          ok: true,
-          action: 'tank_selected',
-          assignment,
-          pending,
-          pieces: configuredPieces,
-          piece_count: pieceCount,
-          tank_status: normalizeTankStatus(tankRow.status),
-          rework_required: reworkRequired,
-          latest_failure_note: latestFail ? latestFail.failure_note : null,
-          latest_test_failure: latestFail,
-          open_sessions: await Promise.all(openRows.map((r) => phase1.mapSession(r))),
-          tank_open_sessions: await Promise.all(tankSessions.map((r) => phase1.mapSession(r))),
-          message: reworkRequired
-            ? pieceCount === 1
-              ? 'REWORK REQUIRED — select Piece, then Correction/phase.'
-              : `REWORK REQUIRED — select Piece 1–${pieceCount}, then Correction/phase.`
-            : pieceCount === 1
-              ? 'Select Piece 1 for this tank.'
-              : `Select Piece 1–${pieceCount} for this tank.`,
-        },
+        body: await withDomeInstallAvailability(
+          {
+            ok: true,
+            action: 'tank_selected',
+            assignment,
+            pending,
+            pieces: configuredPieces,
+            piece_count: pieceCount,
+            tank_status: normalizeTankStatus(tankRow.status),
+            rework_required: reworkRequired,
+            latest_failure_note: latestFail ? latestFail.failure_note : null,
+            latest_test_failure: latestFail,
+            open_sessions: await Promise.all(openRows.map((r) => phase1.mapSession(r))),
+            tank_open_sessions: await Promise.all(tankSessions.map((r) => phase1.mapSession(r))),
+            message: reworkRequired
+              ? pieceCount === 1
+                ? 'REWORK REQUIRED — select Piece, then Correction/phase.'
+                : `REWORK REQUIRED — select Piece 1–${pieceCount}, then Correction/phase.`
+              : pieceCount === 1
+                ? 'Select Piece 1 for this tank.'
+                : `Select Piece 1–${pieceCount} for this tank.`,
+          },
+          tankRow
+        ),
       };
     }
     // Focus this tank on the kiosk even before a session starts so config polls
@@ -5807,27 +5821,30 @@ async function handleWindingScanAction(machine, body) {
     return {
       ok: true,
       status: 200,
-      body: {
-        ok: true,
-        action: 'tank_selected',
-        assignment,
-        pending,
-        pieces: configuredPieces,
-        piece_count: pieceCount,
-        tank_status: normalizeTankStatus(tankRow.status),
-        rework_required: reworkRequired,
-        latest_failure_note: latestFail ? latestFail.failure_note : null,
-        latest_test_failure: latestFail,
-        open_sessions: await Promise.all(openRows.map((r) => phase1.mapSession(r))),
-        resumable_phase: resumablePhase,
-        message: reworkRequired
-          ? pieceCount === 1
-            ? 'REWORK REQUIRED — select Piece, then Correction/phase.'
-            : `REWORK REQUIRED — select Piece 1–${pieceCount}, then Correction/phase.`
-          : pieceCount === 1
-            ? 'Select Piece 1 for this tank.'
-            : `Select Piece 1–${pieceCount} for this tank.`,
-      },
+      body: await withDomeInstallAvailability(
+        {
+          ok: true,
+          action: 'tank_selected',
+          assignment,
+          pending,
+          pieces: configuredPieces,
+          piece_count: pieceCount,
+          tank_status: normalizeTankStatus(tankRow.status),
+          rework_required: reworkRequired,
+          latest_failure_note: latestFail ? latestFail.failure_note : null,
+          latest_test_failure: latestFail,
+          open_sessions: await Promise.all(openRows.map((r) => phase1.mapSession(r))),
+          resumable_phase: resumablePhase,
+          message: reworkRequired
+            ? pieceCount === 1
+              ? 'REWORK REQUIRED — select Piece, then Correction/phase.'
+              : `REWORK REQUIRED — select Piece 1–${pieceCount}, then Correction/phase.`
+            : pieceCount === 1
+              ? 'Select Piece 1 for this tank.'
+              : `Select Piece 1–${pieceCount} for this tank.`,
+        },
+        tankRow
+      ),
     };
   }
 
@@ -6280,20 +6297,26 @@ app.get('/api/kiosk/winding/config', async (req, res) => {
     let piece_count = 0;
     let active_tank_number = null;
     let active_tank_dome_install = false;
+    let active_tank_dome_install_available = false;
     if (piecesTankId) {
       const tankMeta = await pool.query(
-        `SELECT tank_number, piece_count, status, deleted_at FROM tanks WHERE id = $1`,
+        `SELECT tank_number, piece_count, status, deleted_at, fab_completed_at FROM tanks WHERE id = $1`,
         [piecesTankId]
       );
       if (tankMeta.rows[0]) {
         const meta = tankMeta.rows[0];
-        if (
-          !meta.deleted_at &&
-          phase3.isDomeTankStatus(meta.status) &&
-          !openRows.some((r) => Number(r.tank_id) === Number(piecesTankId))
-        ) {
+        if (!meta.deleted_at) {
           const live = await phase3.tankLiveInstallStatus(piecesTankId);
-          active_tank_dome_install = !live || live.status !== 'installed';
+          if (
+            phase3.isDomeTankStatus(meta.status) &&
+            !openRows.some((r) => Number(r.tank_id) === Number(piecesTankId))
+          ) {
+            // Legacy exclusive Ready-for-Dome mode
+            active_tank_dome_install = !live || live.status !== 'installed';
+          }
+          if (phase3.canStartDomeInstallOnTank(meta)) {
+            active_tank_dome_install_available = !live || live.status === 'in_progress';
+          }
         }
         piece_count = Math.min(8, Math.max(1, Number(tankMeta.rows[0].piece_count) || 1));
         active_tank_number = tankMeta.rows[0].tank_number;
@@ -6355,6 +6378,7 @@ app.get('/api/kiosk/winding/config', async (req, res) => {
       active_tank_id: activeTankId,
       active_tank_number,
       active_tank_dome_install,
+      active_tank_dome_install_available,
       phase_time_summary: phaseTimeSummary,
       dome_installs: await phase3.listMachineInstalls(machine.id),
     });

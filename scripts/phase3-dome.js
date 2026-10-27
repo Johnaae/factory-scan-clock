@@ -14,7 +14,21 @@ const { DOME_DIAMETERS_FT, DOME_TYPES, PHASE3_DOME_RELATIONS } = require('./phas
 
 const DOME_INSTALL_PHASE = { code: 'DOME_INSTALL', label: 'Dome Install' };
 const READY_RECHECK_MS = 60000;
+/** Legacy post-QA "Ready for Dome Install" statuses (pre–Dome-in-FAB workflow). Still supported; not written by new QA PASS. */
 const DOME_TANK_STATUSES = ['ready_for_dome_install', 'ready_for_final_completion', 'ready_to_ship', 'final_ready'];
+
+/** Assembly / Testing / QA pipeline — Dome Install belongs in FAB before these (except legacy post-QA). */
+const ASSEMBLY_PIPELINE_STATUSES = new Set([
+  'ready_for_assembly',
+  'assembly_in_progress',
+  'removed_from_assembly',
+  'ready_for_testing',
+  'testing_in_progress',
+  'testing_failed',
+  'ready_for_qa',
+  'qa_in_progress',
+  'qa_failed',
+]);
 
 function errResult(status, error, message, extra = {}) {
   return { ok: false, status, body: { ok: false, error, message, ...extra } };
@@ -22,6 +36,13 @@ function errResult(status, error, message, extra = {}) {
 
 function okResult(body, status = 200) {
   return { ok: true, status, body: { ok: true, ...body } };
+}
+
+function normalizeTankStatusKey(status) {
+  return String(status == null ? '' : status)
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_');
 }
 
 function toMs(v) {
@@ -81,12 +102,26 @@ function parseDomeNotes(raw) {
   return s || null;
 }
 
+/** True when tank is in the legacy post-QA Ready-for-Dome-Install exclusive kiosk mode. */
 function isDomeTankStatus(status) {
-  const s = String(status == null ? '' : status)
-    .trim()
-    .toLowerCase()
-    .replace(/[\s-]+/g, '_');
-  return DOME_TANK_STATUSES.includes(s);
+  return DOME_TANK_STATUSES.includes(normalizeTankStatusKey(status));
+}
+
+/**
+ * Whether inventory Dome Install (picker) may start on this tank.
+ * - Legacy: ready_for_dome_install (and aliases) — exclusive post-QA path preserved.
+ * - New: FAB / rework on winding BEFORE Assembly (fab_completed_at null, or rework_required).
+ * Dome Install is NOT required before Assembly — existing soft gate remains Manager Complete Tank only.
+ */
+function canStartDomeInstallOnTank(tank) {
+  if (!tank || tank.deleted_at) return false;
+  const s = normalizeTankStatusKey(tank.status);
+  if (isDomeTankStatus(s)) return true;
+  if (s === 'dome_installed' || s === 'archived' || s === 'completed') return false;
+  if (ASSEMBLY_PIPELINE_STATUSES.has(s)) return false;
+  if (s === 'rework_required') return true;
+  if (tank.fab_completed_at) return false;
+  return true;
 }
 
 function mapDome(row) {
@@ -1959,13 +1994,16 @@ function createPhase3Dome(pool, helpers = {}) {
   }
 
   /**
-   * Fabrication guard before the dome picker: tank-level, so no piece is needed. Returns an error
-   * result when the tank already has a live install or open work, else null.
+   * Guard before opening the Dome Inventory picker (read-only until confirm).
+   * Allows an open FAB session on the same tank — Chop/Wind/etc. must stay Running until
+   * the worker confirms a dome (or cancels with no DB change).
    */
-  async function tankInstallBlock(tankRow) {
+  async function tankInstallBlock(tankRow, opts = {}) {
     if (!(await isReady())) return notReady();
     const live = await tankLiveInstall(pool, tankRow.id);
     if (live) return liveInstallError(tankRow, live);
+    // Picker open must not require Finish/End Shift — same-tank FAB work is OK.
+    if (opts.allowOpenFabWork) return null;
     const busy = await tankOpenWork(pool, tankRow.id);
     if (busy) return tankInUseError(tankRow, busy);
     return null;
@@ -1973,13 +2011,73 @@ function createPhase3Dome(pool, helpers = {}) {
 
   async function tankOpenWork(db, tankId) {
     const { rows } = await db.query(
-      `SELECT ms.id, m.name AS machine_name, t.name AS team_name
+      `SELECT ms.id, ms.machine_id, ms.status, ms.stopped_at, ms.activity_code, m.name AS machine_name, t.name AS team_name
        FROM machine_sessions ms LEFT JOIN machines m ON m.id = ms.machine_id LEFT JOIN teams t ON t.id = ms.team_id
        WHERE ms.tank_id = $1 AND ms.status IN ('running', 'stopped')
-       LIMIT 1`,
+       ORDER BY ms.started_at DESC`,
       [tankId]
     );
     return rows[0] || null;
+  }
+
+  async function listOpenFabSessionsForTank(db, tankId) {
+    const { rows } = await db.query(
+      `SELECT id, machine_id, status, stopped_at, activity_code, piece_number, team_id
+       FROM machine_sessions
+       WHERE tank_id = $1 AND status IN ('running', 'stopped')
+       ORDER BY started_at ASC
+       FOR UPDATE`,
+      [tankId]
+    );
+    if (!rows.length) return rows;
+    const machineIds = [...new Set(rows.map((r) => Number(r.machine_id)).filter((n) => n > 0))];
+    const teamIds = [...new Set(rows.map((r) => Number(r.team_id)).filter((n) => n > 0))];
+    const machines = machineIds.length
+      ? (
+          await db.query(`SELECT id, name FROM machines WHERE id = ANY($1::bigint[])`, [machineIds])
+        ).rows
+      : [];
+    const teams = teamIds.length
+      ? (await db.query(`SELECT id, name FROM teams WHERE id = ANY($1::bigint[])`, [teamIds])).rows
+      : [];
+    const mMap = new Map(machines.map((m) => [Number(m.id), m.name]));
+    const tMap = new Map(teams.map((t) => [Number(t.id), t.name]));
+    return rows.map((r) => ({
+      ...r,
+      machine_name: mMap.get(Number(r.machine_id)) || null,
+      team_name: tMap.get(Number(r.team_id)) || null,
+    }));
+  }
+
+  /** Finish open FAB sessions on this machine/tank so Dome Install can start (labor time preserved). */
+  async function finalizeOpenFabSessionsOnMachine(client, machineId, sessions, ts) {
+    for (const s of sessions) {
+      if (Number(s.machine_id) !== Number(machineId)) continue;
+      if (String(s.activity_code || '').toUpperCase() === 'DOME_INSTALL') continue;
+      // Close open downtime intervals on this session first.
+      const { rows: dt } = await client.query(
+        `SELECT id, started_at FROM downtime_intervals WHERE session_id = $1 AND ended_at IS NULL`,
+        [s.id]
+      );
+      for (const d of dt) {
+        const ms = Math.max(0, new Date(ts).getTime() - new Date(d.started_at).getTime());
+        await client.query(
+          `UPDATE downtime_intervals SET ended_at = $1::timestamptz, duration_ms = $2 WHERE id = $3`,
+          [ts, ms, d.id]
+        );
+      }
+      if (s.status === 'stopped' && s.stopped_at) {
+        await client.query(
+          `UPDATE machine_sessions SET status = 'finished', finished_at = stopped_at, updated_at = $1::timestamptz WHERE id = $2`,
+          [ts, s.id]
+        );
+      } else {
+        await client.query(
+          `UPDATE machine_sessions SET status = 'finished', finished_at = $1::timestamptz, updated_at = $1::timestamptz WHERE id = $2`,
+          [ts, s.id]
+        );
+      }
+    }
   }
 
   function tankInUseError(tank, busy) {
@@ -2002,24 +2100,32 @@ function createPhase3Dome(pool, helpers = {}) {
     const result = await withTransaction(async (client) => {
       const tank = await lockDomeTank(client, { tankId, tankNumber: body.tank_number });
       if (!tank || tank.deleted_at) return errResult(404, 'tank_not_found', 'Tank not found.');
-      if (!isDomeTankStatus(tank.status)) {
-        return errResult(409, 'not_ready_for_dome_install', `Tank ${tank.tank_number} is not Ready for Dome Install.`);
+      if (!canStartDomeInstallOnTank(tank)) {
+        return errResult(
+          409,
+          'not_ready_for_dome_install',
+          `Tank ${tank.tank_number} cannot start Dome Install in its current status (${tank.status || 'unknown'}). Dome Install is a FAB step before Assembly (legacy Ready for Dome Install tanks remain supported).`
+        );
       }
       const live = await tankLiveInstall(client, tank.id);
       if (live) return liveInstallError(tank, live);
-      const busy = await tankOpenWork(client, tank.id);
-      if (busy) return tankInUseError(tank, busy);
-      const { rows: pieceRows } = await client.query(
-        `SELECT id FROM tank_pieces WHERE tank_id = $1 AND piece_number = $2`,
-        [tank.id, pieceNumber]
-      );
-      const pieceId = pieceRows[0] ? Number(pieceRows[0].id) : null;
+      // Lock open FAB sessions. Other kiosks block; same-machine Chop/Wind/etc. finish here
+      // only after the worker confirmed a dome (picker open does not touch them).
+      const openSessions = await listOpenFabSessionsForTank(client, tank.id);
+      const otherMachine = openSessions.find((s) => Number(s.machine_id) !== Number(machine.id));
+      if (otherMachine) return tankInUseError(tank, otherMachine);
       const dome = await lockDome(client, domeId);
       if (!dome) return errResult(404, 'not_found', 'Dome not found.');
       if (dome.production_status !== 'completed' || dome.inventory_status !== 'available') {
         return errResult(409, 'dome_unavailable', `Dome ${dome.dome_number} is no longer available. Select a different dome.`);
       }
       const ts = nowIso();
+      await finalizeOpenFabSessionsOnMachine(client, machine.id, openSessions, ts);
+      const { rows: pieceRows } = await client.query(
+        `SELECT id FROM tank_pieces WHERE tank_id = $1 AND piece_number = $2`,
+        [tank.id, pieceNumber]
+      );
+      const pieceId = pieceRows[0] ? Number(pieceRows[0].id) : null;
       const sessionId = await insertInstallSession(client, {
         machineId: machine.id,
         teamId: assignment.team_id,
@@ -2131,13 +2237,25 @@ function createPhase3Dome(pool, helpers = {}) {
          WHERE id = $1`,
         [dome.id, ts, inst.tank_id, inst.tank_number, inst.piece_number]
       );
-      // Only advances the tank to "Dome Installed"; never archives / completes it.
-      const { rows: tankRows } = await client.query(
-        `UPDATE tanks SET status = 'dome_installed', updated_at = $2::timestamptz
-         WHERE id = $1 AND deleted_at IS NULL AND LOWER(TRIM(COALESCE(status, ''))) = ANY($3::text[])
-         RETURNING status`,
-        [inst.tank_id, ts, DOME_TANK_STATUSES]
+      // Legacy post-QA Ready-for-Dome tanks → dome_installed (waiting for Manager Complete).
+      // FAB-path installs leave the tank status unchanged so Tank Complete can still release to Assembly.
+      let nextTankStatus = null;
+      const { rows: curTank } = await client.query(
+        `SELECT status FROM tanks WHERE id = $1 AND deleted_at IS NULL FOR UPDATE`,
+        [inst.tank_id]
       );
+      const curStatus = curTank[0] ? curTank[0].status : null;
+      if (isDomeTankStatus(curStatus)) {
+        const { rows: tankRows } = await client.query(
+          `UPDATE tanks SET status = 'dome_installed', updated_at = $2::timestamptz
+           WHERE id = $1 AND deleted_at IS NULL AND LOWER(TRIM(COALESCE(status, ''))) = ANY($3::text[])
+           RETURNING status`,
+          [inst.tank_id, ts, DOME_TANK_STATUSES]
+        );
+        nextTankStatus = tankRows.length ? 'dome_installed' : null;
+      } else if (curTank[0]) {
+        nextTankStatus = normalizeTankStatusKey(curStatus) || curStatus;
+      }
       await logEvent(
         client,
         dome.id,
@@ -2146,14 +2264,18 @@ function createPhase3Dome(pool, helpers = {}) {
         `kiosk:${machine.name}`,
         ts
       );
+      const fabPath = !isDomeTankStatus(curStatus) && nextTankStatus !== 'dome_installed';
       return okResult({
         action: 'dome_install_finished',
         installation_id: Number(inst.id),
         tank_number: inst.tank_number,
         piece_number: Number(inst.piece_number),
         dome_number: dome.dome_number,
-        tank_status: tankRows.length ? 'dome_installed' : null,
-        message: `Dome ${dome.dome_number} installed on Tank ${inst.tank_number}. Tank status: Dome Installed.`,
+        tank_status: nextTankStatus,
+        fab_dome_install: fabPath,
+        message: fabPath
+          ? `Dome ${dome.dome_number} installed on Tank ${inst.tank_number}. Continue FAB — Tank Complete when ready for Assembly.`
+          : `Dome ${dome.dome_number} installed on Tank ${inst.tank_number}. Tank status: Dome Installed.`,
       });
     });
   }
@@ -2304,6 +2426,7 @@ function createPhase3Dome(pool, helpers = {}) {
   return {
     isReady,
     isDomeTankStatus,
+    canStartDomeInstallOnTank,
     getKioskConfig,
     assignTeam,
     createDome,
@@ -2367,7 +2490,9 @@ function createPhase3Dome(pool, helpers = {}) {
 module.exports = {
   createPhase3Dome,
   isDomeTankStatus,
+  canStartDomeInstallOnTank,
   DOME_INSTALL_PHASE,
+  DOME_TANK_STATUSES,
   parseDiameter,
   parseDomeType,
   parseWeight,

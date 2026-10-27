@@ -21,8 +21,8 @@
  *     requires_test=true + Testing still in progress → keep testing_in_progress
  *     requires_test=true + Testing not started → ready_for_testing
  *   CONFIRM TEST / START TESTING may run while Assembly is still in progress (or before Assembly)
- *   Workflow order: FAB → Assembly / Testing (parallel OK) → QA/QC → Ready for Dome Install
- *     → Dome Install → Dome Installed (waiting) → Manager Complete Tank archives
+ *   Workflow order: FAB (incl. optional Dome Install) → Assembly / Testing (parallel OK) → QA/QC
+ *     → Completed (archived). Legacy ready_for_dome_install / dome_installed rows remain supported.
  *   START TESTING → testing started (+ status testing_in_progress unless Assembly still owns status)
  *   One test per TESTING attempt (the other is locked once a test is started on that attempt)
  *   Vacuum START → RECORD END → Vacuum PASS/FAIL
@@ -31,16 +31,15 @@
  *     FAIL (either) → testing_failed (FAILED/HOLD); RETEST or existing FAB rework
  *   READY FOR QA/QC → Testing PASS recorded; ready_for_qa only if Assembly is also done;
  *     otherwise keep assembly_in_progress / ready_for_assembly until Assembly finishes
- *   START QA → qa_in_progress; QA PASS → ready_for_dome_install; QA FAIL → qa_failed
- *   FAB Dome Install (after QA PASS) → dome_installed (waiting for next Fabrication phase / Complete Tank)
+ *   START QA → qa_in_progress; QA PASS → archived (Completed); QA FAIL → qa_failed
+ *   FAB Dome Install (before Assembly) uses inventory picker; does not create a post-QA stage
  *   Legacy: tanks the old order parked in ready_for_qa (untested, QA not started) list under
  *     Ready for Testing and may START TESTING; legacy qa_in_progress tanks → QA PASS → ready_for_testing
  *   RETEST from testing_failed → new TESTING attempt (select Vacuum or Brine again)
  *   SEND BACK TO FAB REWORK from testing_failed or qa_failed → existing rework_required FAB workflow
  *   RESTORE TO ASSEMBLY from any Testing / QA/QC status → ready_for_assembly (open attempts cancelled)
  *   FAB Tank Complete after rework_required → ready_for_testing (skip re-Assembly; requires_test stays true)
- *   Manager Complete Tank → archived + completed_at (final factory completion / ready to ship;
- *     allowed from ready_for_dome_install or dome_installed; Phase 3 may require a dome or override)
+ *   Manager Complete Tank → archived (legacy ready_for_dome_install / dome_installed; dome gate/override)
  *   START/STOP WORK manage stage labor only; Tank Duration freezes at Assembly FINISH
  *   Team assign does NOT start labor
  *   Same employee cannot have two open stage_labor_participants rows
@@ -4566,11 +4565,13 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
       const user = opts.user || {};
       // Legacy tanks that reached QA before Testing (old order) still need Testing after QA PASS.
       const legacyNeedsTesting = tankRequiresTest(tank) && !tank.testing_completed_at;
+      // New workflow: QA PASS → Completed (archived). Do not write ready_for_dome_install.
+      // Legacy ready_for_dome_install rows already in the DB are left untouched (no bulk reclassify).
       const nextStatus =
         result === 'PASS'
           ? legacyNeedsTesting
             ? ASSEMBLY_STATUSES.READY_FOR_TESTING
-            : ASSEMBLY_STATUSES.READY_FOR_DOME_INSTALL
+            : ASSEMBLY_STATUSES.ARCHIVED
           : ASSEMBLY_STATUSES.QA_FAILED;
       await client.query(
         `INSERT INTO test_attempts
@@ -4600,6 +4601,10 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
              qa_failure_note = $5,
              qa_user_id = $6,
              qa_user_name = $7,
+             completed_at = CASE
+               WHEN $1::text = 'archived' THEN COALESCE(completed_at, $2::timestamptz)
+               ELSE completed_at
+             END,
              updated_at = $2::timestamptz
          WHERE id = $8`,
         [
@@ -4613,6 +4618,17 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
           tankId,
         ]
       );
+      if (nextStatus === ASSEMBLY_STATUSES.ARCHIVED) {
+        try {
+          await client.query(
+            `UPDATE machines SET active_tank_id = NULL, updated_at = $1::timestamptz
+             WHERE active_tank_id = $2`,
+            [ts, tankId]
+          );
+        } catch (_err) {
+          /* ignore */
+        }
+      }
       const updated = await getTankById(tankId, client);
       return okResult({
         action: 'qa_result',
@@ -4623,7 +4639,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
           result === 'PASS'
             ? nextStatus === ASSEMBLY_STATUSES.READY_FOR_TESTING
               ? 'QA PASS — tank is Ready for Testing.'
-              : 'QA PASS — tank is Completed (Ready for Dome Install).'
+              : 'QA PASS — tank is Completed.'
             : 'QA FAIL recorded. Tank marked QA Failed with reason preserved.',
       });
     });
