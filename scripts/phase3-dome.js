@@ -216,6 +216,13 @@ function createPhase3Dome(pool, helpers = {}) {
         if (c === 'idx_dome_installations_one_live') {
           return errResult(409, 'dome_unavailable', 'That dome was just assigned to another tank. Select a different dome.');
         }
+        if (c === 'idx_dome_installations_one_live_piece') {
+          return errResult(
+            409,
+            'dome_already_installed',
+            'This piece already has a live Dome Install. Finish or cancel it, or select another piece.'
+          );
+        }
         if (c === 'idx_dome_labor_participants_open_employee') {
           return errResult(409, 'employee_busy', 'An employee is already working on another dome.');
         }
@@ -1970,10 +1977,23 @@ function createPhase3Dome(pool, helpers = {}) {
     return Number(rows[0].id);
   }
 
-  /** In-progress or installed Dome Install on a tank (Dome Install is one per tank). */
+  /** In-progress or installed Dome Install for a specific tank piece. */
+  async function pieceLiveInstall(db, tankId, pieceNumber) {
+    const piece = Math.min(8, Math.max(1, Number(pieceNumber) || 1));
+    const { rows } = await db.query(
+      `SELECT i.id, i.status, i.piece_number, d.dome_number
+       FROM dome_installations i JOIN domes d ON d.id = i.dome_id
+       WHERE i.tank_id = $1 AND i.piece_number = $2 AND i.status IN ('in_progress', 'installed')
+       ORDER BY CASE WHEN i.status = 'in_progress' THEN 0 ELSE 1 END, i.started_at DESC LIMIT 1`,
+      [tankId, piece]
+    );
+    return rows[0] || null;
+  }
+
+  /** @deprecated tank-level helper — prefer pieceLiveInstall. Kept for exclusive legacy scans. */
   async function tankLiveInstall(db, tankId) {
     const { rows } = await db.query(
-      `SELECT i.id, i.status, d.dome_number FROM dome_installations i JOIN domes d ON d.id = i.dome_id
+      `SELECT i.id, i.status, i.piece_number, d.dome_number FROM dome_installations i JOIN domes d ON d.id = i.dome_id
        WHERE i.tank_id = $1 AND i.status IN ('in_progress', 'installed')
        ORDER BY CASE WHEN i.status = 'in_progress' THEN 0 ELSE 1 END, i.started_at DESC LIMIT 1`,
       [tankId]
@@ -1981,27 +2001,38 @@ function createPhase3Dome(pool, helpers = {}) {
     return rows[0] || null;
   }
 
-  function liveInstallError(tank, live) {
+  function liveInstallError(tank, live, pieceNumber) {
+    const piece = pieceNumber != null ? Number(pieceNumber) : live && live.piece_number != null ? Number(live.piece_number) : null;
+    const pieceLabel = piece != null ? ` Piece ${piece}` : '';
     return live.status === 'in_progress'
-      ? errResult(409, 'dome_install_in_progress', `Tank ${tank.tank_number} has a Dome Install in progress (Dome ${live.dome_number}). Tap Finish Install or Cancel Install.`, {
-          tank_number: tank.tank_number,
-          dome_number: live.dome_number,
-        })
-      : errResult(409, 'dome_already_installed', `Dome ${live.dome_number} is already installed on Tank ${tank.tank_number}.`, {
-          tank_number: tank.tank_number,
-          dome_number: live.dome_number,
-        });
+      ? errResult(
+          409,
+          'dome_install_in_progress',
+          `Tank ${tank.tank_number}${pieceLabel} has a Dome Install in progress (Dome ${live.dome_number}). Tap Finish Install or Cancel Install.`,
+          { tank_number: tank.tank_number, piece_number: piece, dome_number: live.dome_number }
+        )
+      : errResult(
+          409,
+          'dome_already_installed',
+          `Dome ${live.dome_number} is already installed on Tank ${tank.tank_number}${pieceLabel}. Select another piece to install a different dome.`,
+          { tank_number: tank.tank_number, piece_number: piece, dome_number: live.dome_number }
+        );
   }
 
   /**
    * Guard before opening the Dome Inventory picker (read-only until confirm).
-   * Allows an open FAB session on the same tank — Chop/Wind/etc. must stay Running until
-   * the worker confirms a dome (or cancels with no DB change).
+   * Checks the selected piece only — Piece 1 installed must not block Piece 2.
+   * Allows an open FAB session on the same tank/piece until confirm.
    */
   async function tankInstallBlock(tankRow, opts = {}) {
     if (!(await isReady())) return notReady();
-    const live = await tankLiveInstall(pool, tankRow.id);
-    if (live) return liveInstallError(tankRow, live);
+    const pieceNumber =
+      opts.pieceNumber != null ? Math.min(8, Math.max(1, Number(opts.pieceNumber) || 1)) : null;
+    const live =
+      pieceNumber != null
+        ? await pieceLiveInstall(pool, tankRow.id, pieceNumber)
+        : await tankLiveInstall(pool, tankRow.id);
+    if (live) return liveInstallError(tankRow, live, pieceNumber);
     // Picker open must not require Finish/End Shift — same-tank FAB work is OK.
     if (opts.allowOpenFabWork) return null;
     const busy = await tankOpenWork(pool, tankRow.id);
@@ -2049,10 +2080,15 @@ function createPhase3Dome(pool, helpers = {}) {
     }));
   }
 
-  /** Finish open FAB sessions on this machine/tank so Dome Install can start (labor time preserved). */
-  async function finalizeOpenFabSessionsOnMachine(client, machineId, sessions, ts) {
+  /**
+   * Finish open FAB sessions on this machine for the selected piece only so Dome Install can start
+   * (labor time preserved). Other pieces' sessions on the same tank are left running.
+   */
+  async function finalizeOpenFabSessionsOnMachine(client, machineId, sessions, ts, pieceNumber) {
+    const piece = pieceNumber != null ? Number(pieceNumber) : null;
     for (const s of sessions) {
       if (Number(s.machine_id) !== Number(machineId)) continue;
+      if (piece != null && Number(s.piece_number || 1) !== piece) continue;
       if (String(s.activity_code || '').toUpperCase() === 'DOME_INSTALL') continue;
       // Close open downtime intervals on this session first.
       const { rows: dt } = await client.query(
@@ -2089,13 +2125,17 @@ function createPhase3Dome(pool, helpers = {}) {
     );
   }
 
-  /** Dome Install is a tank-level operation; the session/install row is recorded on piece 1. */
+  /** Dome Install is piece-level; each tank piece may have its own installed dome. */
   async function startInstall(machine, assignment, body) {
     if (!(await isReady())) return notReady();
     if (!assignment) return errResult(409, 'need_team', 'Scan your Team barcode first.');
     const domeId = Number(body.dome_id);
     if (!Number.isInteger(domeId) || domeId <= 0) return errResult(400, 'dome_required', 'Select a dome.');
-    const pieceNumber = 1;
+    const rawPiece = body.piece_number != null ? Number(body.piece_number) : null;
+    if (!Number.isInteger(rawPiece) || rawPiece < 1 || rawPiece > 8) {
+      return errResult(400, 'need_piece', 'Select a Piece before Dome Install.');
+    }
+    const pieceNumber = rawPiece;
     const tankId = body.tank_id != null ? Number(body.tank_id) : null;
     const result = await withTransaction(async (client) => {
       const tank = await lockDomeTank(client, { tankId, tankNumber: body.tank_number });
@@ -2107,12 +2147,15 @@ function createPhase3Dome(pool, helpers = {}) {
           `Tank ${tank.tank_number} cannot start Dome Install in its current status (${tank.status || 'unknown'}). Dome Install is a FAB step before Assembly (legacy Ready for Dome Install tanks remain supported).`
         );
       }
-      const live = await tankLiveInstall(client, tank.id);
-      if (live) return liveInstallError(tank, live);
-      // Lock open FAB sessions. Other kiosks block; same-machine Chop/Wind/etc. finish here
-      // only after the worker confirmed a dome (picker open does not touch them).
+      const live = await pieceLiveInstall(client, tank.id, pieceNumber);
+      if (live) return liveInstallError(tank, live, pieceNumber);
+      // Lock open FAB sessions. Other kiosk on the same piece blocks; same-machine work on this
+      // piece finishes only after the worker confirmed a dome. Other pieces stay running.
       const openSessions = await listOpenFabSessionsForTank(client, tank.id);
-      const otherMachine = openSessions.find((s) => Number(s.machine_id) !== Number(machine.id));
+      const otherMachine = openSessions.find(
+        (s) =>
+          Number(s.machine_id) !== Number(machine.id) && Number(s.piece_number || 1) === pieceNumber
+      );
       if (otherMachine) return tankInUseError(tank, otherMachine);
       const dome = await lockDome(client, domeId);
       if (!dome) return errResult(404, 'not_found', 'Dome not found.');
@@ -2120,12 +2163,15 @@ function createPhase3Dome(pool, helpers = {}) {
         return errResult(409, 'dome_unavailable', `Dome ${dome.dome_number} is no longer available. Select a different dome.`);
       }
       const ts = nowIso();
-      await finalizeOpenFabSessionsOnMachine(client, machine.id, openSessions, ts);
+      await finalizeOpenFabSessionsOnMachine(client, machine.id, openSessions, ts, pieceNumber);
       const { rows: pieceRows } = await client.query(
         `SELECT id FROM tank_pieces WHERE tank_id = $1 AND piece_number = $2`,
         [tank.id, pieceNumber]
       );
-      const pieceId = pieceRows[0] ? Number(pieceRows[0].id) : null;
+      if (!pieceRows[0]) {
+        return errResult(409, 'need_piece', `Piece ${pieceNumber} is not configured on Tank ${tank.tank_number}.`);
+      }
+      const pieceId = Number(pieceRows[0].id);
       const sessionId = await insertInstallSession(client, {
         machineId: machine.id,
         teamId: assignment.team_id,
@@ -2162,7 +2208,7 @@ function createPhase3Dome(pool, helpers = {}) {
         tank_number: tank.tank_number,
         piece_number: pieceNumber,
         dome: mapDome(dome),
-        message: `Dome Install started — Dome ${dome.dome_number} on Tank ${tank.tank_number}.`,
+        message: `Dome Install started — Dome ${dome.dome_number} on Tank ${tank.tank_number} Piece ${pieceNumber}.`,
       });
     });
     if (result.ok) {
@@ -2277,7 +2323,7 @@ function createPhase3Dome(pool, helpers = {}) {
         // FAB path: keep kiosk on this tank so Change Phase can continue without rescanning.
         keep_kiosk_tank: fabPath,
         message: fabPath
-          ? `Dome ${dome.dome_number} installed on Tank ${inst.tank_number}. Select the next FAB phase when ready.`
+          ? `Dome ${dome.dome_number} installed on Tank ${inst.tank_number} Piece ${Number(inst.piece_number)}. Select another Piece or Change Phase when ready.`
           : `Dome ${dome.dome_number} installed on Tank ${inst.tank_number}. Tank status: Dome Installed.`,
       });
     });
@@ -2466,6 +2512,8 @@ function createPhase3Dome(pool, helpers = {}) {
     tankDomeSummaries,
     tankInstallBlock,
     tankLiveInstallStatus: async (tankId) => ((await isReady()) ? tankLiveInstall(pool, tankId) : null),
+    pieceLiveInstallStatus: async (tankId, pieceNumber) =>
+      (await isReady()) ? pieceLiveInstall(pool, tankId, pieceNumber) : null,
     startInstall,
     finishInstall,
     cancelInstall,

@@ -148,7 +148,9 @@
     'dk.msg.domeStopped': 'Dome {list} stopped — nobody is left working on it.',
 
     'fdi.title': 'Dome Install — Select Dome',
-    'fdi.sub': 'Tank {tank}',
+    'fdi.sub': 'Tank {tank} — Piece {piece}',
+    'fdi.needPiece': 'Select a Piece first, then Dome Install.',
+    'fdi.ctaSubPiece': 'Tap to select a completed dome for Piece {piece}',
     'fdi.empty': 'No completed domes match. Check Dome Inventory.',
     'fdi.confirmTitle': 'Start Dome Install?',
     'fdi.confirmText': 'Install Dome {dome} ({desc}) on Tank {tank}?',
@@ -165,7 +167,7 @@
     'fdi.readyStatus': 'Ready for Dome',
     'fdi.tapDomeInstall': 'Tank {tank}: tap the green DOME INSTALL button to choose a completed dome.',
     'fdi.ctaTitle': 'DOME INSTALL',
-    'fdi.ctaSub': 'Tap to select a completed dome',
+    'fdi.ctaSub': 'Select a Piece, then tap to choose a completed dome',
     'fdi.inProgress': 'Dome Install in progress on Tank {tank} (Dome {dome}). Tap Finish Install or Cancel Install.',
 
     'di.title': 'Dome Inventory',
@@ -262,6 +264,7 @@
     'mgr.dome.reasonShort': 'Enter a reason of at least 3 characters.',
     'mgr.dome.domes': 'Domes',
     'mgr.dome.installed': 'Dome Installed',
+    'mgr.dome.piece': 'P{piece}:{dome}',
     'mgr.dome.pending': 'Dome: Pending',
     'mgr.dome.none': 'No dome installed',
     'mgr.dome.override': 'Completed with override',
@@ -501,7 +504,9 @@
     'dk.msg.domeStopped': 'Domo {list} detenido — ya nadie trabaja en él.',
 
     'fdi.title': 'Instalación de Domo — Seleccione Domo',
-    'fdi.sub': 'Tanque {tank}',
+    'fdi.sub': 'Tanque {tank} — Pieza {piece}',
+    'fdi.needPiece': 'Seleccione una Pieza primero, luego Instalación de Domo.',
+    'fdi.ctaSubPiece': 'Toque para seleccionar un domo completado para la Pieza {piece}',
     'fdi.empty': 'No hay domos completados que coincidan. Revise el Inventario de Domos.',
     'fdi.confirmTitle': '¿Iniciar Instalación de Domo?',
     'fdi.confirmText': '¿Instalar el Domo {dome} ({desc}) en el Tanque {tank}?',
@@ -519,7 +524,7 @@
     'fdi.readyStatus': 'Listo para Domo',
     'fdi.tapDomeInstall': 'Tanque {tank}: toque el botón verde INSTALACIÓN DE DOMO para elegir un domo completado.',
     'fdi.ctaTitle': 'INSTALACIÓN DE DOMO',
-    'fdi.ctaSub': 'Toque para seleccionar un domo completado',
+    'fdi.ctaSub': 'Seleccione una Pieza y toque para elegir un domo completado',
     'fdi.inProgress':
       'Instalación de Domo en proceso en el Tanque {tank} (Domo {dome}). Toque Terminar Instalación o Cancelar Instalación.',
 
@@ -618,6 +623,7 @@
     'mgr.dome.reasonShort': 'Ingrese un motivo de al menos 3 caracteres.',
     'mgr.dome.domes': 'Domos',
     'mgr.dome.installed': 'Domo Instalado',
+    'mgr.dome.piece': 'P{piece}:{dome}',
     'mgr.dome.pending': 'Domo: Pendiente',
     'mgr.dome.none': 'Sin domo instalado',
     'mgr.dome.override': 'Completado con excepción',

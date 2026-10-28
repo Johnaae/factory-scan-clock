@@ -2148,30 +2148,33 @@ function renderDomeInstallPanel() {
   }
 }
 
-function pendingTankDomeInstallRunning() {
+function pendingPieceDomeInstallRunning() {
   if (!pendingTank) return null;
   const tankNorm = String(pendingTank).toUpperCase();
-  return (
-    (domeInstalls || []).find(
-      (i) => i && i.status === 'in_progress' && String(i.tank_number || '').toUpperCase() === tankNorm
-    ) ||
-    (domeInstallInProgress &&
-    String(domeInstallInProgress.tank_number || '').toUpperCase() === tankNorm
-      ? domeInstallInProgress
-      : null)
-  );
+  const piece = selectedPieceNumber();
+  const match = (i) => {
+    if (!i || i.status !== 'in_progress') return false;
+    if (String(i.tank_number || '').toUpperCase() !== tankNorm) return false;
+    if (piece == null) return true;
+    return Number(i.piece_number || 1) === Number(piece);
+  };
+  return (domeInstalls || []).find(match) || (match(domeInstallInProgress) ? domeInstallInProgress : null);
 }
 
-/** Large green CTA — Ready-for-Dome exclusive mode OR FAB tank with dome_install_available. */
+/** Large green CTA — same workflow as Change Phase → Dome Install (requires selected piece on FAB). */
 function renderDomeInstallCta() {
   const wrap = domeEls.cta;
   if (!wrap) return;
   const eligible = Boolean(domeInstallMode || domeInstallAvailable);
-  const show = Boolean(eligible && pendingTank && !pendingTankDomeInstallRunning());
+  const show = Boolean(eligible && pendingTank && !pendingPieceDomeInstallRunning());
   wrap.hidden = !show;
   if (!show) return;
   if (domeEls.ctaTitle) domeEls.ctaTitle.textContent = domeTr('fdi.ctaTitle');
-  if (domeEls.ctaSub) domeEls.ctaSub.textContent = domeTr('fdi.ctaSub');
+  if (domeEls.ctaSub) {
+    const piece = selectedPieceNumber();
+    domeEls.ctaSub.textContent =
+      piece != null ? domeTr('fdi.ctaSubPiece', { piece }) : domeTr('fdi.ctaSub');
+  }
   if (domeEls.ctaBtn) {
     domeEls.ctaBtn.disabled = Boolean(domeActionBusy);
     domeEls.ctaBtn.setAttribute('aria-label', domeTr('fdi.ctaTitle'));
@@ -2184,10 +2187,15 @@ function findDomeInstallPhase() {
   return { code: 'DOME_INSTALL', barcode: 'PHASE:DOME_INSTALL', label: 'Dome Install' };
 }
 
-/** Reuses the existing PHASE:DOME_INSTALL scan → dome_install_select → openDomePickModal path. */
+/** Same path as Change Phase → Dome Install: requires selected piece, then PHASE:DOME_INSTALL. */
 async function openDomeInstallFromCta() {
   if (!(domeInstallMode || domeInstallAvailable) || !pendingTank || domeActionBusy || domePick) return;
-  if (pendingTankDomeInstallRunning()) return;
+  if (!domeInstallMode && selectedPieceNumber() == null) {
+    warn(domeTr('fdi.needPiece'));
+    focusScanInput();
+    return;
+  }
+  if (pendingPieceDomeInstallRunning()) return;
   if (domeEls.pickModal && !domeEls.pickModal.hidden && domeEls.pickModal.classList.contains('show')) {
     return;
   }

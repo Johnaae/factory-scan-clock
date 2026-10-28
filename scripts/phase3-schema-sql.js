@@ -104,6 +104,9 @@ CREATE TABLE IF NOT EXISTS dome_installations (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_dome_installations_one_live
   ON dome_installations (dome_id) WHERE status IN ('in_progress', 'installed');
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dome_installations_one_live_piece
+  ON dome_installations (tank_id, piece_number)
+  WHERE status IN ('in_progress', 'installed') AND tank_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_dome_installations_tank ON dome_installations (tank_id, status);
 
 CREATE TABLE IF NOT EXISTS dome_installation_sessions (
@@ -145,6 +148,24 @@ DROP INDEX IF EXISTS idx_domes_number_unique;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_domes_number_unique
   ON domes (UPPER(TRIM(dome_number))) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_domes_deleted_at ON domes (deleted_at) WHERE deleted_at IS NOT NULL;
+`;
+
+/**
+ * Multi-piece Dome Install — additive index only.
+ * One live install per (tank_id, piece_number). Does NOT drop anything.
+ * Companion JS (ensurePhase3DomePieceInstall) creates this first, then safely drops any
+ * obsolete tank-only unique index, while preserving idx_dome_installations_one_live on dome_id.
+ */
+const PHASE3_DOME_PIECE_INSTALL_SQL = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dome_installations_one_live_piece
+  ON dome_installations (tank_id, piece_number)
+  WHERE status IN ('in_progress', 'installed') AND tank_id IS NOT NULL;
+`;
+
+/** Dome-id uniqueness (one live install per inventory dome). Kept separate for recreate-if-wrong. */
+const PHASE3_DOME_ONE_LIVE_DOME_SQL = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dome_installations_one_live
+  ON dome_installations (dome_id) WHERE status IN ('in_progress', 'installed');
 `;
 
 /**
@@ -275,6 +296,7 @@ const PHASE3_DOME_RELATIONS = [
   'idx_dome_labor_participants_open_employee',
   'dome_installations',
   'idx_dome_installations_one_live',
+  'idx_dome_installations_one_live_piece',
   'idx_dome_installations_tank',
   'dome_installation_sessions',
   'idx_dome_installation_sessions_session',
@@ -311,6 +333,8 @@ const DOME_TYPES = ['Petro', 'Water'];
 module.exports = {
   PHASE3_DOME_SQL,
   PHASE3_DOME_SOFT_DELETE_SQL,
+  PHASE3_DOME_PIECE_INSTALL_SQL,
+  PHASE3_DOME_ONE_LIVE_DOME_SQL,
   PHASE3_DOME_RELATIONS,
   PHASE3_BULKHEAD_SQL,
   PHASE3_BULKHEAD_ONE_LIVE_TANK_SQL,

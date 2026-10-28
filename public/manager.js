@@ -407,11 +407,27 @@ function tankDomeLine(t) {
   const parts = [];
   if (d && d.installed && d.installed.length) {
     parts.push(
-      `${DI.tr('mgr.dome.installed')}: ${d.installed.map((x) => x.dome_number).join(', ')}`
+      `${DI.tr('mgr.dome.installed')}: ${d.installed
+        .map((x) =>
+          x.piece_number != null
+            ? DI.tr('mgr.dome.piece', { piece: x.piece_number, dome: x.dome_number })
+            : x.dome_number
+        )
+        .join(', ')}`
     );
   }
   if (d && d.in_progress && d.in_progress.length) {
-    parts.push(DI.tr('mgr.dome.installing', { list: d.in_progress.map((x) => x.dome_number).join(', ') }));
+    parts.push(
+      DI.tr('mgr.dome.installing', {
+        list: d.in_progress
+          .map((x) =>
+            x.piece_number != null
+              ? DI.tr('mgr.dome.piece', { piece: x.piece_number, dome: x.dome_number })
+              : x.dome_number
+          )
+          .join(', '),
+      })
+    );
   }
   if (d && d.override) parts.push(DI.tr('mgr.dome.override'));
   if (!parts.length && (st === 'ready_for_dome_install' || st === 'ready_for_final_completion')) {

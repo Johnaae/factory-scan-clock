@@ -860,6 +860,7 @@ UPDATE machines SET workflow = 'winding' WHERE workflow = 'winding' OR name ILIK
   await ensureEmployeeShopsSchema(client, log);
   await ensurePhase3DomeSchema(client, log);
   await ensurePhase3DomeSoftDelete(client, log);
+  await ensurePhase3DomePieceInstall(client, log);
   await ensurePhase3BulkheadSchema(client, log);
 }
 
@@ -971,6 +972,7 @@ async function ensurePhase3DomeSchema(client, log = console) {
  * Soft-delete columns + partial unique dome_number index. Always safe to re-run (IF NOT EXISTS).
  * Runs even when base dome tables already exist so production can gain Delete Dome without
  * recreating tables. Noncritical — delete API returns not-ready until columns exist.
+ * Multi-piece Dome Install indexes live in ensurePhase3DomePieceInstall (not here).
  */
 async function ensurePhase3DomeSoftDelete(client, log = console) {
   if (!phase3SchemaSql) return { ok: false, error: 'phase3-schema-sql not loaded' };
@@ -999,6 +1001,237 @@ async function ensurePhase3DomeSoftDelete(client, log = console) {
     log.warn('[migration] Phase 3 dome soft-delete (noncritical, retried on next start):', err.message);
     return { ok: false, error: err.message };
   }
+}
+
+/**
+ * List non-primary unique indexes on dome_installations with ordered key column names.
+ * Used to detect obsolete tank-only unique indexes vs the required dome_id / piece indexes.
+ */
+async function listDomeInstallationUniqueIndexes(client) {
+  const { rows } = await client.query(`
+    SELECT
+      i.relname AS index_name,
+      pg_get_indexdef(i.oid) AS index_def,
+      COALESCE(
+        (
+          SELECT array_agg(a.attname::text ORDER BY u.ord)
+          FROM unnest(ix.indkey) WITH ORDINALITY AS u(attnum, ord)
+          JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = u.attnum
+          WHERE u.attnum > 0
+        ),
+        ARRAY[]::text[]
+      ) AS key_columns
+    FROM pg_class t
+    JOIN pg_namespace n ON n.oid = t.relnamespace AND n.nspname = 'public'
+    JOIN pg_index ix ON ix.indrelid = t.oid
+    JOIN pg_class i ON i.oid = ix.indexrelid
+    WHERE t.relname = 'dome_installations'
+      AND ix.indisunique
+      AND NOT ix.indisprimary
+    ORDER BY i.relname
+  `);
+  return rows.map((r) => ({
+    index_name: r.index_name,
+    index_def: r.index_def,
+    key_columns: Array.isArray(r.key_columns) ? r.key_columns.map(String) : [],
+  }));
+}
+
+function isDomeIdLiveUniqueIndex(idx) {
+  return (
+    idx.key_columns.length === 1 &&
+    idx.key_columns[0] === 'dome_id' &&
+    /status/i.test(idx.index_def || '') &&
+    /in_progress/i.test(idx.index_def || '')
+  );
+}
+
+function isPieceLiveUniqueIndex(idx) {
+  return (
+    idx.key_columns.length === 2 &&
+    idx.key_columns[0] === 'tank_id' &&
+    idx.key_columns[1] === 'piece_number' &&
+    /status/i.test(idx.index_def || '') &&
+    /in_progress/i.test(idx.index_def || '')
+  );
+}
+
+/** Obsolete: unique live install per tank only (blocks Piece 2+ on the same tank). */
+function isObsoleteTankOnlyLiveUniqueIndex(idx) {
+  if (idx.key_columns.length !== 1 || idx.key_columns[0] !== 'tank_id') return false;
+  // Prefer dropping indexes that clearly target live install statuses; also drop known names.
+  const name = String(idx.index_name || '');
+  if (
+    name === 'idx_dome_installations_one_live_tank' ||
+    name === 'idx_dome_installations_one_live' ||
+    /one_live/i.test(name)
+  ) {
+    return true;
+  }
+  return /status/i.test(idx.index_def || '') && /in_progress/i.test(idx.index_def || '');
+}
+
+/**
+ * Multi-piece Dome Install index migration (idempotent, non-destructive).
+ *
+ * Order:
+ *  1) Create/validate idx_dome_installations_one_live_piece (tank_id, piece_number)
+ *  2) Ensure idx_dome_installations_one_live remains on dome_id (recreate if missing/wrong)
+ *  3) DROP any obsolete tank-only unique live index (never drops the dome_id unique)
+ *
+ * Does NOT delete or rewrite dome_installations rows. If duplicates prevent creating the
+ * piece index, logs a warning and skips the tank-index DROP so data stays intact.
+ */
+async function ensurePhase3DomePieceInstall(client, log = console) {
+  if (!phase3SchemaSql) return { ok: false, error: 'phase3-schema-sql not loaded' };
+  const { PHASE3_DOME_PIECE_INSTALL_SQL, PHASE3_DOME_ONE_LIVE_DOME_SQL } = phase3SchemaSql;
+  try {
+    const tableCheck = await client.query(
+      `SELECT 1 FROM information_schema.tables
+       WHERE table_schema = 'public' AND table_name = 'dome_installations'`
+    );
+    if (!tableCheck.rows.length) return { ok: true, skipped: true, reason: 'no_dome_installations' };
+
+    // Report conflicts only — never auto-delete or rewrite historical rows.
+    const pieceConflicts = await client.query(`
+      SELECT tank_id, piece_number, COUNT(*)::int AS n
+      FROM dome_installations
+      WHERE status IN ('in_progress', 'installed') AND tank_id IS NOT NULL
+      GROUP BY tank_id, piece_number
+      HAVING COUNT(*) > 1
+    `);
+    const domeConflicts = await client.query(`
+      SELECT dome_id, COUNT(*)::int AS n
+      FROM dome_installations
+      WHERE status IN ('in_progress', 'installed')
+      GROUP BY dome_id
+      HAVING COUNT(*) > 1
+    `);
+    if (pieceConflicts.rows.length) {
+      log.warn(
+        '[migration] Phase 3 multi-piece index blocked: duplicate live installs on same tank piece (no rows modified):',
+        pieceConflicts.rows.slice(0, 5)
+      );
+    }
+    if (domeConflicts.rows.length) {
+      log.warn(
+        '[migration] Phase 3 dome_id unique blocked: duplicate live installs for same dome (no rows modified):',
+        domeConflicts.rows.slice(0, 5)
+      );
+    }
+
+    await client.query('BEGIN');
+    let pieceReady = false;
+    let domeReady = false;
+    let dropped = [];
+    try {
+      await client.query(`SELECT set_config('lock_timeout', '8000', true)`);
+      await client.query(`SELECT set_config('statement_timeout', '20000', true)`);
+      await client.query('SELECT pg_advisory_xact_lock($1)', [SCHEMA_LOCK_KEY]);
+
+      let indexes = await listDomeInstallationUniqueIndexes(client);
+
+      // --- Step 1: create / validate per-piece unique index first ---
+      const pieceIdx = indexes.find((i) => i.index_name === 'idx_dome_installations_one_live_piece');
+      if (pieceIdx && isPieceLiveUniqueIndex(pieceIdx)) {
+        pieceReady = true;
+      } else if (pieceIdx && !isPieceLiveUniqueIndex(pieceIdx)) {
+        // Wrong definition under the expected name — drop only this index object, then recreate.
+        // Does not touch installation rows.
+        await client.query(`DROP INDEX IF EXISTS idx_dome_installations_one_live_piece`);
+        dropped.push('idx_dome_installations_one_live_piece(wrong_def)');
+        indexes = indexes.filter((i) => i.index_name !== 'idx_dome_installations_one_live_piece');
+      }
+
+      if (!pieceReady) {
+        if (pieceConflicts.rows.length) {
+          // Leave DB unchanged rather than failing the whole additive pass.
+          await client.query('ROLLBACK');
+          return {
+            ok: false,
+            error: 'duplicate_live_piece_installs',
+            conflicts: pieceConflicts.rows,
+          };
+        }
+        await client.query(PHASE3_DOME_PIECE_INSTALL_SQL);
+        indexes = await listDomeInstallationUniqueIndexes(client);
+        const created = indexes.find((i) => i.index_name === 'idx_dome_installations_one_live_piece');
+        pieceReady = Boolean(created && isPieceLiveUniqueIndex(created));
+        if (!pieceReady) {
+          throw new Error('idx_dome_installations_one_live_piece missing or wrong after CREATE');
+        }
+      }
+
+      // --- Step 2: ensure dome_id unique remains (same dome cannot be installed twice) ---
+      indexes = await listDomeInstallationUniqueIndexes(client);
+      const namedLive = indexes.find((i) => i.index_name === 'idx_dome_installations_one_live');
+      const anyDomeLive = indexes.find((i) => isDomeIdLiveUniqueIndex(i));
+
+      if (namedLive && isDomeIdLiveUniqueIndex(namedLive)) {
+        domeReady = true;
+      } else if (namedLive && isObsoleteTankOnlyLiveUniqueIndex(namedLive)) {
+        // Name reused for a tank-only unique — drop AFTER piece index is validated, then recreate on dome_id.
+        // Deferred to step 3 drop loop; recreate below after drops.
+        domeReady = false;
+      } else if (namedLive && !isDomeIdLiveUniqueIndex(namedLive)) {
+        await client.query(`DROP INDEX IF EXISTS idx_dome_installations_one_live`);
+        dropped.push('idx_dome_installations_one_live(wrong_def)');
+        domeReady = false;
+      } else if (anyDomeLive) {
+        // Correct uniqueness exists under another name — leave it; also ensure canonical name.
+        domeReady = true;
+        if (!namedLive) {
+          if (!domeConflicts.rows.length) {
+            await client.query(PHASE3_DOME_ONE_LIVE_DOME_SQL);
+          }
+        }
+      }
+
+      // --- Step 3: drop obsolete tank-only unique indexes (multi-piece unblock) ---
+      indexes = await listDomeInstallationUniqueIndexes(client);
+      for (const idx of indexes) {
+        if (!isObsoleteTankOnlyLiveUniqueIndex(idx)) continue;
+        // Never drop a dome_id unique; isObsoleteTankOnlyLiveUniqueIndex requires tank_id-only keys.
+        await client.query(`DROP INDEX IF EXISTS ${quoteIdent(idx.index_name)}`);
+        dropped.push(idx.index_name);
+      }
+
+      // Recreate dome_id unique if still missing after dropping a misnamed tank-level index.
+      indexes = await listDomeInstallationUniqueIndexes(client);
+      const domeAfter = indexes.find((i) => isDomeIdLiveUniqueIndex(i));
+      if (domeAfter) {
+        domeReady = true;
+      } else if (!domeConflicts.rows.length) {
+        await client.query(PHASE3_DOME_ONE_LIVE_DOME_SQL);
+        indexes = await listDomeInstallationUniqueIndexes(client);
+        domeReady = Boolean(indexes.find((i) => isDomeIdLiveUniqueIndex(i)));
+        if (!domeReady) throw new Error('idx_dome_installations_one_live missing after recreate');
+      } else {
+        log.warn(
+          '[migration] Phase 3 skipped recreating dome_id unique due to duplicate live dome rows (no data modified)'
+        );
+      }
+
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    }
+
+    if (dropped.length) {
+      log.log('[migration] Phase 3 multi-piece Dome Install: dropped obsolete tank unique index(es):', dropped.join(', '));
+    } else if (pieceReady && domeReady) {
+      log.log('[migration] Phase 3 multi-piece Dome Install indexes verified');
+    }
+    return { ok: pieceReady && domeReady, pieceReady, domeReady, dropped };
+  } catch (err) {
+    log.warn('[migration] Phase 3 multi-piece Dome Install indexes (noncritical, retried on next start):', err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
+function quoteIdent(name) {
+  return `"${String(name).replace(/"/g, '""')}"`;
 }
 
 /**
@@ -1137,6 +1370,7 @@ async function runSchemaMigration(client, options = {}) {
     await ensureEmployeeShopsSchema(client, log);
     await ensurePhase3DomeSchema(client, log);
     await ensurePhase3DomeSoftDelete(client, log);
+    await ensurePhase3DomePieceInstall(client, log);
     await ensurePhase3BulkheadSchema(client, log);
 
     if (!skipBackfills) {
@@ -1179,6 +1413,7 @@ module.exports = {
   EMPLOYEE_SHOPS_SQL,
   ensurePhase3DomeSchema,
   ensurePhase3DomeSoftDelete,
+  ensurePhase3DomePieceInstall,
   ensurePhase3BulkheadSchema,
   ensureTankTrashSchema,
   runOptionalBackfills,

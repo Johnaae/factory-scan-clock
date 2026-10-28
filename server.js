@@ -5459,8 +5459,27 @@ async function domeInstallPhaseIntercept(machine, ph, pending, focusedSession, b
       },
     };
   }
+  // FAB path requires an explicit piece so the dome attaches to the correct piece.
+  let pieceForInstall =
+    pending.piece != null && Number.isFinite(Number(pending.piece)) ? Number(pending.piece) : null;
+  if (!legacyExclusive && pieceForInstall == null) {
+    return {
+      ok: false,
+      status: 409,
+      body: {
+        ok: false,
+        error: 'need_piece',
+        tank_number: tankRow.tank_number,
+        message: `Select a Piece on Tank ${tankRow.tank_number} before Dome Install.`,
+      },
+    };
+  }
+  if (legacyExclusive && pieceForInstall == null) pieceForInstall = 1;
   // Open picker without finishing Chop/Wind/etc. Confirm (dome_install_start) transitions later.
-  const blocked = await phase3.tankInstallBlock(tankRow, { allowOpenFabWork: true });
+  const blocked = await phase3.tankInstallBlock(tankRow, {
+    allowOpenFabWork: true,
+    pieceNumber: pieceForInstall,
+  });
   if (blocked) return blocked;
   const available = await phase3.listAvailableDomes({});
   if (!available.ok) return available;
@@ -5472,17 +5491,17 @@ async function domeInstallPhaseIntercept(machine, ph, pending, focusedSession, b
       action: 'dome_install_select',
       tank_id: Number(tankRow.id),
       tank_number: tankRow.tank_number,
-      piece_number: pending.piece != null ? Number(pending.piece) : null,
+      piece_number: pieceForInstall,
       dome_install_exclusive: legacyExclusive,
       fab_phase_unchanged: true,
       domes: available.body.domes,
       diameters: available.body.diameters,
       pending: {
         tank: tankRow.tank_number,
-        piece: pending.piece != null ? Number(pending.piece) : null,
+        piece: pieceForInstall,
       },
       message: available.body.domes.length
-        ? 'Select the dome to install. Current FAB phase stays running until you confirm.'
+        ? `Select the dome to install on Piece ${pieceForInstall}. Current FAB phase stays running until you confirm.`
         : 'No completed domes are available in Dome Inventory. Current FAB phase was not changed.',
     },
   };
@@ -5493,13 +5512,20 @@ async function withDomeInstallAvailability(body, tankRow) {
   if (!body || !tankRow) return body;
   try {
     const eligible = phase3.canStartDomeInstallOnTank(tankRow);
-    const live = eligible ? await phase3.tankLiveInstallStatus(tankRow.id) : null;
-    const available = Boolean(eligible && (!live || live.status === 'in_progress'));
+    const domeState = body.dome_state || (await phase3.getTankDomeState(tankRow.id));
+    const pieceCount = Math.min(8, Math.max(1, Number(tankRow.piece_count) || body.piece_count || 1));
+    const installedPieces = new Set(
+      ((domeState && domeState.installs) || [])
+        .filter((i) => i && i.status === 'installed')
+        .map((i) => Number(i.piece_number))
+    );
+    // Available while at least one piece can still receive a dome (piece-level).
+    const available = Boolean(eligible && installedPieces.size < pieceCount);
     return {
       ...body,
       dome_install_available: available,
       dome_install_exclusive: false,
-      dome_state: body.dome_state || (await phase3.getTankDomeState(tankRow.id)),
+      dome_state: domeState,
     };
   } catch (_err) {
     return { ...body, dome_install_available: false };
@@ -6305,6 +6331,7 @@ app.get('/api/kiosk/winding/config', async (req, res) => {
       );
       if (tankMeta.rows[0]) {
         const meta = tankMeta.rows[0];
+        piece_count = Math.min(8, Math.max(1, Number(tankMeta.rows[0].piece_count) || 1));
         if (!meta.deleted_at) {
           const live = await phase3.tankLiveInstallStatus(piecesTankId);
           if (
@@ -6315,10 +6342,15 @@ app.get('/api/kiosk/winding/config', async (req, res) => {
             active_tank_dome_install = !live || live.status !== 'installed';
           }
           if (phase3.canStartDomeInstallOnTank(meta)) {
-            active_tank_dome_install_available = !live || live.status === 'in_progress';
+            const domeState = await phase3.getTankDomeState(piecesTankId);
+            const installedPieces = new Set(
+              (domeState.installs || [])
+                .filter((i) => i && i.status === 'installed')
+                .map((i) => Number(i.piece_number))
+            );
+            active_tank_dome_install_available = installedPieces.size < piece_count;
           }
         }
-        piece_count = Math.min(8, Math.max(1, Number(tankMeta.rows[0].piece_count) || 1));
         active_tank_number = tankMeta.rows[0].tank_number;
         await phase1.ensureTankPieces(piecesTankId, piece_count);
         pieces = (await phase1.getTankPieces(piecesTankId)).filter((p) => Number(p.piece_number) <= piece_count);
