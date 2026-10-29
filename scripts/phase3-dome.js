@@ -368,15 +368,15 @@ function createPhase3Dome(pool, helpers = {}) {
   }
 
   /**
-   * Validates fabricator ids: any active employees (any department/shop).
+   * Validates fabricator ids: active employees assigned to the Dome shop (employee_shops).
    * Temporary transfer into Dome labor happens on Start, not Create.
-   * Enforce 1–3 unique workers.
+   * Enforce 1–3 unique workers. Does not modify employee shop records.
    */
   async function validateFabricators(ids, client, _shopExempt = new Set(), opts = {}) {
     const min = opts.min != null ? Number(opts.min) : 1;
     const max = opts.max != null ? Number(opts.max) : MAX_DOME_FABRICATORS;
     if (!ids.length) {
-      return { error: errResult(400, 'fabricators_required', 'Select 1 to 3 employees.') };
+      return { error: errResult(400, 'fabricators_required', 'Select 1 to 3 Dome Shop employees.') };
     }
     if (ids.length < min) {
       return {
@@ -398,6 +398,26 @@ function createPhase3Dome(pool, helpers = {}) {
     const missing = ids.filter((id) => !byId.has(id) || Number(byId.get(id).is_active) !== 1);
     if (missing.length) {
       return { error: errResult(400, 'invalid_fabricator', 'One or more selected employees are not active.') };
+    }
+    const shopSet = await domeShopEmployeeIds(client);
+    if (!shopSet) {
+      return {
+        error: errResult(
+          503,
+          'shop_assignment_not_ready',
+          'Shop Assignment is not ready yet. Try again in a minute.'
+        ),
+      };
+    }
+    const notDome = ids.filter((id) => !shopSet.has(Number(id)));
+    if (notDome.length) {
+      return {
+        error: errResult(
+          400,
+          'not_dome_shop',
+          'Select employees assigned to the Dome shop only. Update Shop Assignment in Manager Dashboard if needed.'
+        ),
+      };
     }
     return { employees: ids.map((id) => byId.get(id)) };
   }
@@ -842,27 +862,56 @@ function createPhase3Dome(pool, helpers = {}) {
       /* bulkhead tables may lag briefly after migrate */
     }
 
-    // Picker: all active employees (any department). Temporary transfer happens on Start.
-    const shopSet = await domeShopEmployeeIds();
+    // Picker source of truth: employee_shops.shop = 'Dome' + active only.
+    // Never use home team / badge role / department. Temporary transfer happens on Start.
+    const shopsReady = await isEmployeeShopsReady();
     let fabricatorOptions = [];
-    if (typeof listActiveEmployeesForPicker === 'function') {
-      fabricatorOptions = await listActiveEmployeesForPicker();
-    } else {
-      const { rows: candidates } = await pool.query(
-        `SELECT id, code, name FROM employees WHERE is_active = 1 ORDER BY LOWER(name), id LIMIT 2000`
+    if (shopsReady) {
+      // Direct SQL eligibility — do not start from all employees then hope a filter sticks.
+      const { rows: eligible } = await pool.query(
+        `SELECT e.id, e.code, e.name,
+                ARRAY(
+                  SELECT es2.shop FROM employee_shops es2
+                  WHERE es2.employee_id = e.id
+                  ORDER BY CASE es2.shop
+                    WHEN 'Fabrication' THEN 1 WHEN 'Assembly' THEN 2 WHEN 'Dome' THEN 3 ELSE 4
+                  END
+                ) AS shops
+         FROM employees e
+         INNER JOIN employee_shops es ON es.employee_id = e.id AND es.shop = 'Dome'
+         WHERE e.is_active = 1
+         ORDER BY LOWER(e.name), e.id
+         LIMIT 2000`
       );
-      fabricatorOptions = candidates.map((e) => {
-        const shift = shiftTeamBy.get(Number(e.id)) || null;
-        return {
-          id: Number(e.id),
-          code: e.code || null,
-          name: e.name,
-          on_shift: Boolean(shift),
-          team_id: shift ? shift.team_id : null,
-          team_name: shift ? shift.team_name : null,
+      const eligibleIds = new Set(eligible.map((r) => Number(r.id)));
+      let enrichedById = new Map();
+      if (typeof listActiveEmployeesForPicker === 'function' && eligibleIds.size) {
+        const allActive = await listActiveEmployeesForPicker();
+        for (const e of allActive) {
+          if (eligibleIds.has(Number(e.id))) enrichedById.set(Number(e.id), e);
+        }
+      }
+      fabricatorOptions = eligible.map((r) => {
+        const id = Number(r.id);
+        const shops = Array.isArray(r.shops) ? r.shops.filter(Boolean) : ['Dome'];
+        const base = enrichedById.get(id) || {
+          id,
+          code: r.code || null,
+          name: r.name,
+          on_shift: false,
+          team_id: null,
+          team_name: null,
           department: null,
           busy_on_dome: null,
-          dome_shop: shopSet ? shopSet.has(Number(e.id)) : true,
+          busy_on_bulkhead: null,
+        };
+        return {
+          ...base,
+          id,
+          code: r.code || base.code || null,
+          name: r.name,
+          dome_shop: true,
+          shops,
         };
       });
     }
@@ -874,11 +923,12 @@ function createPhase3Dome(pool, helpers = {}) {
       active_teams: teams,
       other_domes: domes.filter((d) => d.team_id == null || !presentIds.has(d.team_id)),
       fabricator_options: fabricatorOptions,
-      // Backward-compatible alias — now the full active employee list (not Dome-shop only).
+      // Create Dome / Create Bulkhead / Set Workers — Dome shop only (same array).
       dome_shop_employees: fabricatorOptions,
-      all_employees: fabricatorOptions,
+      // Always empty — frontend must never fall back to an unfiltered roster.
+      all_employees: [],
       transfer_notices: transferNotices,
-      shop_assignment_ready: Boolean(shopSet),
+      shop_assignment_ready: shopsReady,
       team_login_required: false,
       max_fabricators: MAX_DOME_FABRICATORS,
       diameters: DOME_DIAMETERS_FT,

@@ -7,10 +7,12 @@
  * Labor rows are never hard-deleted when a bulkhead is removed from inventory.
  */
 
-const { PHASE3_BULKHEAD_RELATIONS } = require('./phase3-schema-sql');
+const { PHASE3_BULKHEAD_RELATIONS, DOME_DIAMETERS_FT, DOME_TYPES } = require('./phase3-schema-sql');
 
 const READY_RECHECK_MS = 60000;
 const MAX_WORKERS = 3;
+const BULKHEAD_TYPES = DOME_TYPES;
+const BULKHEAD_DIAMETERS_FT = DOME_DIAMETERS_FT;
 
 function errResult(status, error, message, extra = {}) {
   return { ok: false, status, body: { ok: false, error, message, ...extra } };
@@ -48,11 +50,36 @@ function parseNotes(raw) {
   return s || null;
 }
 
+function parseBulkheadType(raw) {
+  const s = String(raw == null ? '' : raw).trim().toLowerCase();
+  if (!s) return null;
+  return BULKHEAD_TYPES.find((t) => t.toLowerCase() === s) || undefined;
+}
+
+function parseDiameter(raw) {
+  const m = String(raw == null ? '' : raw).match(/^\s*(\d{1,2})\s*(?:'|ft|feet|’)?\s*$/i);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return BULKHEAD_DIAMETERS_FT.includes(n) ? n : null;
+}
+
+function parseWeight(raw) {
+  if (raw == null || String(raw).trim() === '') return null;
+  const n = Number(String(raw).replace(/,/g, '').trim());
+  if (!Number.isFinite(n) || n <= 0 || n > 100000) return undefined;
+  return Math.round(n * 100) / 100;
+}
+
 function mapBulkhead(row) {
   if (!row) return null;
+  const diameter = row.diameter_ft != null ? Number(row.diameter_ft) : null;
   return {
     id: Number(row.id),
     bulkhead_number: row.bulkhead_number,
+    bulkhead_type: row.bulkhead_type || null,
+    diameter_ft: diameter,
+    diameter_label: diameter != null ? `${diameter}'` : null,
+    weight_lbs: row.weight_lbs != null ? Number(row.weight_lbs) : null,
     production_status: row.production_status,
     pause_reason: row.pause_reason || null,
     inventory_status: row.inventory_status,
@@ -150,7 +177,7 @@ function createPhase3Bulkhead(pool, helpers = {}) {
 
   async function validateWorkers(ids, client) {
     if (!ids.length) {
-      return { error: errResult(400, 'workers_required', 'Select 1 to 3 employees.') };
+      return { error: errResult(400, 'workers_required', 'Select 1 to 3 Dome Shop employees.') };
     }
     if (ids.length > MAX_WORKERS) {
       return {
@@ -170,6 +197,26 @@ function createPhase3Bulkhead(pool, helpers = {}) {
       if (!e.is_active) {
         return { error: errResult(400, 'inactive_employee', `${e.name || e.code} is inactive.`) };
       }
+    }
+    const shopSet = await domeShopEmployeeIds(client);
+    if (!shopSet) {
+      return {
+        error: errResult(
+          503,
+          'shop_assignment_not_ready',
+          'Shop Assignment is not ready yet. Try again in a minute.'
+        ),
+      };
+    }
+    const notDome = ids.filter((id) => !shopSet.has(Number(id)));
+    if (notDome.length) {
+      return {
+        error: errResult(
+          400,
+          'not_dome_shop',
+          'Select employees assigned to the Dome shop only. Update Shop Assignment in Manager Dashboard if needed.'
+        ),
+      };
     }
     // Preserve selection order from ids.
     const byId = new Map(rows.map((r) => [Number(r.id), r]));
@@ -441,11 +488,15 @@ function createPhase3Bulkhead(pool, helpers = {}) {
     if (!(await isReady())) return notReady();
     const number = normalizeNumber(body.bulkhead_number);
     if (!number) return errResult(400, 'bulkhead_number_required', 'Enter a Bulkhead Number.');
+    const type = parseBulkheadType(body.bulkhead_type != null ? body.bulkhead_type : body.dome_type);
+    if (!type) return errResult(400, 'bulkhead_type_required', 'Select a Bulkhead Type (Petro or Water).');
+    const diameter = parseDiameter(body.diameter_ft != null ? body.diameter_ft : body.diameter);
+    if (!diameter) return errResult(400, 'diameter_required', "Select a Diameter (4', 6', 8', 10' or 12').");
     const notes = parseNotes(body.notes);
     const ids = parseIdList(body.worker_ids != null ? body.worker_ids : body.fabricator_ids);
     return withTransaction(async (client) => {
       if (!ids.length) {
-        return errResult(400, 'workers_required', 'Select 1 to 3 employees.');
+        return errResult(400, 'workers_required', 'Select 1 to 3 Dome Shop employees.');
       }
       const v = await validateWorkers(ids, client);
       if (v.error) return v.error;
@@ -453,11 +504,11 @@ function createPhase3Bulkhead(pool, helpers = {}) {
       let rows;
       try {
         ({ rows } = await client.query(
-          `INSERT INTO bulkheads (bulkhead_number, production_status, inventory_status, source,
+          `INSERT INTO bulkheads (bulkhead_number, bulkhead_type, diameter_ft, production_status, inventory_status, source,
                                   machine_id, created_by, notes, created_at, updated_at)
-           VALUES ($1, 'created', 'not_in_inventory', 'kiosk', $2, $3, $4, $5::timestamptz, $5::timestamptz)
+           VALUES ($1, $2, $3, 'created', 'not_in_inventory', 'kiosk', $4, $5, $6, $7::timestamptz, $7::timestamptz)
            RETURNING *`,
-          [number, machine.id, `kiosk:${machine.name}`, notes, ts]
+          [number, type, diameter, machine.id, `kiosk:${machine.name}`, notes, ts]
         ));
       } catch (err) {
         if (err && err.code === '23505') {
@@ -472,7 +523,14 @@ function createPhase3Bulkhead(pool, helpers = {}) {
           [bh.id, id, ts]
         );
       }
-      await logEvent(client, bh.id, 'created', { workers: ids, notes }, `kiosk:${machine.name}`, ts);
+      await logEvent(
+        client,
+        bh.id,
+        'created',
+        { bulkhead_type: type, diameter_ft: diameter, workers: ids, notes },
+        `kiosk:${machine.name}`,
+        ts
+      );
       const names = v.employees.map((e) => e.name).filter(Boolean).join(', ');
       return okResult({
         action: 'bulkhead_created',
@@ -566,6 +624,10 @@ function createPhase3Bulkhead(pool, helpers = {}) {
     if (!(await isReady())) return notReady();
     const id = Number(body.bulkhead_id);
     if (!Number.isInteger(id) || id <= 0) return errResult(400, 'validation', 'Select a bulkhead.');
+    const weight = parseWeight(body.weight_lbs != null ? body.weight_lbs : body.weight);
+    if (weight == null || weight === undefined) {
+      return errResult(400, 'weight_required', 'Enter the Bulkhead Weight in pounds (greater than 0).');
+    }
     return withTransaction(async (client) => {
       const bh = await lockBulkhead(client, id);
       if (!bh || Number(bh.machine_id) !== Number(machine.id)) {
@@ -581,16 +643,16 @@ function createPhase3Bulkhead(pool, helpers = {}) {
       await closeLabor(client, bh.id, ts, 'finished', 'complete');
       const { rows } = await client.query(
         `UPDATE bulkheads
-         SET production_status = 'completed', pause_reason = NULL, completed_at = $2::timestamptz,
-             inventory_status = 'available', updated_at = $2::timestamptz
+         SET production_status = 'completed', pause_reason = NULL, weight_lbs = $2, completed_at = $3::timestamptz,
+             inventory_status = 'available', updated_at = $3::timestamptz
          WHERE id = $1 RETURNING *`,
-        [bh.id, ts]
+        [bh.id, weight, ts]
       );
-      await logEvent(client, bh.id, 'completed', {}, 'kiosk', ts);
+      await logEvent(client, bh.id, 'completed', { weight_lbs: weight }, 'kiosk', ts);
       return okResult({
         action: 'bulkhead_finished',
         bulkhead: mapBulkhead(rows[0]),
-        message: `Bulkhead ${bh.bulkhead_number} finished and added to Bulkhead Inventory.`,
+        message: `Bulkhead ${bh.bulkhead_number} finished (${weight} lb) and added to Bulkhead Inventory.`,
       });
     });
   }
@@ -794,17 +856,30 @@ function createPhase3Bulkhead(pool, helpers = {}) {
     if (!(await isReady())) return notReady();
     const number = normalizeNumber(body.bulkhead_number);
     if (!number) return errResult(400, 'bulkhead_number_required', 'Enter a Bulkhead Number.');
+    const type = parseBulkheadType(body.bulkhead_type != null ? body.bulkhead_type : body.dome_type);
+    if (type === undefined) return errResult(400, 'bulkhead_type_required', 'Select a Bulkhead Type (Petro or Water).');
+    const diameterRaw = body.diameter_ft != null ? body.diameter_ft : body.diameter;
+    const diameter =
+      diameterRaw == null || String(diameterRaw).trim() === '' ? null : parseDiameter(diameterRaw);
+    if (diameterRaw != null && String(diameterRaw).trim() !== '' && !diameter) {
+      return errResult(400, 'diameter_required', "Select a Diameter (4', 6', 8', 10' or 12').");
+    }
+    const weightRaw = body.weight_lbs != null ? body.weight_lbs : body.weight;
+    const weight = parseWeight(weightRaw);
+    if (weight === undefined) {
+      return errResult(400, 'weight_required', 'Enter the Bulkhead Weight in pounds (greater than 0).');
+    }
     const notes = parseNotes(body.notes);
     return withTransaction(async (client) => {
       const ts = nowIso();
       let rows;
       try {
         ({ rows } = await client.query(
-          `INSERT INTO bulkheads (bulkhead_number, production_status, inventory_status, source,
+          `INSERT INTO bulkheads (bulkhead_number, bulkhead_type, diameter_ft, weight_lbs, production_status, inventory_status, source,
                                   created_by, notes, created_at, completed_at, updated_at)
-           VALUES ($1, 'completed', 'available', 'manual', $2, $3, $4::timestamptz, $4::timestamptz, $4::timestamptz)
+           VALUES ($1, $2, $3, $4, 'completed', 'available', 'manual', $5, $6, $7::timestamptz, $7::timestamptz, $7::timestamptz)
            RETURNING *`,
-          [number, performedBy || 'manager', notes, ts]
+          [number, type, diameter, weight, performedBy || 'manager', notes, ts]
         ));
       } catch (err) {
         if (err && err.code === '23505') {
@@ -812,7 +887,14 @@ function createPhase3Bulkhead(pool, helpers = {}) {
         }
         throw err;
       }
-      await logEvent(client, rows[0].id, 'manual_added', { notes }, performedBy, ts);
+      await logEvent(
+        client,
+        rows[0].id,
+        'manual_added',
+        { bulkhead_type: type, diameter_ft: diameter, weight_lbs: weight, notes },
+        performedBy,
+        ts
+      );
       return okResult({ bulkhead: mapBulkhead(rows[0]), message: `Bulkhead ${number} added to inventory.` }, 201);
     });
   }
@@ -826,6 +908,9 @@ function createPhase3Bulkhead(pool, helpers = {}) {
       if (!bh) return errResult(404, 'not_found', 'Bulkhead not found.');
       const next = {
         bulkhead_number: bh.bulkhead_number,
+        bulkhead_type: bh.bulkhead_type || null,
+        diameter_ft: bh.diameter_ft != null ? Number(bh.diameter_ft) : null,
+        weight_lbs: bh.weight_lbs != null ? Number(bh.weight_lbs) : null,
         notes: bh.notes,
       };
       if (body.bulkhead_number !== undefined) {
@@ -833,19 +918,42 @@ function createPhase3Bulkhead(pool, helpers = {}) {
         if (!n) return errResult(400, 'bulkhead_number_required', 'Enter a Bulkhead Number.');
         next.bulkhead_number = n;
       }
+      if (body.bulkhead_type !== undefined || body.dome_type !== undefined) {
+        const t = parseBulkheadType(body.bulkhead_type !== undefined ? body.bulkhead_type : body.dome_type);
+        if (t === undefined) return errResult(400, 'bulkhead_type_required', 'Select a Bulkhead Type (Petro or Water).');
+        next.bulkhead_type = t;
+      }
+      if (body.diameter_ft !== undefined || body.diameter !== undefined) {
+        const raw = body.diameter_ft !== undefined ? body.diameter_ft : body.diameter;
+        if (raw == null || String(raw).trim() === '') next.diameter_ft = null;
+        else {
+          const d = parseDiameter(raw);
+          if (!d) return errResult(400, 'diameter_required', "Select a Diameter (4', 6', 8', 10' or 12').");
+          next.diameter_ft = d;
+        }
+      }
+      if (body.weight_lbs !== undefined || body.weight !== undefined) {
+        const w = parseWeight(body.weight_lbs !== undefined ? body.weight_lbs : body.weight);
+        if (w === undefined) {
+          return errResult(400, 'weight_required', 'Enter the Bulkhead Weight in pounds (greater than 0).');
+        }
+        next.weight_lbs = w;
+      }
       if (body.notes !== undefined) next.notes = parseNotes(body.notes);
       const changes = {};
       for (const k of Object.keys(next)) {
-        if (bh[k] !== next[k]) changes[k] = { from: bh[k], to: next[k] };
+        const before = k === 'diameter_ft' || k === 'weight_lbs' ? (bh[k] != null ? Number(bh[k]) : null) : bh[k];
+        if (before !== next[k]) changes[k] = { from: before, to: next[k] };
       }
       if (!Object.keys(changes).length) return okResult({ bulkhead: mapBulkhead(bh), message: 'No changes.' });
       const ts = nowIso();
       let rows;
       try {
         ({ rows } = await client.query(
-          `UPDATE bulkheads SET bulkhead_number = $2, notes = $3, updated_at = $4::timestamptz
+          `UPDATE bulkheads SET bulkhead_number = $2, bulkhead_type = $3, diameter_ft = $4, weight_lbs = $5,
+                  notes = $6, updated_at = $7::timestamptz
            WHERE id = $1 RETURNING *`,
-          [id, next.bulkhead_number, next.notes, ts]
+          [id, next.bulkhead_number, next.bulkhead_type, next.diameter_ft, next.weight_lbs, next.notes, ts]
         ));
       } catch (err) {
         if (err && err.code === '23505') {
@@ -948,8 +1056,8 @@ function createPhase3Bulkhead(pool, helpers = {}) {
       where.push(`UPPER(b.bulkhead_number) LIKE $${params.length}`);
     }
     const { rows } = await pool.query(
-      `SELECT b.id, b.bulkhead_number, b.notes, b.completed_at, b.source, b.created_at,
-              t.name AS team_name
+      `SELECT b.id, b.bulkhead_number, b.bulkhead_type, b.diameter_ft, b.weight_lbs, b.notes,
+              b.completed_at, b.source, b.created_at, t.name AS team_name
        FROM bulkheads b
        LEFT JOIN teams t ON t.id = b.team_id
        WHERE ${where.join(' AND ')}
@@ -958,15 +1066,22 @@ function createPhase3Bulkhead(pool, helpers = {}) {
       params
     );
     return okResult({
-      bulkheads: rows.map((r) => ({
-        id: Number(r.id),
-        bulkhead_number: r.bulkhead_number,
-        notes: r.notes || null,
-        completed_at: r.completed_at || null,
-        source: r.source || null,
-        team_name: r.team_name || null,
-        created_at: r.created_at || null,
-      })),
+      bulkheads: rows.map((r) => {
+        const mapped = mapBulkhead(r);
+        return {
+          id: mapped.id,
+          bulkhead_number: mapped.bulkhead_number,
+          bulkhead_type: mapped.bulkhead_type,
+          diameter_ft: mapped.diameter_ft,
+          diameter_label: mapped.diameter_label,
+          weight_lbs: mapped.weight_lbs,
+          notes: mapped.notes,
+          completed_at: mapped.completed_at,
+          source: mapped.source,
+          team_name: r.team_name || null,
+          created_at: mapped.created_at,
+        };
+      }),
     });
   }
 
@@ -975,7 +1090,8 @@ function createPhase3Bulkhead(pool, helpers = {}) {
     const map = new Map();
     if (!ids.length || !(await isReady())) return map;
     const { rows } = await pool.query(
-      `SELECT a.tank_id, a.status, a.installed_at, b.id AS bulkhead_id, b.bulkhead_number, b.notes
+      `SELECT a.tank_id, a.status, a.installed_at, b.id AS bulkhead_id, b.bulkhead_number,
+              b.bulkhead_type, b.diameter_ft, b.weight_lbs, b.notes
        FROM bulkhead_assignments a
        JOIN bulkheads b ON b.id = a.bulkhead_id
        WHERE a.tank_id = ANY($1::bigint[])
@@ -987,9 +1103,14 @@ function createPhase3Bulkhead(pool, helpers = {}) {
     for (const r of rows) {
       const k = Number(r.tank_id);
       if (!map.has(k)) map.set(k, { installed: [] });
+      const diameter = r.diameter_ft != null ? Number(r.diameter_ft) : null;
       map.get(k).installed.push({
         bulkhead_id: Number(r.bulkhead_id),
         bulkhead_number: r.bulkhead_number,
+        bulkhead_type: r.bulkhead_type || null,
+        diameter_ft: diameter,
+        diameter_label: diameter != null ? `${diameter}'` : null,
+        weight_lbs: r.weight_lbs != null ? Number(r.weight_lbs) : null,
         notes: r.notes || null,
         installed_at: r.installed_at || null,
         status: r.status,

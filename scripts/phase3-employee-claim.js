@@ -337,7 +337,10 @@ function createPhase3EmployeeClaim(pool, helpers = {}) {
     };
   }
 
-  /** Active employees for the Create Dome / Bulkhead picker (all shops/departments). */
+  /**
+   * Active employees for Dome kiosk pickers (busy flags + team labels).
+   * Callers filter to Dome shop via employee_shops — this list is not shop-scoped alone.
+   */
   async function listActiveEmployeesForPicker() {
     const { rows } = await pool.query(
       `SELECT e.id, e.code, e.name,

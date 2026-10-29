@@ -862,6 +862,7 @@ UPDATE machines SET workflow = 'winding' WHERE workflow = 'winding' OR name ILIK
   await ensurePhase3DomeSoftDelete(client, log);
   await ensurePhase3DomePieceInstall(client, log);
   await ensurePhase3BulkheadSchema(client, log);
+  await ensurePhase3BulkheadSpecColumns(client, log);
 }
 
 /**
@@ -1269,6 +1270,45 @@ async function ensurePhase3BulkheadSchema(client, log = console) {
   }
 }
 
+/**
+ * Additive Bulkhead Type / Diameter / Weight columns. Idempotent; never rewrites rows.
+ * Runs even when bulkhead tables already exist so Create/Finish Bulkhead can persist specs.
+ */
+async function ensurePhase3BulkheadSpecColumns(client, log = console) {
+  if (!phase3SchemaSql) return { ok: false, error: 'phase3-schema-sql not loaded' };
+  const { PHASE3_BULKHEAD_SPEC_SQL } = phase3SchemaSql;
+  if (!PHASE3_BULKHEAD_SPEC_SQL) return { ok: true, skipped: true };
+  try {
+    const tableCheck = await client.query(
+      `SELECT 1 FROM information_schema.tables
+       WHERE table_schema = 'public' AND table_name = 'bulkheads'`
+    );
+    if (!tableCheck.rows.length) return { ok: true, skipped: true, reason: 'no_bulkheads' };
+    const { rows: before } = await client.query(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'bulkheads'
+         AND column_name IN ('bulkhead_type', 'diameter_ft', 'weight_lbs')`
+    );
+    const hadAll = before.length >= 3;
+    await client.query('BEGIN');
+    try {
+      await client.query(`SELECT set_config('lock_timeout', '8000', true)`);
+      await client.query(`SELECT set_config('statement_timeout', '20000', true)`);
+      await client.query('SELECT pg_advisory_xact_lock($1)', [SCHEMA_LOCK_KEY]);
+      await client.query(PHASE3_BULKHEAD_SPEC_SQL);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    }
+    if (!hadAll) log.log('[migration] Phase 3 bulkhead type/diameter/weight columns ready');
+    return { ok: true };
+  } catch (err) {
+    log.warn('[migration] Phase 3 bulkhead spec columns (noncritical, retried on next start):', err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
 /** Verify tank soft-delete columns + audit table exist (throws if missing after additive pass). */
 async function ensureTankTrashSchema(client) {
   const { rows: colRows } = await client.query(
@@ -1372,6 +1412,7 @@ async function runSchemaMigration(client, options = {}) {
     await ensurePhase3DomeSoftDelete(client, log);
     await ensurePhase3DomePieceInstall(client, log);
     await ensurePhase3BulkheadSchema(client, log);
+    await ensurePhase3BulkheadSpecColumns(client, log);
 
     if (!skipBackfills) {
       await runOptionalBackfills(client, log);
@@ -1415,6 +1456,7 @@ module.exports = {
   ensurePhase3DomeSoftDelete,
   ensurePhase3DomePieceInstall,
   ensurePhase3BulkheadSchema,
+  ensurePhase3BulkheadSpecColumns,
   ensureTankTrashSchema,
   runOptionalBackfills,
   verifyRequiredTables,

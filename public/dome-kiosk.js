@@ -26,6 +26,8 @@ const els = {
   bhCreateModal: $('bhCreateModal'),
   bhCreateForm: $('bhCreateForm'),
   bhCreateNumber: $('bhCreateNumber'),
+  bhCreateTypes: $('bhCreateTypes'),
+  bhCreateDiameters: $('bhCreateDiameters'),
   bhCreateSelected: $('bhCreateSelected'),
   bhCreateEmpSearch: $('bhCreateEmpSearch'),
   bhCreateFabs: $('bhCreateFabs'),
@@ -54,9 +56,11 @@ const els = {
   createError: $('createError'),
   completeModal: $('completeModal'),
   completeForm: $('completeForm'),
+  completeTitle: $('completeTitle'),
   completeText: $('completeText'),
   completeWeight: $('completeWeight'),
   completeError: $('completeError'),
+  completeSubmit: $('completeSubmit'),
   fabsModal: $('fabsModal'),
   fabsForm: $('fabsForm'),
   fabsTitle: $('fabsTitle'),
@@ -88,11 +92,12 @@ let scanBuffer = '';
 let lastKeyTime = 0;
 let confirmResolve = null;
 const createState = { teamId: null, type: null, diameter: null, fabs: new Set(), manual: true, search: '' };
-const bhCreateState = { fabs: new Set(), search: '' };
+const bhCreateState = { type: null, diameter: null, fabs: new Set(), search: '' };
 const MAX_FABRICATORS = 3;
 let fabsDome = null;
 const fabsSelected = new Set();
-let completeDomeRef = null;
+/** { kind: 'dome'|'bulkhead', item } for Finish weight modal */
+let completeTarget = null;
 let fabsBulkhead = null;
 /** Transfer notices already shown on this kiosk session (from config.transfer_notices). */
 const seenTransferNoticeIds = new Set();
@@ -358,6 +363,7 @@ function renderBulkheadCard(b) {
   const peopleLabel = running && b.working && b.working.length ? tr('dk.working') : tr('dome.field.fabricators');
   const names = people.map((f) => f.name || f.employee_name).join(', ') || '—';
   const since = running && b.active_since ? ` · ${tr('dk.since', { time: formatClock(b.active_since) })}` : '';
+  const spec = [DI.typeLabel(b.bulkhead_type), b.diameter_label].filter(Boolean).join(' · ');
   const btns = [];
   if (running) {
     btns.push(
@@ -384,7 +390,7 @@ function renderBulkheadCard(b) {
       <h3 class="ak-tank-title">${escapeHtml(tr('bi.label', { n: b.bulkhead_number }))}</h3>
       <span class="ak-tank-status">${escapeHtml(DI.productionLabel(b))}</span>
     </div>
-    <p class="ak-tank-stage">${escapeHtml(tr('dk.bulkhead.kind'))}${escapeHtml(since)}</p>
+    <p class="ak-tank-stage">${escapeHtml(tr('dk.bulkhead.kind'))}${spec ? ` · ${escapeHtml(spec)}` : ''}${escapeHtml(since)}</p>
     <p class="ak-tank-stage"><span class="ak-roster-label">${escapeHtml(peopleLabel)}:</span> ${escapeHtml(names)}</p>
     ${notesHtml}
     <div class="ak-metrics">
@@ -614,12 +620,26 @@ function renderCreateChips() {
   renderCreateFabs();
 }
 
+/**
+ * Eligible workers for Create Dome / Create Bulkhead / Set Fabricators.
+ * Server already filtered via employee_shops (shop = 'Dome', active).
+ * Never use all_employees, home team, badge role, or an unfiltered roster.
+ */
 function employeePickerOptions() {
-  const all = (config && config.all_employees) || [];
-  if (all.length) return all;
-  const shop = (config && config.dome_shop_employees) || [];
-  if (shop.length) return shop;
-  return (config && config.fabricator_options) || [];
+  const raw = (config && Array.isArray(config.dome_shop_employees) && config.dome_shop_employees.length
+    ? config.dome_shop_employees
+    : config && Array.isArray(config.fabricator_options)
+      ? config.fabricator_options
+      : []) || [];
+  // Belt-and-suspenders: drop rows that are not explicitly marked Dome-eligible.
+  // Ignores stale in-memory configs that predate server-side shop filtering.
+  return raw.filter((e) => e && (e.dome_shop === true || (Array.isArray(e.shops) && e.shops.includes('Dome'))));
+}
+
+function emptyEmployeePickerMessage(searchText) {
+  if (String(searchText || '').trim()) return tr('dk.create.noSearch');
+  if (config && config.shop_assignment_ready === false) return tr('dk.create.shopsNotReady');
+  return tr('dk.create.noDomeShop');
 }
 
 function maxFabricators() {
@@ -632,15 +652,8 @@ function employeeMetaNote(o, domeId) {
   const busyBh = o.busy_on_bulkhead || (o.busy && o.busy.kind === 'bulkhead' ? o.busy : null);
   if (busyDome) return tr('dk.fab.busy', { dome: o.busy_on_dome.dome_number });
   if (busyBh) return tr('dk.fab.busyBh', { n: busyBh.bulkhead_number });
-  const dept = o.department || null;
-  const home = o.home_team_name || null;
-  const team = o.team_name || null;
-  if (dept && home) return tr('dk.fab.teamDept', { team: home, dept });
-  if (dept && team) return tr('dk.fab.teamDept', { team, dept });
-  if (home) return tr('dk.fab.homeTeam', { team: home });
-  if (team) return tr('dk.fab.team', { team });
-  if (dept) return String(dept);
-  return tr('dk.fab.noTeam');
+  // Shop Assignment is the eligibility signal — not home team / department.
+  return tr('dk.fab.domeShop');
 }
 
 function selectedPicksHtml(selectedIds) {
@@ -699,7 +712,7 @@ function fabChipsHtml(selected, domeId, searchText) {
     });
   }
   if (!opts.length) {
-    return `<p class="dk-modal-hint">${escapeHtml(q ? tr('dk.create.noSearch') : tr('dk.create.noFab'))}</p>`;
+    return `<p class="dk-modal-hint">${escapeHtml(emptyEmployeePickerMessage(q))}</p>`;
   }
   // Cap visible rows for touch performance; search narrows the full list.
   const limit = q ? 200 : 120;
@@ -764,7 +777,8 @@ async function openCreate(teamId) {
   if (els.createNotes) els.createNotes.value = '';
   if (els.createEmpSearch) els.createEmpSearch.value = '';
   setModalError(els.createError, '');
-  if (!employeePickerOptions().length) await loadConfig();
+  // Always refresh so a stale pre-filter config cannot populate the picker.
+  await loadConfig();
   renderCreateChips();
   openModal(els.createModal);
   setTimeout(() => {
@@ -776,6 +790,14 @@ async function openCreate(teamId) {
 async function submitCreate(ev) {
   ev.preventDefault();
   if (busy) return;
+  if (!createState.type) {
+    setModalError(els.createError, tr('dk.create.needType'));
+    return;
+  }
+  if (!createState.diameter) {
+    setModalError(els.createError, tr('dk.create.needDiameter'));
+    return;
+  }
   const ids = [...createState.fabs];
   if (!ids.length) {
     setModalError(els.createError, tr('dk.create.needWorkers'));
@@ -813,8 +835,21 @@ async function submitCreate(ev) {
 // ---------------------------------------------------------------- Dome card actions
 
 function openComplete(d) {
-  completeDomeRef = d;
+  completeTarget = { kind: 'dome', item: d };
+  if (els.completeTitle) els.completeTitle.textContent = tr('dk.complete.title');
+  if (els.completeSubmit) els.completeSubmit.textContent = tr('dk.complete.submit');
   els.completeText.textContent = tr('dk.complete.text', { dome: d.dome_number });
+  els.completeWeight.value = '';
+  setModalError(els.completeError, '');
+  openModal(els.completeModal);
+  setTimeout(() => els.completeWeight.focus(), 50);
+}
+
+function openBhComplete(b) {
+  completeTarget = { kind: 'bulkhead', item: b };
+  if (els.completeTitle) els.completeTitle.textContent = tr('dk.bhComplete.title');
+  if (els.completeSubmit) els.completeSubmit.textContent = tr('dk.bhComplete.submit');
+  els.completeText.textContent = tr('dk.bhComplete.text', { n: b.bulkhead_number });
   els.completeWeight.value = '';
   setModalError(els.completeError, '');
   openModal(els.completeModal);
@@ -823,17 +858,38 @@ function openComplete(d) {
 
 async function submitComplete(ev) {
   ev.preventDefault();
-  if (busy || !completeDomeRef) return;
+  if (busy || !completeTarget) return;
   busy = true;
   try {
-    const d = completeDomeRef;
-    const { data } = await postAction({ action: 'complete_dome', dome_id: d.id, weight_lbs: els.completeWeight.value });
-    if (!data || !data.ok) {
-      setModalError(els.completeError, DI.msg(data, { dome: d.dome_number }));
-      return;
+    if (completeTarget.kind === 'bulkhead') {
+      const b = completeTarget.item;
+      const { data } = await postAction({
+        action: 'finish_bulkhead',
+        bulkhead_id: b.id,
+        weight_lbs: els.completeWeight.value,
+      });
+      if (!data || !data.ok) {
+        setModalError(els.completeError, DI.msg(data, { n: b.bulkhead_number }) || (data && data.message) || '');
+        return;
+      }
+      closeModal(els.completeModal);
+      completeTarget = null;
+      showWarning(responseMessage(data, { n: b.bulkhead_number }));
+    } else {
+      const d = completeTarget.item;
+      const { data } = await postAction({
+        action: 'complete_dome',
+        dome_id: d.id,
+        weight_lbs: els.completeWeight.value,
+      });
+      if (!data || !data.ok) {
+        setModalError(els.completeError, DI.msg(data, { dome: d.dome_number }));
+        return;
+      }
+      closeModal(els.completeModal);
+      completeTarget = null;
+      showWarning(responseMessage(data, { dome: d.dome_number }));
     }
-    closeModal(els.completeModal);
-    showWarning(responseMessage(data, { dome: d.dome_number }));
   } finally {
     busy = false;
     await loadConfig();
@@ -905,6 +961,28 @@ async function submitFabs(ev) {
   }
 }
 
+function renderBhCreateChips() {
+  const types = (config && config.types) || ['Petro', 'Water'];
+  if (els.bhCreateTypes) {
+    els.bhCreateTypes.innerHTML = types
+      .map(
+        (t) =>
+          `<button type="button" class="dk-chip${bhCreateState.type === t ? ' is-on' : ''}" data-bh-type="${escapeHtml(t)}">${escapeHtml(DI.typeLabel(t))}</button>`
+      )
+      .join('');
+  }
+  const diameters = (config && config.diameters) || [4, 6, 8, 10, 12];
+  if (els.bhCreateDiameters) {
+    els.bhCreateDiameters.innerHTML = diameters
+      .map(
+        (n) =>
+          `<button type="button" class="dk-chip${bhCreateState.diameter === n ? ' is-on' : ''}" data-bh-diameter="${n}">${n}'</button>`
+      )
+      .join('');
+  }
+  renderBhCreateFabs();
+}
+
 function renderBhCreateFabs() {
   if (els.bhCreateSelected) {
     const html = selectedPicksHtml(bhCreateState.fabs);
@@ -920,24 +998,35 @@ function renderBhCreateFabs() {
 }
 
 async function openBhCreate() {
+  bhCreateState.type = null;
+  bhCreateState.diameter = null;
   bhCreateState.fabs = new Set();
   bhCreateState.search = '';
   if (els.bhCreateNumber) els.bhCreateNumber.value = '';
   if (els.bhCreateNotes) els.bhCreateNotes.value = '';
   if (els.bhCreateEmpSearch) els.bhCreateEmpSearch.value = '';
   setModalError(els.bhCreateError, '');
-  if (!employeePickerOptions().length) await loadConfig();
-  renderBhCreateFabs();
+  // Always refresh so a stale pre-filter config cannot populate the picker.
+  await loadConfig();
+  renderBhCreateChips();
   openModal(els.bhCreateModal);
   setTimeout(() => {
-    if (els.bhCreateEmpSearch) els.bhCreateEmpSearch.focus();
-    else if (els.bhCreateNumber) els.bhCreateNumber.focus();
+    if (els.bhCreateNumber) els.bhCreateNumber.focus();
+    else if (els.bhCreateEmpSearch) els.bhCreateEmpSearch.focus();
   }, 50);
 }
 
 async function submitBhCreate(ev) {
   ev.preventDefault();
   if (busy) return;
+  if (!bhCreateState.type) {
+    setModalError(els.bhCreateError, tr('dk.create.needType'));
+    return;
+  }
+  if (!bhCreateState.diameter) {
+    setModalError(els.bhCreateError, tr('dk.create.needDiameter'));
+    return;
+  }
   const ids = [...bhCreateState.fabs];
   if (!ids.length) {
     setModalError(els.bhCreateError, tr('dk.create.needWorkers'));
@@ -952,6 +1041,8 @@ async function submitBhCreate(ev) {
     const { data } = await postAction({
       action: 'create_bulkhead',
       bulkhead_number: els.bhCreateNumber.value,
+      bulkhead_type: bhCreateState.type,
+      diameter_ft: bhCreateState.diameter,
       worker_ids: ids,
       notes: els.bhCreateNotes ? els.bhCreateNotes.value : null,
     });
@@ -978,14 +1069,8 @@ async function handleBulkheadButton(btn) {
   const ctx = {};
   if (what === 'start') await runStartWithTransferConfirm({ action: 'start_bulkhead', bulkhead_id: b.id }, ctx);
   else if (what === 'stop') await runAction({ action: 'stop_bulkhead', bulkhead_id: b.id }, ctx);
-  else if (what === 'finish') {
-    const ok = await askConfirm(
-      tr('dk.bhFinish.title'),
-      tr('dk.bhFinish.text', { n: b.bulkhead_number }),
-      tr('dk.btn.finishBulkhead')
-    );
-    if (ok) await runAction({ action: 'finish_bulkhead', bulkhead_id: b.id }, ctx);
-  } else if (what === 'workers') openBhWorkers(b);
+  else if (what === 'finish') openBhComplete(b);
+  else if (what === 'workers') openBhWorkers(b);
 }
 
 async function handleDomeButton(btn) {
@@ -1087,6 +1172,22 @@ function bindChips() {
     createState.diameter = Number(b.getAttribute('data-diameter'));
     renderCreateChips();
   });
+  if (els.bhCreateTypes) {
+    els.bhCreateTypes.addEventListener('click', (ev) => {
+      const b = ev.target.closest('[data-bh-type]');
+      if (!b) return;
+      bhCreateState.type = b.getAttribute('data-bh-type');
+      renderBhCreateChips();
+    });
+  }
+  if (els.bhCreateDiameters) {
+    els.bhCreateDiameters.addEventListener('click', (ev) => {
+      const b = ev.target.closest('[data-bh-diameter]');
+      if (!b) return;
+      bhCreateState.diameter = Number(b.getAttribute('data-bh-diameter'));
+      renderBhCreateChips();
+    });
+  }
   els.createFabs.addEventListener(
     'click',
     toggleFab(

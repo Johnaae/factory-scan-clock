@@ -90,6 +90,9 @@
               <thead>
                 <tr>
                   <th data-i18n="bi.field.number">Bulkhead Number</th>
+                  <th data-i18n="bi.col.type">Type</th>
+                  <th data-i18n="bi.col.diameter">Diameter</th>
+                  <th data-i18n="bi.col.weight">Weight</th>
                   <th data-i18n="dome.field.production">Production</th>
                   <th data-i18n="dome.field.inventory">Inventory</th>
                   <th data-i18n="bi.col.tank">Tank</th>
@@ -145,6 +148,29 @@
             <input id="fNumber" type="text" maxlength="60" autocomplete="off" />
           </div>
           <div class="field">
+            <label for="fType" data-i18n="dome.field.type">Type</label>
+            <select id="fType">
+              <option value="">—</option>
+              <option value="Petro">Petro</option>
+              <option value="Water">Water</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="fDiameter" data-i18n="dome.field.diameter">Diameter</label>
+            <select id="fDiameter">
+              <option value="">—</option>
+              <option value="4">4'</option>
+              <option value="6">6'</option>
+              <option value="8">8'</option>
+              <option value="10">10'</option>
+              <option value="12">12'</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="fWeight" data-i18n="dome.field.weightLb">Weight (lb)</label>
+            <input id="fWeight" type="text" inputmode="decimal" maxlength="12" autocomplete="off" />
+          </div>
+          <div class="field">
             <label for="fNotes" data-i18n="dome.field.notes">Notes</label>
             <textarea id="fNotes" rows="2" maxlength="1000"></textarea>
           </div>
@@ -158,7 +184,7 @@
     </div>
 
     <script src="/i18n.js"></script>
-    <script src="/dome-i18n.js?v=8"></script>
-    <script src="/bulkhead-inventory.js?v=1"></script>
+    <script src="/dome-i18n.js?v=14"></script>
+    <script src="/bulkhead-inventory.js?v=2"></script>
   </body>
 </html>

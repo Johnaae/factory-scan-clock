@@ -330,6 +330,38 @@ function tankInstalledBulkhead(tank) {
   return list.length ? list[0] : null;
 }
 
+function bulkheadTypeDisplay(b) {
+  if (!b || b.bulkhead_type == null || b.bulkhead_type === '') return tr('ak.bulkhead.notRecorded');
+  const t = String(b.bulkhead_type);
+  if (t === 'Petro' || t === 'Water') return tr(`ak.bulkhead.type.${t}`);
+  return t;
+}
+
+function bulkheadDiameterDisplay(b) {
+  if (!b) return tr('ak.bulkhead.notRecorded');
+  if (b.diameter_label) return b.diameter_label;
+  if (b.diameter_ft != null && Number.isFinite(Number(b.diameter_ft))) return `${Number(b.diameter_ft)}'`;
+  return tr('ak.bulkhead.notRecorded');
+}
+
+function bulkheadWeightDisplay(b) {
+  if (!b || b.weight_lbs == null || !Number.isFinite(Number(b.weight_lbs))) {
+    return tr('ak.bulkhead.notRecorded');
+  }
+  const n = Number(b.weight_lbs);
+  const formatted = n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  return tr('ak.bulkhead.weightLb', { n: formatted });
+}
+
+function bulkheadSpecLine(b) {
+  if (!b) return '';
+  return tr('ak.bulkhead.specLine', {
+    type: bulkheadTypeDisplay(b),
+    diameter: bulkheadDiameterDisplay(b),
+    weight: bulkheadWeightDisplay(b),
+  });
+}
+
 function assemblyActionButtons(tank, teamId) {
   const status = String(tank.status || '').toLowerCase();
   const session = tank.active_session || null;
@@ -393,7 +425,15 @@ function renderTankCard(tank, teamId) {
     </div>
     ${
       bh
-        ? `<p class="ak-tank-bulkhead">${escapeHtml(tr('ak.bulkhead.installed', { n: bh.bulkhead_number }))}</p>`
+        ? `<div class="ak-tank-bulkhead">
+            <p class="ak-tank-bulkhead-title">${escapeHtml(tr('ak.bulkhead.installed', { n: bh.bulkhead_number }))}</p>
+            <p class="ak-tank-bulkhead-spec">${escapeHtml(bulkheadSpecLine(bh))}</p>
+            ${
+              bh.notes
+                ? `<p class="ak-tank-bulkhead-notes">${escapeHtml(tr('ak.bulkhead.notes', { notes: bh.notes }))}</p>`
+                : ''
+            }
+          </div>`
         : ''
     }
     ${
@@ -1051,10 +1091,12 @@ function renderBhInstallList() {
     .map((b) => {
       const id = Number(b.id);
       const on = bhInstallPick && Number(bhInstallPick.id) === id;
-      const meta = [b.team_name, b.notes].filter(Boolean).join(' · ');
-      return `<button type="button" class="ak-bh-row${on ? ' is-on' : ''}" data-bh-id="${id}">
+      return `<button type="button" class="ak-bh-row${on ? ' is-on' : ''}" data-bh-id="${id}" role="option" aria-selected="${
+        on ? 'true' : 'false'
+      }">
         <span class="ak-bh-num">${escapeHtml(b.bulkhead_number)}</span>
-        <small>${escapeHtml(meta || tr('ak.bulkhead.available'))}</small>
+        <small class="ak-bh-spec">${escapeHtml(bulkheadSpecLine(b))}</small>
+        ${b.notes ? `<small class="ak-bh-notes">${escapeHtml(tr('ak.bulkhead.notes', { notes: b.notes }))}</small>` : ''}
       </button>`;
     })
     .join('');

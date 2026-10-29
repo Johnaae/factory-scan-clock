@@ -176,6 +176,9 @@ const PHASE3_BULKHEAD_SQL = `
 CREATE TABLE IF NOT EXISTS bulkheads (
   id BIGSERIAL PRIMARY KEY,
   bulkhead_number TEXT NOT NULL,
+  bulkhead_type TEXT CHECK (bulkhead_type IS NULL OR bulkhead_type IN ('Petro', 'Water')),
+  diameter_ft INTEGER CHECK (diameter_ft IS NULL OR diameter_ft IN (4, 6, 8, 10, 12)),
+  weight_lbs NUMERIC(10,2) CHECK (weight_lbs IS NULL OR weight_lbs > 0),
   production_status TEXT NOT NULL DEFAULT 'created'
     CHECK (production_status IN ('created', 'in_progress', 'paused', 'completed')),
   pause_reason TEXT CHECK (pause_reason IS NULL OR pause_reason IN ('lunch', 'end_shift')),
@@ -280,6 +283,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_bulkhead_assignments_one_live_tank
   ON bulkhead_assignments (tank_id) WHERE status IN ('assigned', 'installed') AND tank_id IS NOT NULL;
 `;
 
+/**
+ * Additive Bulkhead Type / Diameter / Weight columns (nullable for existing rows).
+ * Safe to re-run; does not rewrite or delete bulkhead records.
+ */
+const PHASE3_BULKHEAD_SPEC_SQL = `
+ALTER TABLE bulkheads ADD COLUMN IF NOT EXISTS bulkhead_type TEXT;
+ALTER TABLE bulkheads ADD COLUMN IF NOT EXISTS diameter_ft INTEGER;
+ALTER TABLE bulkheads ADD COLUMN IF NOT EXISTS weight_lbs NUMERIC(10,2);
+`;
+
 /** Every relation PHASE3_DOME_SQL creates; all present = nothing to do. */
 const PHASE3_DOME_RELATIONS = [
   'domes',
@@ -338,6 +351,7 @@ module.exports = {
   PHASE3_DOME_RELATIONS,
   PHASE3_BULKHEAD_SQL,
   PHASE3_BULKHEAD_ONE_LIVE_TANK_SQL,
+  PHASE3_BULKHEAD_SPEC_SQL,
   PHASE3_BULKHEAD_RELATIONS,
   DOME_DIAMETERS_FT,
   DOME_TYPES,

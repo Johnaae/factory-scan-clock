@@ -293,6 +293,14 @@
           <input id="bhCreateNumber" type="text" maxlength="40" placeholder="e.g. BH-1042" data-i18n-placeholder="dk.bhCreate.numberPh" />
         </label>
         <div class="dk-field">
+          <span data-i18n="dome.field.type">Type</span>
+          <div id="bhCreateTypes" class="dk-chips"></div>
+        </div>
+        <div class="dk-field">
+          <span data-i18n="dome.field.diameter">Diameter</span>
+          <div id="bhCreateDiameters" class="dk-chips"></div>
+        </div>
+        <div class="dk-field">
           <span data-i18n="dk.create.workers">Workers (select 1 to 3)</span>
           <p class="dk-modal-hint" data-i18n="dk.create.pickFab">Tap employee names. Same person cannot be selected twice.</p>
           <p id="bhCreateSelected" class="dk-emp-selected" hidden></p>
@@ -313,7 +321,7 @@
 
     <div id="completeModal" class="modal-note" hidden>
       <form id="completeForm" class="modal-note-card" autocomplete="off">
-        <h3 data-i18n="dk.complete.title">Dome Complete</h3>
+        <h3 id="completeTitle" data-i18n="dk.complete.title">Dome Complete</h3>
         <p id="completeText" class="dk-modal-hint"></p>
         <label class="dk-field">
           <span data-i18n="dome.field.weightLb">Weight (lb)</span>
@@ -366,7 +374,7 @@
     </div>
 
     <script src="/i18n.js"></script>
-    <script src="/dome-i18n.js?v=10"></script>
-    <script src="/dome-kiosk.js?v=7"></script>
+    <script src="/dome-i18n.js?v=16"></script>
+    <script src="/dome-kiosk.js?v=10"></script>
   </body>
 </html>

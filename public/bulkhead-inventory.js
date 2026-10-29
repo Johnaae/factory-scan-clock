@@ -31,6 +31,9 @@
     formTitle: $('formTitle'),
     formIntro: $('formIntro'),
     fNumber: $('fNumber'),
+    fType: $('fType'),
+    fDiameter: $('fDiameter'),
+    fWeight: $('fWeight'),
     fNotes: $('fNotes'),
     formHint: $('formHint'),
     btnFormCancel: $('btnFormCancel'),
@@ -145,17 +148,25 @@
     }
   }
 
+  function weightLabel(b) {
+    if (b.weight_lbs == null) return '—';
+    return tr('dome.lb', { n: DI ? DI.formatLb(b.weight_lbs) : b.weight_lbs });
+  }
+
   function renderList() {
     const rows = state.bulkheads;
     if (els.countLabel) els.countLabel.textContent = tr('di.count', { n: rows.length });
     if (!rows.length) {
-      els.body.innerHTML = `<tr><td colspan="7" class="muted">${escapeHtml(tr('bi.empty'))}</td></tr>`;
+      els.body.innerHTML = `<tr><td colspan="10" class="muted">${escapeHtml(tr('bi.empty'))}</td></tr>`;
       return;
     }
     els.body.innerHTML = rows
       .map(
         (b) => `<tr data-id="${Number(b.id)}">
           <td class="di-num">${escapeHtml(b.bulkhead_number)}</td>
+          <td>${escapeHtml(DI ? DI.typeLabel(b.bulkhead_type) : b.bulkhead_type || '—')}</td>
+          <td>${escapeHtml(b.diameter_label || '—')}</td>
+          <td>${escapeHtml(weightLabel(b))}</td>
           <td>${escapeHtml(DI ? DI.productionLabel(b) : b.production_status)}</td>
           <td>${badge(b.inventory_status)}</td>
           <td>${escapeHtml(b.installed_tank_number || '—')}</td>
@@ -199,6 +210,9 @@
     const workers = (b.workers || []).map((w) => w.employee_name || w.name).filter(Boolean).join(', ');
     let html = `<div class="di-grid">
       ${gridItem(tr('bi.field.number'), b.bulkhead_number)}
+      ${gridItem(tr('dome.field.type'), DI ? DI.typeLabel(b.bulkhead_type) : b.bulkhead_type)}
+      ${gridItem(tr('dome.field.diameter'), b.diameter_label)}
+      ${gridItem(tr('dome.field.weightLb'), b.weight_lbs != null ? weightLabel(b) : null)}
       ${gridItem(tr('dome.field.production'), DI ? DI.productionLabel(b) : b.production_status)}
       ${gridItem(tr('dome.field.inventory'), DI ? DI.inventoryLabel(b.inventory_status) : b.inventory_status)}
       ${gridItem(tr('bi.col.tank'), b.installed_tank_number)}
@@ -267,6 +281,9 @@
     els.formIntro.textContent = editing ? '' : tr('bi.add.hint');
     els.formIntro.hidden = editing;
     els.fNumber.value = editing ? bh.bulkhead_number : '';
+    if (els.fType) els.fType.value = editing && bh.bulkhead_type ? bh.bulkhead_type : '';
+    if (els.fDiameter) els.fDiameter.value = editing && bh.diameter_ft != null ? String(bh.diameter_ft) : '';
+    if (els.fWeight) els.fWeight.value = editing && bh.weight_lbs != null ? String(bh.weight_lbs) : '';
     els.fNotes.value = editing && bh.notes ? bh.notes : '';
     els.formHint.textContent = '';
     showModal(els.formModal);
@@ -281,7 +298,13 @@
       els.formHint.textContent = tr('dome.err.bulkhead_number_required');
       return;
     }
-    const body = { bulkhead_number: number, notes: els.fNotes.value.trim() || null };
+    const body = {
+      bulkhead_number: number,
+      bulkhead_type: els.fType && els.fType.value ? els.fType.value : null,
+      diameter_ft: els.fDiameter && els.fDiameter.value ? Number(els.fDiameter.value) : null,
+      weight_lbs: els.fWeight && els.fWeight.value.trim() !== '' ? els.fWeight.value.trim() : null,
+      notes: els.fNotes.value.trim() || null,
+    };
     state.saving = true;
     els.btnFormSave.disabled = true;
     try {
