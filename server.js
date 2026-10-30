@@ -12,7 +12,9 @@ const PDFDocument = require('pdfkit');
 const {
   buildTankDailySummaryPdfBuffer,
   buildTankReportPdfBuffer,
+  buildTankLaborRangePdfBuffer,
 } = require('./scripts/production-report-pdf');
+const { createTankLaborRangeReport } = require('./scripts/tank-labor-range-report');
 const {
   tankReportBaseName,
   buildTankReportCsv,
@@ -5004,6 +5006,13 @@ const phase1 = createPhase1ProductionLogic({
   startEndOfLocalDay,
   localDateString,
   weekBoundsLocal,
+});
+
+/** Date-range tank labor / running-time report (extends Daily Summary; does not replace it). */
+const tankLaborRange = createTankLaborRangeReport(pool, {
+  nowIso,
+  sessionElapsedMs: (...args) => phase1.sessionElapsedMs(...args),
+  parseLocalDate,
 });
 
 // Heal any tanks whose persistent rework_required was wiped to paused by End Shift.
@@ -10817,6 +10826,72 @@ app.get('/api/summary/tanks.pdf', async (req, res) => {
   } catch (err) {
     console.error('[summary tanks pdf]', err);
     return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not export daily summary PDF.' });
+  }
+});
+
+/**
+ * Tank labor / running-time report for a local date range (inclusive).
+ * Manager auth via /api/summary and /api/manager middleware.
+ */
+app.get('/api/manager/tank-labor-report', async (req, res) => {
+  const auth = currentManagerFromSession(req);
+  if (!auth) return res.status(401).json({ ok: false, error: 'not_authenticated' });
+  try {
+    const start = req.query.start ? String(req.query.start) : localDateString();
+    const end = req.query.end ? String(req.query.end) : start;
+    const result = await tankLaborRange.buildTankLaborRangeReport({ startDate: start, endDate: end });
+    return res.status(result.status).json(result.body);
+  } catch (err) {
+    console.error('[tank-labor-report]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load tank labor report.' });
+  }
+});
+
+app.get('/api/summary/tank-labor-report', async (req, res) => {
+  try {
+    const start = req.query.start ? String(req.query.start) : localDateString();
+    const end = req.query.end ? String(req.query.end) : start;
+    const result = await tankLaborRange.buildTankLaborRangeReport({ startDate: start, endDate: end });
+    return res.status(result.status).json(result.body);
+  } catch (err) {
+    console.error('[summary tank-labor-report]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not load tank labor report.' });
+  }
+});
+
+app.get('/api/summary/tank-labor.csv', async (req, res) => {
+  try {
+    const start = req.query.start ? String(req.query.start) : localDateString();
+    const end = req.query.end ? String(req.query.end) : start;
+    const result = await tankLaborRange.buildTankLaborRangeReport({ startDate: start, endDate: end });
+    if (!result.ok) return res.status(result.status).json(result.body);
+    const body = tankLaborRange.buildTankLaborRangeCsv(result.body);
+    const name =
+      start === end ? `tank-labor-${start}.csv` : `tank-labor-${start}_to_${end}.csv`;
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
+    return res.send(body);
+  } catch (err) {
+    console.error('[summary tank-labor csv]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not export tank labor CSV.' });
+  }
+});
+
+app.get('/api/summary/tank-labor.pdf', async (req, res) => {
+  try {
+    const start = req.query.start ? String(req.query.start) : localDateString();
+    const end = req.query.end ? String(req.query.end) : start;
+    const result = await tankLaborRange.buildTankLaborRangeReport({ startDate: start, endDate: end });
+    if (!result.ok) return res.status(result.status).json(result.body);
+    const buffer = await buildTankLaborRangePdfBuffer(result.body);
+    const name =
+      start === end ? `tank-labor-${start}.pdf` : `tank-labor-${start}_to_${end}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
+    return res.send(buffer);
+  } catch (err) {
+    console.error('[summary tank-labor pdf]', err);
+    return res.status(500).json({ ok: false, error: 'server_error', message: 'Could not export tank labor PDF.' });
   }
 });
 

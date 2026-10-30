@@ -2146,13 +2146,18 @@ function formatDurationMinutes(mins) {
 async function refreshAll() {
   await loadTanks();
   await loadDailySummary();
+  if (tankLaborStart && tankLaborEnd) {
+    const month = monthBoundsLocal();
+    setTankLaborRange(month.start, month.end);
+    await loadTankLaborReport();
+  }
   await loadProductionNotes();
 }
 
-function todayLocalDateInput() {
-  const d = new Date();
+function todayLocalDateInput(d = new Date()) {
+  const dt = d instanceof Date ? d : new Date();
   const p = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  return `${dt.getFullYear()}-${p(dt.getMonth() + 1)}-${p(dt.getDate())}`;
 }
 
 function renderDailySummaryTable() {
@@ -2234,6 +2239,100 @@ function exportDailySummaryCsv() {
 function exportDailySummaryPdf() {
   const date = dailySummaryDate ? dailySummaryDate.value : todayLocalDateInput();
   window.location.href = `/api/summary/tanks.pdf?date=${encodeURIComponent(date)}`;
+}
+
+const tankLaborStart = document.getElementById('tankLaborStart');
+const tankLaborEnd = document.getElementById('tankLaborEnd');
+const tankLaborBody = document.getElementById('tankLaborBody');
+const tankLaborFoot = document.getElementById('tankLaborFoot');
+const tankLaborMeta = document.getElementById('tankLaborMeta');
+const tankLaborTotalRunning = document.getElementById('tankLaborTotalRunning');
+const tankLaborTotalLabor = document.getElementById('tankLaborTotalLabor');
+const btnTankLaborRefresh = document.getElementById('btnTankLaborRefresh');
+const btnTankLaborCsv = document.getElementById('btnTankLaborCsv');
+const btnTankLaborPdf = document.getElementById('btnTankLaborPdf');
+const btnTankLaborThisWeek = document.getElementById('btnTankLaborThisWeek');
+const btnTankLaborThisMonth = document.getElementById('btnTankLaborThisMonth');
+const btnTankLaborLastMonth = document.getElementById('btnTankLaborLastMonth');
+
+function monthBoundsLocal(d = new Date()) {
+  const start = new Date(d.getFullYear(), d.getMonth(), 1);
+  const end = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+  return { start: todayLocalDateInput(start), end: todayLocalDateInput(end) };
+}
+
+function weekBoundsLocalSun(d = new Date()) {
+  const day = d.getDay();
+  const start = new Date(d.getFullYear(), d.getMonth(), d.getDate() - day);
+  const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 6);
+  return { start: todayLocalDateInput(start), end: todayLocalDateInput(end) };
+}
+
+function setTankLaborRange(start, end) {
+  if (tankLaborStart) tankLaborStart.value = start;
+  if (tankLaborEnd) tankLaborEnd.value = end;
+}
+
+function renderTankLaborReport(data) {
+  if (!tankLaborBody) return;
+  const tanks = (data && data.tanks) || [];
+  const totals = (data && data.totals) || {};
+  if (tankLaborMeta) {
+    const range =
+      data.start_date === data.end_date ? data.start_date : `${data.start_date} → ${data.end_date}`;
+    tankLaborMeta.textContent = `Range: ${range} — ${tanks.length} tank${tanks.length === 1 ? '' : 's'}.`;
+  }
+  if (!tanks.length) {
+    tankLaborBody.innerHTML =
+      '<tr><td colspan="3" class="muted">No tanks with production activity in this date range.</td></tr>';
+    if (tankLaborFoot) tankLaborFoot.hidden = true;
+    return;
+  }
+  tankLaborBody.innerHTML = tanks
+    .map(
+      (r) => `<tr>
+        <td><strong>${escapeHtml(r.tank_number)}</strong></td>
+        <td>${escapeHtml(r.total_running_display || '0h 0m')}</td>
+        <td>${escapeHtml(r.total_labor_display || '0h 0m')}</td>
+      </tr>`
+    )
+    .join('');
+  if (tankLaborFoot) tankLaborFoot.hidden = false;
+  if (tankLaborTotalRunning) tankLaborTotalRunning.textContent = totals.total_running_display || '0h 0m';
+  if (tankLaborTotalLabor) tankLaborTotalLabor.textContent = totals.total_labor_display || '0h 0m';
+}
+
+async function loadTankLaborReport() {
+  if (!tankLaborBody) return;
+  const start = tankLaborStart && tankLaborStart.value ? tankLaborStart.value : todayLocalDateInput();
+  const end = tankLaborEnd && tankLaborEnd.value ? tankLaborEnd.value : start;
+  if (tankLaborStart && !tankLaborStart.value) tankLaborStart.value = start;
+  if (tankLaborEnd && !tankLaborEnd.value) tankLaborEnd.value = end;
+  if (tankLaborMeta) tankLaborMeta.textContent = 'Loading…';
+  const { res, data } = await apiJson(
+    `/api/manager/tank-labor-report?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`
+  );
+  if (!res.ok) {
+    tankLaborBody.innerHTML = `<tr><td colspan="3" class="muted">${escapeHtml(
+      (data && data.message) || 'Could not load tank labor report.'
+    )}</td></tr>`;
+    if (tankLaborFoot) tankLaborFoot.hidden = true;
+    if (tankLaborMeta) tankLaborMeta.textContent = '';
+    return;
+  }
+  renderTankLaborReport(data);
+}
+
+function exportTankLaborCsv() {
+  const start = tankLaborStart && tankLaborStart.value ? tankLaborStart.value : todayLocalDateInput();
+  const end = tankLaborEnd && tankLaborEnd.value ? tankLaborEnd.value : start;
+  window.location.href = `/api/summary/tank-labor.csv?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
+}
+
+function exportTankLaborPdf() {
+  const start = tankLaborStart && tankLaborStart.value ? tankLaborStart.value : todayLocalDateInput();
+  const end = tankLaborEnd && tankLaborEnd.value ? tankLaborEnd.value : start;
+  window.location.href = `/api/summary/tank-labor.pdf?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
 }
 
 async function loadProductionNotes() {
@@ -2333,6 +2432,33 @@ if (btnDailySummaryCsv) btnDailySummaryCsv.addEventListener('click', () => expor
 if (btnDailySummaryPrint) {
   btnDailySummaryPrint.addEventListener('click', () => exportDailySummaryPdf());
 }
+if (btnTankLaborRefresh) btnTankLaborRefresh.addEventListener('click', () => void loadTankLaborReport());
+if (btnTankLaborCsv) btnTankLaborCsv.addEventListener('click', () => exportTankLaborCsv());
+if (btnTankLaborPdf) btnTankLaborPdf.addEventListener('click', () => exportTankLaborPdf());
+if (btnTankLaborThisWeek) {
+  btnTankLaborThisWeek.addEventListener('click', () => {
+    const b = weekBoundsLocalSun();
+    setTankLaborRange(b.start, b.end);
+    void loadTankLaborReport();
+  });
+}
+if (btnTankLaborThisMonth) {
+  btnTankLaborThisMonth.addEventListener('click', () => {
+    const b = monthBoundsLocal();
+    setTankLaborRange(b.start, b.end);
+    void loadTankLaborReport();
+  });
+}
+if (btnTankLaborLastMonth) {
+  btnTankLaborLastMonth.addEventListener('click', () => {
+    const d = new Date();
+    const b = monthBoundsLocal(new Date(d.getFullYear(), d.getMonth() - 1, 1));
+    setTankLaborRange(b.start, b.end);
+    void loadTankLaborReport();
+  });
+}
+if (tankLaborStart) tankLaborStart.addEventListener('change', () => void loadTankLaborReport());
+if (tankLaborEnd) tankLaborEnd.addEventListener('change', () => void loadTankLaborReport());
 const dailySummaryTable = document.getElementById('dailySummaryTable');
 if (dailySummaryTable) {
   dailySummaryTable.querySelectorAll('th[data-sort]').forEach((th) => {

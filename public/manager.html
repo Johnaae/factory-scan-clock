@@ -192,6 +192,59 @@
         </div>
       </section>
 
+      <section class="card manager-card" id="tankLaborReportSection">
+        <div class="card-header">
+          <div class="card-header-main">
+            <h2 class="card-title">Tank Labor Report</h2>
+            <p class="card-kicker">
+              Running time and employee labor hours by tank for a date range (FAB + Assembly). Not the same as Daily Summary.
+            </p>
+          </div>
+          <div class="toolbar">
+            <button id="btnTankLaborThisWeek" class="btn btn-sm" type="button">This Week</button>
+            <button id="btnTankLaborThisMonth" class="btn btn-sm" type="button">This Month</button>
+            <button id="btnTankLaborLastMonth" class="btn btn-sm" type="button">Last Month</button>
+            <button id="btnTankLaborRefresh" class="btn btn-sm" type="button">Refresh</button>
+            <button id="btnTankLaborCsv" class="btn btn-sm" type="button">Export CSV</button>
+            <button id="btnTankLaborPdf" class="btn btn-sm" type="button">Export PDF</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="split split-2" style="align-items: end; gap: 12px; max-width: 520px">
+            <div class="field">
+              <label for="tankLaborStart">Start date</label>
+              <input id="tankLaborStart" type="date" />
+            </div>
+            <div class="field">
+              <label for="tankLaborEnd">End date</label>
+              <input id="tankLaborEnd" type="date" />
+            </div>
+          </div>
+          <p class="muted" id="tankLaborMeta" style="margin-top: 10px"></p>
+        </div>
+        <div class="card-body card-body--flush">
+          <div class="table-wrap table-scroll manager-table-wrap">
+            <table class="manager-table" id="tankLaborTable">
+              <thead>
+                <tr>
+                  <th>Tank Number</th>
+                  <th>Total Running Time</th>
+                  <th>Total Labor Hours</th>
+                </tr>
+              </thead>
+              <tbody id="tankLaborBody"><tr><td colspan="3" class="muted">Select a date range and refresh.</td></tr></tbody>
+              <tfoot id="tankLaborFoot" hidden>
+                <tr>
+                  <th scope="row">Totals</th>
+                  <th id="tankLaborTotalRunning">—</th>
+                  <th id="tankLaborTotalLabor">—</th>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+      </section>
+
       <section class="card manager-card" id="productionNotesSection">
         <div class="card-header">
           <div class="card-header-main">

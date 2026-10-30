@@ -114,6 +114,65 @@
           </div>
         </div>
       </section>
+
+      <section class="card" id="tankLaborReportRoot">
+        <div class="card-header card-header-rows">
+          <div class="card-header-main">
+            <h2 class="card-title">Tank Labor Report</h2>
+            <p class="card-kicker">
+              Date-range running time and labor hours by tank (FAB + Assembly). Separate from Daily Summary.
+            </p>
+          </div>
+          <div class="toolbar">
+            <button class="btn btn-sm" type="button" id="btnLaborThisWeek">This Week</button>
+            <button class="btn btn-sm" type="button" id="btnLaborThisMonth">This Month</button>
+            <button class="btn btn-sm" type="button" id="btnLaborLastMonth">Last Month</button>
+            <button class="btn btn-sm" type="button" id="btnLaborRefresh">Refresh</button>
+            <button class="btn btn-sm" type="button" id="btnLaborCsv">Export CSV</button>
+            <button class="btn btn-sm" type="button" id="btnLaborPdf">Export PDF</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="split split-2" style="align-items: end; gap: 12px; max-width: 560px">
+            <div class="field retain-focus">
+              <label for="laborStart">Start date</label>
+              <input id="laborStart" type="date" />
+            </div>
+            <div class="field retain-focus">
+              <label for="laborEnd">End date</label>
+              <input id="laborEnd" type="date" />
+            </div>
+          </div>
+          <p class="muted" id="laborMeta" style="margin-top: 10px"></p>
+        </div>
+        <div class="card-body card-body--flush">
+          <div class="table-panel">
+            <div class="table-wrap table-scroll">
+              <table class="summary-table" id="laborTable">
+                <thead>
+                  <tr>
+                    <th>Tank Number</th>
+                    <th>Total Running Time</th>
+                    <th>Total Labor Hours</th>
+                  </tr>
+                </thead>
+                <tbody id="laborBody">
+                  <tr>
+                    <td colspan="3" class="muted">Select a date range and refresh.</td>
+                  </tr>
+                </tbody>
+                <tfoot id="laborFoot" hidden>
+                  <tr>
+                    <th scope="row">Totals</th>
+                    <th id="laborTotalRunning">—</th>
+                    <th id="laborTotalLabor">—</th>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
     </main>
 
     <footer class="app-footer" id="adminFooter" hidden aria-label="System information"></footer>

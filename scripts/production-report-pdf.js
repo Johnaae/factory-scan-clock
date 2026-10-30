@@ -737,7 +737,45 @@ function buildTankReportPdfBuffer(data) {
   return finalizePdf(doc);
 }
 
+function buildTankLaborRangePdfBuffer(report) {
+  const start = (report && report.start_date) || '—';
+  const end = (report && report.end_date) || '—';
+  const rangeLabel = start === end ? start : `${start} → ${end}`;
+  const { doc, M, contentW } = createDoc(`Tank Labor Report — ${rangeLabel}`);
+  const w = contentW();
+  const generatedAt = new Date().toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  const tanks = (report && report.tanks) || [];
+  const totals = (report && report.totals) || {};
+
+  let y = drawTitleBlock(doc, M, w, {
+    title: 'Tank Labor Report',
+    subtitle: 'Total running time and labor hours by tank',
+    metaLine: `Date range: ${rangeLabel}  ·  Tanks: ${tanks.length}  ·  Generated: ${generatedAt}`,
+  });
+
+  const cols = [
+    { key: 'tank', label: 'Tank Number', width: 160 },
+    { key: 'running', label: 'Total Running Time', width: 184, align: 'right' },
+    { key: 'labor', label: 'Total Labor Hours', width: 184, align: 'right' },
+  ];
+
+  const rows = tanks.map((t) => ({
+    tank: t.tank_number,
+    running: t.total_running_display || '0h 0m',
+    labor: t.total_labor_display || '0h 0m',
+  }));
+  rows.push({
+    tank: 'TOTALS',
+    running: totals.total_running_display || '0h 0m',
+    labor: totals.total_labor_display || '0h 0m',
+  });
+
+  y = drawTable(doc, M, y, cols, rows, { emptyText: 'No tanks with production activity in this date range.' });
+  return finalizePdf(doc);
+}
+
 module.exports = {
   buildTankDailySummaryPdfBuffer,
   buildTankReportPdfBuffer,
+  buildTankLaborRangePdfBuffer,
 };
