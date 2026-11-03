@@ -734,6 +734,112 @@ function buildTankReportPdfBuffer(data) {
     { emptyText: 'No test attempts.' }
   );
 
+  // —— DOME SHOP ——
+  const domeShop = data.dome_shop || {};
+  doc.addPage();
+  y = drawTitleBlock(doc, M, w, {
+    title: `Tank Report — ${tankNo}`,
+    subtitle: 'DOME SHOP',
+    metaLine: `Generated: ${generatedAt}`,
+  });
+  y = drawSectionHeading(doc, M, w, y, 'DOME SHOP');
+  y = drawInfoGrid(doc, M, w, y, [
+    {
+      label: 'Dome Shop Running Time',
+      value: formatReportDuration({
+        ms: totals.dome_shop_running_ms != null ? totals.dome_shop_running_ms : domeShop.production_ms,
+        display: totals.dome_shop_running_display || domeShop.production_display || '0h 0m',
+      }),
+    },
+    {
+      label: 'Dome Shop Labor Time',
+      value: formatReportDuration({
+        ms: totals.dome_shop_labor_ms != null ? totals.dome_shop_labor_ms : domeShop.labor_ms,
+        display: totals.dome_shop_labor_display || domeShop.labor_display || '0h 0m',
+      }),
+    },
+    {
+      label: 'Dome Production Running',
+      value: formatReportDuration({
+        ms: totals.dome_production_ms != null ? totals.dome_production_ms : domeShop.dome_production_ms,
+        display: totals.dome_production_display || domeShop.dome_production_display || '0h 0m',
+      }),
+    },
+    {
+      label: 'Bulkhead Production Running',
+      value: formatReportDuration({
+        ms:
+          totals.bulkhead_production_ms != null
+            ? totals.bulkhead_production_ms
+            : domeShop.bulkhead_production_ms,
+        display:
+          totals.bulkhead_production_display || domeShop.bulkhead_production_display || '0h 0m',
+      }),
+    },
+  ]);
+
+  y = drawSectionHeading(doc, M, w, y, 'Domes');
+  y = drawTable(
+    doc,
+    M,
+    y,
+    [
+      { key: 'number', label: 'Dome #', width: 70 },
+      { key: 'type', label: 'Type', width: 70 },
+      { key: 'diameter', label: 'Dia', width: 40 },
+      { key: 'prod', label: 'Prod status', width: 70 },
+      { key: 'running', label: 'Running', width: 55, align: 'right' },
+      { key: 'labor', label: 'Labor', width: 55, align: 'right' },
+      { key: 'install', label: 'Install', width: 90 },
+      { key: 'workers', label: 'Fabricators', width: 78 },
+    ],
+    (domeShop.domes || []).map((d) => ({
+      number: d.dome_number || '—',
+      type: d.dome_type || '—',
+      diameter: d.diameter_label || (d.diameter_ft != null ? `${d.diameter_ft}'` : '—'),
+      prod: d.production_status || '—',
+      running: d.production_display || '0h 0m',
+      labor: d.labor_display || '0h 0m',
+      install: d.installation_status_label || d.installation_status || '—',
+      workers: (d.fabricators || [])
+        .map((f) => f.name || f.employee_name)
+        .filter(Boolean)
+        .join(', '),
+    })),
+    { emptyText: 'No linked Domes.' }
+  );
+
+  y = drawSectionHeading(doc, M, w, y, 'Bulkheads');
+  y = drawTable(
+    doc,
+    M,
+    y,
+    [
+      { key: 'number', label: 'Bulkhead #', width: 80 },
+      { key: 'type', label: 'Type', width: 70 },
+      { key: 'diameter', label: 'Dia', width: 40 },
+      { key: 'prod', label: 'Prod status', width: 70 },
+      { key: 'running', label: 'Running', width: 55, align: 'right' },
+      { key: 'labor', label: 'Labor', width: 55, align: 'right' },
+      { key: 'install', label: 'Install', width: 90 },
+      { key: 'workers', label: 'Workers', width: 68 },
+    ],
+    (domeShop.bulkheads || []).map((b) => ({
+      number: b.bulkhead_number || '—',
+      type: b.bulkhead_type || '—',
+      diameter: b.diameter_label || (b.diameter_ft != null ? `${b.diameter_ft}'` : '—'),
+      prod: b.production_status || '—',
+      running: b.production_display || '0h 0m',
+      labor: b.labor_display || '0h 0m',
+      install: b.installation_status_label || b.installation_status || '—',
+      workers: (b.workers || [])
+        .map((w) => w.name || w.employee_name)
+        .filter(Boolean)
+        .join(', '),
+    })),
+    { emptyText: 'No linked Bulkheads.' }
+  );
+
   return finalizePdf(doc);
 }
 

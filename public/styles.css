@@ -4226,6 +4226,35 @@ textarea:focus-visible,
   -webkit-overflow-scrolling: touch;
 }
 
+.edit-tank-dome-section {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-hair, #e2e8f0);
+}
+.edit-tank-dome-title {
+  margin: 0 0 4px;
+  font-size: 1rem;
+  font-weight: 800;
+}
+.edit-tank-dome-kicker {
+  margin: 0 0 10px;
+  font-size: 12px;
+}
+.edit-tank-dome-list {
+  display: grid;
+  gap: 8px;
+}
+.edit-tank-dome-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-hair, #e2e8f0);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
 .tank-edit-modal-footer,
 .modal-footer {
   flex-shrink: 0;

@@ -386,38 +386,59 @@ function createPhase3Bulkhead(pool, helpers = {}) {
     return map;
   }
 
-  async function loadLaborSummary(ids) {
+  async function loadLaborSummary(ids, closeMs = Date.now()) {
     const out = new Map();
     if (!ids.length) return out;
     const { rows } = await pool.query(
-      `SELECT s.bulkhead_id, s.status, s.started_at, s.ended_at,
+      `SELECT s.id AS session_id, s.bulkhead_id, s.status, s.started_at, s.ended_at,
               p.employee_id, p.employee_name, p.joined_at, p.left_at
        FROM bulkhead_labor_sessions s
        LEFT JOIN bulkhead_labor_participants p ON p.session_id = s.id
        WHERE s.bulkhead_id = ANY($1::bigint[])`,
       [ids]
     );
-    const now = Date.now();
+    const now = Number.isFinite(closeMs) ? closeMs : Date.now();
     for (const r of rows) {
       const id = Number(r.bulkhead_id);
       if (!out.has(id)) {
-        out.set(id, { production_ms: 0, labor_ms: 0, active_since: null, by_employee: new Map() });
+        out.set(id, {
+          production_ms: 0,
+          labor_ms: 0,
+          active_since: null,
+          by_employee: new Map(),
+          seen_sessions: new Set(),
+        });
       }
       const entry = out.get(id);
-      if (r.started_at) {
-        const end = r.ended_at ? new Date(r.ended_at).getTime() : now;
+      const sid = Number(r.session_id);
+      // Production is session wall-clock — count each session once (join can multiply rows).
+      if (Number.isInteger(sid) && !entry.seen_sessions.has(sid) && r.started_at) {
+        entry.seen_sessions.add(sid);
         const start = new Date(r.started_at).getTime();
+        const end =
+          r.status === 'active'
+            ? now
+            : r.ended_at
+              ? new Date(r.ended_at).getTime()
+              : now;
         if (!Number.isNaN(start) && end > start) {
           entry.production_ms += end - start;
           if (r.status === 'active' && !entry.active_since) entry.active_since = r.started_at;
         }
       }
       if (r.employee_id && r.joined_at) {
-        const left = r.left_at ? new Date(r.left_at).getTime() : now;
         const joined = new Date(r.joined_at).getTime();
+        let left = r.left_at ? new Date(r.left_at).getTime() : null;
+        if (left == null || Number.isNaN(left)) {
+          left = r.status === 'active' ? now : r.ended_at ? new Date(r.ended_at).getTime() : now;
+        }
         if (!Number.isNaN(joined) && left > joined) {
           const eid = Number(r.employee_id);
-          const prev = entry.by_employee.get(eid) || { employee_id: eid, employee_name: r.employee_name, labor_ms: 0 };
+          const prev = entry.by_employee.get(eid) || {
+            employee_id: eid,
+            employee_name: r.employee_name,
+            labor_ms: 0,
+          };
           prev.labor_ms += left - joined;
           entry.by_employee.set(eid, prev);
           entry.labor_ms += left - joined;
@@ -1383,8 +1404,161 @@ function createPhase3Bulkhead(pool, helpers = {}) {
     tankBulkheadSummaries,
     getTankBulkheadState,
     collectBulkheadLaborIntervals,
+    fetchTankBulkheadShopReport,
     MAX_WORKERS,
   };
+
+  /**
+   * Bulkhead manufacturing rows linked to a tank via assignment history
+   * (assigned / installed / cancelled) or current installed_tank_id.
+   * Unique by bulkhead_id so remove/replace does not double-count manufacturing.
+   */
+  async function fetchTankBulkheadShopReport(tankId, closeMs = Date.now()) {
+    const empty = {
+      ready: false,
+      bulkheads: [],
+      production_ms: 0,
+      production_display: formatXhYm(0),
+      labor_ms: 0,
+      labor_display: formatXhYm(0),
+      counts_removed_in_totals: true,
+    };
+    const tid = Number(tankId);
+    if (!(await isReady()) || !Number.isInteger(tid) || tid <= 0) return empty;
+
+    const { rows: linkRows } = await pool.query(
+      `SELECT a.id AS assignment_id, a.bulkhead_id, a.status AS assign_status,
+              a.installed_at, a.cancelled_at, a.cancel_reason, a.assigned_at
+       FROM bulkhead_assignments a
+       WHERE a.tank_id = $1
+       ORDER BY a.installed_at ASC NULLS LAST, a.id ASC`,
+      [tid]
+    );
+    const { rows: currentRows } = await pool.query(
+      `SELECT id AS bulkhead_id FROM bulkheads
+       WHERE installed_tank_id = $1 AND deleted_at IS NULL`,
+      [tid]
+    );
+
+    const linkByBh = new Map();
+    const statusPriority = { installed: 3, assigned: 2, cancelled: 1 };
+    for (const r of linkRows) {
+      const bid = Number(r.bulkhead_id);
+      if (!Number.isInteger(bid) || bid <= 0) continue;
+      const prev = linkByBh.get(bid);
+      const pri = statusPriority[String(r.assign_status)] || 0;
+      const prevPri = prev ? statusPriority[String(prev.assign_status)] || 0 : -1;
+      if (!prev || pri >= prevPri) {
+        linkByBh.set(bid, {
+          assignment_id: Number(r.assignment_id),
+          assign_status: r.assign_status,
+          installed_at: r.installed_at || null,
+          cancelled_at: r.cancelled_at || null,
+          cancel_reason: r.cancel_reason || null,
+          assigned_at: r.assigned_at || null,
+          _all_statuses: prev
+            ? [...new Set([...(prev._all_statuses || []), r.assign_status])]
+            : [r.assign_status],
+        });
+      } else if (prev) {
+        prev._all_statuses = [...new Set([...(prev._all_statuses || []), r.assign_status])];
+      }
+    }
+    for (const r of currentRows) {
+      const bid = Number(r.bulkhead_id);
+      if (!Number.isInteger(bid) || bid <= 0) continue;
+      if (!linkByBh.has(bid)) {
+        linkByBh.set(bid, {
+          assignment_id: null,
+          assign_status: 'installed',
+          installed_at: null,
+          cancelled_at: null,
+          cancel_reason: null,
+          assigned_at: null,
+          _all_statuses: ['installed'],
+        });
+      }
+    }
+
+    const ids = [...linkByBh.keys()];
+    if (!ids.length) return { ...empty, ready: true };
+
+    const { rows: bhRows } = await pool.query(
+      `SELECT b.*, t.name AS team_name
+       FROM bulkheads b
+       LEFT JOIN teams t ON t.id = b.team_id
+       WHERE b.id = ANY($1::bigint[])`,
+      [ids]
+    );
+    const workers = await loadWorkers(ids);
+    const labor = await loadLaborSummary(ids, closeMs);
+    const byId = new Map(bhRows.map((r) => [Number(r.id), r]));
+
+    let productionMs = 0;
+    let laborMs = 0;
+    const bulkheads = [];
+    for (const bid of ids.sort((a, b) => a - b)) {
+      const row = byId.get(bid);
+      if (!row) continue;
+      const lab = labor.get(bid) || {
+        production_ms: 0,
+        labor_ms: 0,
+        by_employee: new Map(),
+        active_since: null,
+      };
+      const link = linkByBh.get(bid) || {};
+      const statuses = link._all_statuses || [link.assign_status];
+      const currentlyInstalled =
+        ['installed', 'assigned'].includes(String(link.assign_status)) ||
+        (row.installed_tank_id != null && Number(row.installed_tank_id) === tid);
+      const previouslyRemoved =
+        !currentlyInstalled && statuses.includes('cancelled');
+      productionMs += Number(lab.production_ms) || 0;
+      laborMs += Number(lab.labor_ms) || 0;
+      const mapped = mapBulkhead({ ...row, team_name: row.team_name });
+      bulkheads.push({
+        ...mapped,
+        workers: workers.get(bid) || [],
+        production_ms: lab.production_ms,
+        production_display: formatXhYm(lab.production_ms),
+        labor_ms: lab.labor_ms,
+        labor_display: formatXhYm(lab.labor_ms),
+        labor_by_employee: [...(lab.by_employee || new Map()).values()].map((e) => ({
+          ...e,
+          labor_display: formatXhYm(e.labor_ms),
+        })),
+        installation_status: currentlyInstalled
+          ? String(link.assign_status) === 'assigned'
+            ? 'assigned'
+            : 'installed'
+          : previouslyRemoved
+            ? 'removed'
+            : link.assign_status || null,
+        installation_status_label: currentlyInstalled
+          ? String(link.assign_status) === 'assigned'
+            ? 'Assigned'
+            : 'Installed'
+          : previouslyRemoved
+            ? 'Removed / Previously installed'
+            : link.assign_status || '—',
+        assign_installed_at: link.installed_at || mapped.installed_at,
+        cancelled_at: link.cancelled_at,
+        cancel_reason: link.cancel_reason,
+        counts_in_tank_totals: true,
+        link_kind: 'bulkhead_assignment',
+      });
+    }
+
+    return {
+      ready: true,
+      bulkheads,
+      production_ms: productionMs,
+      production_display: formatXhYm(productionMs),
+      labor_ms: laborMs,
+      labor_display: formatXhYm(laborMs),
+      counts_removed_in_totals: true,
+    };
+  }
 }
 
 module.exports = { createPhase3Bulkhead, MAX_WORKERS };

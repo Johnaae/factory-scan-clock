@@ -38,9 +38,20 @@ const editTankRequiresTest = document.getElementById('editTankRequiresTest');
 const editTankDescription = document.getElementById('editTankDescription');
 const editTankNotes = document.getElementById('editTankNotes');
 const editTankHint = document.getElementById('editTankHint');
+const editTankDomeSection = document.getElementById('editTankDomeSection');
+const editTankDomeList = document.getElementById('editTankDomeList');
+const removeDomeBackdrop = document.getElementById('removeDomeBackdrop');
+const removeDomeSummary = document.getElementById('removeDomeSummary');
+const removeDomeReason = document.getElementById('removeDomeReason');
+const removeDomeHint = document.getElementById('removeDomeHint');
+const btnConfirmRemoveDome = document.getElementById('btnConfirmRemoveDome');
+const btnCancelRemoveDome = document.getElementById('btnCancelRemoveDome');
+const btnCloseRemoveDome = document.getElementById('btnCloseRemoveDome');
 const btnSaveTankEdit = document.getElementById('btnSaveTankEdit');
 const btnCancelTankEdit = document.getElementById('btnCancelTankEdit');
 const btnCloseTankEdit = document.getElementById('btnCloseTankEdit');
+let editTankDomeState = { tankId: null, tankNumber: '', installs: [] };
+let pendingRemoveDome = null;
 const logoutBtn = document.getElementById('logoutBtn');
 const btnSaveKioskPins = document.getElementById('btnSaveKioskPins');
 const kioskPinHint = document.getElementById('kioskPinHint');
@@ -496,6 +507,119 @@ function renderTankReportDomeItem(data) {
           <div class="tank-lifecycle-label">${escapeHtml(DI ? DI.tr('mgr.dome.domes') : 'Domes')}</div>
           <div class="tank-lifecycle-value">${body}</div>
         </div>`;
+}
+
+function renderTankReportDomeShopUnits(domeShop) {
+  const ds = domeShop || {};
+  const domes = Array.isArray(ds.domes) ? ds.domes : [];
+  const bulkheads = Array.isArray(ds.bulkheads) ? ds.bulkheads : [];
+  if (!domes.length && !bulkheads.length) {
+    return `<p class="muted" style="margin-top:12px">No Dome or Bulkhead manufacturing linked to this tank.</p>`;
+  }
+
+  const empRows = (emps) =>
+    (emps || [])
+      .map(
+        (e) => `<tr>
+          <td>${escapeHtml(e.employee_name || e.name || '—')}</td>
+          <td>${escapeHtml(e.employee_code || e.code || '—')}</td>
+          <td>${escapeHtml(e.labor_display || fmtReportDuration({ ms: e.labor_ms }))}</td>
+        </tr>`
+      )
+      .join('');
+
+  const domeBlocks = domes
+    .map((d) => {
+      const fabs = (d.fabricators || [])
+        .map((f) => escapeHtml(f.name || f.employee_name || '—'))
+        .join(', ');
+      const statusBadge =
+        d.installation_status === 'removed'
+          ? 'badge-warn'
+          : d.installation_status === 'installed'
+            ? 'badge-in'
+            : 'badge-muted';
+      return `<details class="piece-history-item" style="margin-top:10px">
+        <summary class="piece-history-summary">
+          <span class="piece-history-chevron" aria-hidden="true"></span>
+          <span class="piece-history-title">Dome ${escapeHtml(d.dome_number || '—')} · ${escapeHtml(
+            d.installation_status_label || d.installation_status || '—'
+          )} · ${escapeHtml(d.production_display || '0h 0m')}</span>
+        </summary>
+        <div class="piece-history-body">
+          <div class="tank-lifecycle-grid">
+            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">Dome Number</div><div class="tank-lifecycle-value">${escapeHtml(d.dome_number || '—')}</div></div>
+            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">Dome Type</div><div class="tank-lifecycle-value">${escapeHtml(d.dome_type || '—')}</div></div>
+            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">Diameter</div><div class="tank-lifecycle-value">${escapeHtml(d.diameter_label || (d.diameter_ft != null ? `${d.diameter_ft}'` : '—'))}</div></div>
+            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">Production Status</div><div class="tank-lifecycle-value">${escapeHtml(d.production_status || '—')}</div></div>
+            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">Production Running Time</div><div class="tank-lifecycle-value">${escapeHtml(d.production_display || '0h 0m')}</div></div>
+            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">Total Labor Hours</div><div class="tank-lifecycle-value">${escapeHtml(d.labor_display || '0h 0m')}</div></div>
+            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">Fabricators</div><div class="tank-lifecycle-value">${fabs || '—'}</div></div>
+            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">Production Start</div><div class="tank-lifecycle-value">${d.started_at ? escapeHtml(fmtIso(d.started_at)) : '—'}</div></div>
+            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">Production Completed</div><div class="tank-lifecycle-value">${d.completed_at ? escapeHtml(fmtIso(d.completed_at)) : '—'}</div></div>
+            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">Installation Status</div><div class="tank-lifecycle-value"><span class="badge ${statusBadge}">${escapeHtml(d.installation_status_label || '—')}</span>${d.piece_number != null ? ` · Piece ${Number(d.piece_number)}` : ''}</div></div>
+          </div>
+          <h5 class="tank-report-subsection-title" style="margin-top:12px">Employee Labor Hours</h5>
+          <div class="table-wrap">
+            <table class="tank-report-table">
+              <thead><tr><th>Employee</th><th>Code</th><th>Labor</th></tr></thead>
+              <tbody>${empRows(d.labor_by_employee) || '<tr><td colspan="3" class="muted">No Dome labor recorded.</td></tr>'}</tbody>
+            </table>
+          </div>
+        </div>
+      </details>`;
+    })
+    .join('');
+
+  const bulkheadBlocks = bulkheads
+    .map((b) => {
+      const workers = (b.workers || [])
+        .map((w) => escapeHtml(w.name || w.employee_name || '—'))
+        .join(', ');
+      const statusBadge =
+        b.installation_status === 'removed'
+          ? 'badge-warn'
+          : b.installation_status === 'installed' || b.installation_status === 'assigned'
+            ? 'badge-in'
+            : 'badge-muted';
+      return `<details class="piece-history-item" style="margin-top:10px">
+        <summary class="piece-history-summary">
+          <span class="piece-history-chevron" aria-hidden="true"></span>
+          <span class="piece-history-title">Bulkhead ${escapeHtml(b.bulkhead_number || '—')} · ${escapeHtml(
+            b.installation_status_label || b.installation_status || '—'
+          )} · ${escapeHtml(b.production_display || '0h 0m')}</span>
+        </summary>
+        <div class="piece-history-body">
+          <div class="tank-lifecycle-grid">
+            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">Bulkhead Number</div><div class="tank-lifecycle-value">${escapeHtml(b.bulkhead_number || '—')}</div></div>
+            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">Bulkhead Type</div><div class="tank-lifecycle-value">${escapeHtml(b.bulkhead_type || '—')}</div></div>
+            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">Diameter</div><div class="tank-lifecycle-value">${escapeHtml(b.diameter_label || (b.diameter_ft != null ? `${b.diameter_ft}'` : '—'))}</div></div>
+            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">Production Status</div><div class="tank-lifecycle-value">${escapeHtml(b.production_status || '—')}</div></div>
+            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">Production Running Time</div><div class="tank-lifecycle-value">${escapeHtml(b.production_display || '0h 0m')}</div></div>
+            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">Total Labor Hours</div><div class="tank-lifecycle-value">${escapeHtml(b.labor_display || '0h 0m')}</div></div>
+            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">Assigned Employees</div><div class="tank-lifecycle-value">${workers || '—'}</div></div>
+            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">Production Start</div><div class="tank-lifecycle-value">${b.started_at ? escapeHtml(fmtIso(b.started_at)) : '—'}</div></div>
+            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">Production Completed</div><div class="tank-lifecycle-value">${b.completed_at ? escapeHtml(fmtIso(b.completed_at)) : '—'}</div></div>
+            <div class="tank-lifecycle-item"><div class="tank-lifecycle-label">Installation Status</div><div class="tank-lifecycle-value"><span class="badge ${statusBadge}">${escapeHtml(b.installation_status_label || '—')}</span></div></div>
+          </div>
+          <h5 class="tank-report-subsection-title" style="margin-top:12px">Employee Labor Hours</h5>
+          <div class="table-wrap">
+            <table class="tank-report-table">
+              <thead><tr><th>Employee</th><th>Code</th><th>Labor</th></tr></thead>
+              <tbody>${empRows(b.labor_by_employee) || '<tr><td colspan="3" class="muted">No Bulkhead labor recorded.</td></tr>'}</tbody>
+            </table>
+          </div>
+        </div>
+      </details>`;
+    })
+    .join('');
+
+  return `
+    <h5 class="tank-report-subsection-title" style="margin-top:14px">Domes (${domes.length})</h5>
+    ${domeBlocks || '<p class="muted">No linked Domes.</p>'}
+    <h5 class="tank-report-subsection-title" style="margin-top:14px">Bulkheads (${bulkheads.length})</h5>
+    ${bulkheadBlocks || '<p class="muted">No linked Bulkheads.</p>'}
+  `;
 }
 
 function tankStatusBadgeBase(t) {
@@ -1002,6 +1126,137 @@ function closeTankEdit() {
   if (!tankEditBackdrop) return;
   tankEditBackdrop.classList.remove('show');
   tankEditBackdrop.setAttribute('aria-hidden', 'true');
+  closeRemoveDomeDialog();
+}
+
+function closeRemoveDomeDialog() {
+  pendingRemoveDome = null;
+  if (removeDomeReason) removeDomeReason.value = '';
+  if (removeDomeHint) removeDomeHint.textContent = '';
+  if (removeDomeBackdrop) {
+    removeDomeBackdrop.classList.remove('show');
+    removeDomeBackdrop.setAttribute('aria-hidden', 'true');
+  }
+}
+
+function renderEditTankDomes(domeState, tank) {
+  const installs = ((domeState && domeState.installs) || []).filter(
+    (i) => String(i.status || '').toLowerCase() === 'installed'
+  );
+  editTankDomeState = {
+    tankId: tank ? Number(tank.id) : null,
+    tankNumber: tank ? tank.tank_number || '' : '',
+    installs,
+  };
+  if (!editTankDomeSection || !editTankDomeList) return;
+  if (!installs.length) {
+    editTankDomeSection.hidden = true;
+    editTankDomeList.innerHTML = '';
+    return;
+  }
+  editTankDomeSection.hidden = false;
+  editTankDomeList.innerHTML = installs
+    .map((i) => {
+      const id = Number(i.installation_id);
+      const meta = [
+        i.piece_number != null ? `Piece ${i.piece_number}` : null,
+        i.dome_type || null,
+        i.diameter_label || (i.diameter_ft != null ? `${i.diameter_ft}'` : null),
+        i.weight_lbs != null ? `${i.weight_lbs} lb` : null,
+      ]
+        .filter(Boolean)
+        .join(' · ');
+      return `<div class="edit-tank-dome-row" data-installation-id="${id}">
+        <div>
+          <strong>Dome ${escapeHtml(i.dome_number || '—')}</strong>
+          <div class="muted" style="font-size:12px;margin-top:2px">${escapeHtml(meta || 'Installed')}</div>
+        </div>
+        <button type="button" class="btn btn-sm btn-danger" data-act="remove-dome"
+          data-installation-id="${id}"
+          data-dome-number="${escapeHtml(i.dome_number || '')}"
+          data-piece-number="${Number(i.piece_number) || 1}">Remove Dome</button>
+      </div>`;
+    })
+    .join('');
+  editTankDomeList.querySelectorAll('[data-act="remove-dome"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      openRemoveDomeDialog({
+        installationId: Number(btn.getAttribute('data-installation-id')),
+        domeNumber: btn.getAttribute('data-dome-number') || '',
+        pieceNumber: Number(btn.getAttribute('data-piece-number')) || 1,
+      });
+    });
+  });
+}
+
+function openRemoveDomeDialog({ installationId, domeNumber, pieceNumber }) {
+  if (!removeDomeBackdrop) return;
+  pendingRemoveDome = {
+    tankId: editTankDomeState.tankId,
+    tankNumber: editTankDomeState.tankNumber,
+    installationId,
+    domeNumber,
+    pieceNumber,
+  };
+  if (removeDomeSummary) {
+    removeDomeSummary.textContent = `Tank ${pendingRemoveDome.tankNumber} · Dome ${domeNumber}${
+      pieceNumber ? ` · Piece ${pieceNumber}` : ''
+    }`;
+  }
+  if (removeDomeReason) removeDomeReason.value = '';
+  if (removeDomeHint) removeDomeHint.textContent = '';
+  removeDomeBackdrop.classList.add('show');
+  removeDomeBackdrop.setAttribute('aria-hidden', 'false');
+  setTimeout(() => {
+    if (removeDomeReason) removeDomeReason.focus();
+  }, 50);
+}
+
+async function confirmRemoveDome() {
+  if (!pendingRemoveDome || !pendingRemoveDome.tankId || !pendingRemoveDome.installationId) return;
+  const reason = removeDomeReason ? String(removeDomeReason.value || '').trim() : '';
+  if (reason.length < 3) {
+    if (removeDomeHint) removeDomeHint.textContent = 'Enter a reason (at least 3 characters).';
+    return;
+  }
+  if (btnConfirmRemoveDome) btnConfirmRemoveDome.disabled = true;
+  try {
+    const { res, data } = await apiJson(`/api/manager/tanks/${pendingRemoveDome.tankId}/undo-dome`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        installation_id: pendingRemoveDome.installationId,
+        reason,
+      }),
+    });
+    if (!res.ok) {
+      if (removeDomeHint) {
+        removeDomeHint.textContent = (data && data.message) || 'Could not remove installed dome.';
+      }
+      return;
+    }
+    closeRemoveDomeDialog();
+    if (editTankHint) {
+      editTankHint.textContent = (data && data.message) || 'Dome removed.';
+    }
+    tankHint.textContent = (data && data.message) || 'Installed dome removed.';
+    await loadTanks();
+    // Refresh Edit Tank dome list without closing the modal.
+    if (editTankDomeState.tankId) {
+      const one = await apiJson(`/api/tanks/${editTankDomeState.tankId}/report`);
+      const tank = one.res.ok && one.data && one.data.tank ? one.data.tank : null;
+      const domeState = one.res.ok && one.data ? one.data.dome_state || null : null;
+      if (tank) {
+        if (editTankStatus && String(tank.status || '').toLowerCase() === 'ready_for_dome_install') {
+          editTankStatus.querySelectorAll('option[data-current-only]').forEach((o) => o.remove());
+          editTankStatus.value = tank.status;
+        }
+        renderEditTankDomes(domeState, tank);
+      }
+    }
+  } finally {
+    if (btnConfirmRemoveDome) btnConfirmRemoveDome.disabled = false;
+  }
 }
 
 async function editTank(id) {
@@ -1009,6 +1264,7 @@ async function editTank(id) {
   let tank = one.res.ok && one.data && one.data.tank ? one.data.tank : null;
   const hasActivity = Boolean(one.res.ok && one.data && one.data.has_production_activity);
   const minPieces = Math.max(1, Number(one.data && one.data.max_piece_with_activity) || 1);
+  const domeState = one.res.ok && one.data ? one.data.dome_state || null : null;
   if (!tank) {
     const { res, data } = await apiJson(`/api/tanks?status=all`);
     if (res.ok) tank = (data.tanks || []).find((t) => Number(t.id) === Number(id));
@@ -1051,6 +1307,7 @@ async function editTank(id) {
   if (editTankDescription) editTankDescription.value = tank.description || '';
   if (editTankNotes) editTankNotes.value = tank.notes || '';
   if (editTankHint) editTankHint.textContent = '';
+  renderEditTankDomes(domeState, tank);
   if (tankEditBackdrop) {
     tankEditBackdrop.classList.add('show');
     tankEditBackdrop.setAttribute('aria-hidden', 'false');
@@ -1390,6 +1647,15 @@ function renderTankReport(data) {
   const testingElapsedDisplay = fmtReportDuration({
     ms: overviewTotals.testing_elapsed_ms,
     display: overviewTotals.testing_elapsed_display || (at && at.testing_elapsed_display),
+  });
+  const domeShop = data.dome_shop || {};
+  const domeShopRunningDisplay = fmtReportDuration({
+    ms: overviewTotals.dome_shop_running_ms != null ? overviewTotals.dome_shop_running_ms : domeShop.production_ms,
+    display: overviewTotals.dome_shop_running_display || domeShop.production_display,
+  });
+  const domeShopLaborDisplay = fmtReportDuration({
+    ms: overviewTotals.dome_shop_labor_ms != null ? overviewTotals.dome_shop_labor_ms : domeShop.labor_ms,
+    display: overviewTotals.dome_shop_labor_display || domeShop.labor_display,
   });
 
   const configuredPieces = Number(tank.piece_count) || pieces.length || 1;
@@ -1794,8 +2060,9 @@ function renderTankReport(data) {
         </div>
       </div>
       <p class="muted" style="margin:10px 0 0;font-size:12px">
-        Total Running Time = FAB Running + Assembly Duration.
-        Total Labor Time = FAB Labor + Assembly Labor.
+        Total Running Time = FAB Running + Assembly Duration + Dome Production + Bulkhead Production.
+        Total Labor Time = FAB Labor + Assembly Labor + Dome Labor + Bulkhead Labor.
+        Dome Install (FAB) is already in FAB Running and is not counted again.
         Testing / QA-QC Time is reported separately and is not included in either total.
       </p>
 
@@ -2044,6 +2311,65 @@ function renderTankReport(data) {
                 }</tbody>
               </table>
             </div>
+          </div>
+        </details>
+
+        <details class="tank-report-dept-card">
+          <summary class="tank-report-dept-summary">
+            <span class="tank-report-dept-title">DOME SHOP</span>
+            <span class="tank-report-dept-meta">Running: ${escapeHtml(domeShopRunningDisplay)} | Labor: ${escapeHtml(domeShopLaborDisplay)}</span>
+          </summary>
+          <div class="tank-report-dept-body">
+            <div class="tank-lifecycle-grid">
+              <div class="tank-lifecycle-item">
+                <div class="tank-lifecycle-label">Dome Production Running</div>
+                <div class="tank-lifecycle-value">${escapeHtml(
+                  fmtReportDuration({
+                    ms: overviewTotals.dome_production_ms != null ? overviewTotals.dome_production_ms : domeShop.dome_production_ms,
+                    display: overviewTotals.dome_production_display || domeShop.dome_production_display,
+                  })
+                )}</div>
+              </div>
+              <div class="tank-lifecycle-item">
+                <div class="tank-lifecycle-label">Dome Labor Hours</div>
+                <div class="tank-lifecycle-value">${escapeHtml(
+                  fmtReportDuration({
+                    ms: overviewTotals.dome_labor_ms != null ? overviewTotals.dome_labor_ms : domeShop.dome_labor_ms,
+                    display: overviewTotals.dome_labor_display || domeShop.dome_labor_display,
+                  })
+                )}</div>
+              </div>
+              <div class="tank-lifecycle-item">
+                <div class="tank-lifecycle-label">Bulkhead Production Running</div>
+                <div class="tank-lifecycle-value">${escapeHtml(
+                  fmtReportDuration({
+                    ms:
+                      overviewTotals.bulkhead_production_ms != null
+                        ? overviewTotals.bulkhead_production_ms
+                        : domeShop.bulkhead_production_ms,
+                    display:
+                      overviewTotals.bulkhead_production_display || domeShop.bulkhead_production_display,
+                  })
+                )}</div>
+              </div>
+              <div class="tank-lifecycle-item">
+                <div class="tank-lifecycle-label">Bulkhead Labor Hours</div>
+                <div class="tank-lifecycle-value">${escapeHtml(
+                  fmtReportDuration({
+                    ms:
+                      overviewTotals.bulkhead_labor_ms != null
+                        ? overviewTotals.bulkhead_labor_ms
+                        : domeShop.bulkhead_labor_ms,
+                    display: overviewTotals.bulkhead_labor_display || domeShop.bulkhead_labor_display,
+                  })
+                )}</div>
+              </div>
+            </div>
+            <p class="muted" style="margin:10px 0 0;font-size:12px">
+              Manufacturing time only (Dome Shop sessions). FAB Dome Install time stays under FAB SHOP.
+              Removed / previously installed units are listed separately; their manufacturing hours are included once per unit in tank totals.
+            </p>
+            ${renderTankReportDomeShopUnits(domeShop)}
           </div>
         </details>
       </div>
@@ -2388,6 +2714,14 @@ if (btnSelectAllTanks || document.getElementById('tankSelectAll')) {
       toggleAll();
     });
   }
+}
+if (btnConfirmRemoveDome) btnConfirmRemoveDome.addEventListener('click', () => void confirmRemoveDome());
+if (btnCancelRemoveDome) btnCancelRemoveDome.addEventListener('click', () => closeRemoveDomeDialog());
+if (btnCloseRemoveDome) btnCloseRemoveDome.addEventListener('click', () => closeRemoveDomeDialog());
+if (removeDomeBackdrop) {
+  removeDomeBackdrop.addEventListener('click', (e) => {
+    if (e.target === removeDomeBackdrop) closeRemoveDomeDialog();
+  });
 }
 if (btnSaveTankEdit) btnSaveTankEdit.addEventListener('click', () => void saveTankEdit());
 if (btnCancelTankEdit) btnCancelTankEdit.addEventListener('click', closeTankEdit);

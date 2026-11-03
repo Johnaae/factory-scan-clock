@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS domes (
     CHECK (production_status IN ('created', 'in_progress', 'paused', 'completed')),
   pause_reason TEXT CHECK (pause_reason IS NULL OR pause_reason IN ('lunch', 'end_shift')),
   inventory_status TEXT NOT NULL DEFAULT 'not_in_inventory'
-    CHECK (inventory_status IN ('not_in_inventory', 'available', 'reserved', 'installed')),
+    CHECK (inventory_status IN ('not_in_inventory', 'available', 'reserved', 'installed', 'quarantined')),
   source TEXT NOT NULL DEFAULT 'kiosk' CHECK (source IN ('kiosk', 'manual')),
   machine_id BIGINT REFERENCES machines(id) ON DELETE SET NULL,
   team_id BIGINT REFERENCES teams(id) ON DELETE SET NULL,

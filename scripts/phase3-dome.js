@@ -349,6 +349,30 @@ function createPhase3Dome(pool, helpers = {}) {
     }
   }
 
+  /** True when domes.inventory_status CHECK allows 'quarantined' (migration applied). */
+  let quarantineCache = { value: null, checkedAt: 0 };
+  async function isDomeQuarantineReady(client = pool) {
+    if (quarantineCache.value != null && Date.now() - quarantineCache.checkedAt < 60000) {
+      return quarantineCache.value;
+    }
+    try {
+      const { rows } = await client.query(
+        `SELECT pg_get_constraintdef(c.oid) AS def
+         FROM pg_constraint c
+         JOIN pg_class t ON t.oid = c.conrelid
+         JOIN pg_namespace n ON n.oid = t.relnamespace
+         WHERE n.nspname = 'public' AND t.relname = 'domes' AND c.contype = 'c'
+           AND pg_get_constraintdef(c.oid) ILIKE '%inventory_status%'`
+      );
+      const ok = rows.some((r) => /quarantined/i.test(String(r.def || '')));
+      quarantineCache = { value: ok, checkedAt: Date.now() };
+      return ok;
+    } catch (_err) {
+      quarantineCache = { value: false, checkedAt: Date.now() };
+      return false;
+    }
+  }
+
   async function activeEmployees(ids, client) {
     if (!ids.length) return [];
     const { rows } = await client.query(
@@ -1562,6 +1586,7 @@ function createPhase3Dome(pool, helpers = {}) {
     available: `d.inventory_status = 'available'`,
     reserved: `d.inventory_status = 'reserved'`,
     installed: `d.inventory_status = 'installed'`,
+    quarantined: `d.inventory_status = 'quarantined'`,
     in_production: `d.production_status <> 'completed'`,
   };
 
@@ -1598,7 +1623,7 @@ function createPhase3Dome(pool, helpers = {}) {
     const { rows: counts } = await pool.query(
       `SELECT inventory_status, production_status, COUNT(*)::int AS n FROM domes WHERE deleted_at IS NULL GROUP BY 1, 2`
     );
-    const totals = { all: 0, available: 0, reserved: 0, installed: 0, in_production: 0 };
+    const totals = { all: 0, available: 0, reserved: 0, installed: 0, quarantined: 0, in_production: 0 };
     for (const c of counts) {
       totals.all += c.n;
       if (c.production_status !== 'completed') totals.in_production += c.n;
@@ -2419,6 +2444,265 @@ function createPhase3Dome(pool, helpers = {}) {
     });
   }
 
+  /**
+   * Manager-only: detach an installed (finished) dome from a tank.
+   * Soft-cancels the installation row (history preserved). Quarantines the dome so it
+   * cannot return to available inventory / be re-installed. Does not delete labor.
+   */
+  async function undoDomeInstall(body = {}, performedBy = 'manager') {
+    if (!(await isReady())) return notReady();
+    const tankId = Number(body.tank_id != null ? body.tank_id : body.tankId);
+    const installationId = Number(
+      body.installation_id != null ? body.installation_id : body.installationId
+    );
+    const domeId = Number(body.dome_id != null ? body.dome_id : body.domeId);
+    const pieceNumber =
+      body.piece_number != null || body.pieceNumber != null
+        ? Math.min(8, Math.max(1, Number(body.piece_number != null ? body.piece_number : body.pieceNumber) || 1))
+        : null;
+    const reason = body.reason != null ? String(body.reason).trim().slice(0, 500) : '';
+    if (!reason || reason.length < 3) {
+      return errResult(
+        400,
+        'reason_required',
+        'Enter a short reason for removing the installed dome (at least 3 characters).'
+      );
+    }
+    const by = String(performedBy || 'manager').slice(0, 200);
+    return withTransaction(async (client) => {
+      let inst = null;
+      if (Number.isInteger(installationId) && installationId > 0) {
+        const { rows } = await client.query(
+          `SELECT i.*, d.dome_number, d.dome_type, d.diameter_ft, d.weight_lbs, ms.status AS session_status
+           FROM dome_installations i
+           JOIN domes d ON d.id = i.dome_id
+           LEFT JOIN machine_sessions ms ON ms.id = i.current_session_id
+           WHERE i.id = $1
+           FOR UPDATE OF i`,
+          [installationId]
+        );
+        inst = rows[0] || null;
+      } else if (Number.isInteger(tankId) && tankId > 0 && pieceNumber != null) {
+        const { rows } = await client.query(
+          `SELECT i.*, d.dome_number, d.dome_type, d.diameter_ft, d.weight_lbs, ms.status AS session_status
+           FROM dome_installations i
+           JOIN domes d ON d.id = i.dome_id
+           LEFT JOIN machine_sessions ms ON ms.id = i.current_session_id
+           WHERE i.tank_id = $1 AND i.piece_number = $2 AND i.status IN ('in_progress', 'installed')
+           ORDER BY CASE WHEN i.status = 'installed' THEN 0 ELSE 1 END, i.id DESC
+           LIMIT 1
+           FOR UPDATE OF i`,
+          [tankId, pieceNumber]
+        );
+        inst = rows[0] || null;
+      } else if (Number.isInteger(domeId) && domeId > 0) {
+        const { rows } = await client.query(
+          `SELECT i.*, d.dome_number, d.dome_type, d.diameter_ft, d.weight_lbs, ms.status AS session_status
+           FROM dome_installations i
+           JOIN domes d ON d.id = i.dome_id
+           LEFT JOIN machine_sessions ms ON ms.id = i.current_session_id
+           WHERE i.dome_id = $1 AND i.status IN ('in_progress', 'installed')
+           ORDER BY CASE WHEN i.status = 'installed' THEN 0 ELSE 1 END, i.id DESC
+           LIMIT 1
+           FOR UPDATE OF i`,
+          [domeId]
+        );
+        inst = rows[0] || null;
+      } else if (Number.isInteger(tankId) && tankId > 0) {
+        const { rows } = await client.query(
+          `SELECT i.*, d.dome_number, d.dome_type, d.diameter_ft, d.weight_lbs, ms.status AS session_status
+           FROM dome_installations i
+           JOIN domes d ON d.id = i.dome_id
+           LEFT JOIN machine_sessions ms ON ms.id = i.current_session_id
+           WHERE i.tank_id = $1 AND i.status = 'installed'
+           ORDER BY i.piece_number, i.id
+           LIMIT 2
+           FOR UPDATE OF i`,
+          [tankId]
+        );
+        if (rows.length > 1) {
+          return errResult(
+            400,
+            'installation_required',
+            'This tank has multiple installed domes. Select which installation to remove.'
+          );
+        }
+        inst = rows[0] || null;
+      } else {
+        return errResult(400, 'validation', 'tank_id with installation_id (or piece_number) is required.');
+      }
+
+      if (!inst) {
+        return errResult(404, 'not_found', 'No installed dome found for that selection.');
+      }
+      if (Number.isInteger(tankId) && tankId > 0 && Number(inst.tank_id) !== tankId) {
+        return errResult(409, 'tank_mismatch', 'That dome installation does not belong to this tank.');
+      }
+      if (String(inst.status) === 'cancelled') {
+        return errResult(409, 'already_removed', `Dome ${inst.dome_number} was already removed from this tank.`);
+      }
+      if (String(inst.status) === 'in_progress') {
+        return errResult(
+          409,
+          'install_in_progress',
+          `Dome Install for ${inst.dome_number} is still in progress. Finish or cancel it on the Fabrication kiosk first.`
+        );
+      }
+      if (String(inst.status) !== 'installed') {
+        return errResult(409, 'not_installed', 'Only a finished installed dome can be removed by a manager.');
+      }
+      const sessionOpen =
+        inst.session_status === 'running' || inst.session_status === 'stopped';
+      if (sessionOpen) {
+        return errResult(
+          409,
+          'active_session',
+          'This Dome Install still has an open work session. Resolve it on the Fabrication kiosk before removing.'
+        );
+      }
+
+      const dome = await lockDome(client, inst.dome_id);
+      if (!dome) {
+        return errResult(404, 'not_found', 'Dome record not found (may already be deleted).');
+      }
+
+      const ts = nowIso();
+      const quarantineReady = await isDomeQuarantineReady(client);
+      const quarantineReason = `Manager removed installed dome from Tank ${inst.tank_number}: ${reason}`.slice(
+        0,
+        500
+      );
+
+      await client.query(
+        `UPDATE dome_installations
+         SET status = 'cancelled', cancelled_at = $2::timestamptz, cancel_reason = $3, updated_at = $2::timestamptz
+         WHERE id = $1 AND status = 'installed'`,
+        [inst.id, ts, reason]
+      );
+
+      let nextInventory = 'quarantined';
+      let softDeleted = false;
+      if (quarantineReady) {
+        await client.query(
+          `UPDATE domes
+           SET inventory_status = 'quarantined',
+               installed_at = NULL,
+               installed_tank_id = NULL,
+               installed_tank_number = NULL,
+               installed_piece_number = NULL,
+               updated_at = $2::timestamptz
+           WHERE id = $1`,
+          [dome.id, ts]
+        );
+      } else if (await softDeleteColumnsReady()) {
+        // Fallback before migrate-dome-quarantine.sql is applied: soft-delete so the dome
+        // cannot reappear in available inventory / FAB picker.
+        softDeleted = true;
+        nextInventory = dome.inventory_status;
+        await client.query(
+          `UPDATE domes
+           SET inventory_status = 'installed',
+               installed_at = NULL,
+               installed_tank_id = NULL,
+               installed_tank_number = NULL,
+               installed_piece_number = NULL,
+               deleted_at = $2::timestamptz,
+               deleted_by = $3,
+               deleted_reason = $4,
+               updated_at = $2::timestamptz
+           WHERE id = $1`,
+          [dome.id, ts, by, quarantineReason]
+        );
+      } else {
+        return errResult(
+          503,
+          'quarantine_not_ready',
+          'Dome quarantine is not available yet. Apply scripts/migrate-dome-quarantine.sql, then retry.'
+        );
+      }
+
+      // Legacy Ready-for-Dome tanks: if no installed domes remain, reopen Ready for Dome Install.
+      let tankStatus = null;
+      let tankStatusUpdated = false;
+      const tid = Number(inst.tank_id);
+      if (Number.isInteger(tid) && tid > 0) {
+        const { rows: tankRows } = await client.query(
+          `SELECT id, status FROM tanks WHERE id = $1 AND deleted_at IS NULL FOR UPDATE`,
+          [tid]
+        );
+        const tank = tankRows[0] || null;
+        if (tank) {
+          tankStatus = tank.status;
+          const { rows: remain } = await client.query(
+            `SELECT COUNT(*)::int AS n FROM dome_installations
+             WHERE tank_id = $1 AND status = 'installed'`,
+            [tid]
+          );
+          const remainingInstalled = Number(remain[0].n) || 0;
+          if (
+            remainingInstalled === 0 &&
+            normalizeTankStatusKey(tank.status) === 'dome_installed'
+          ) {
+            const { rows: upd } = await client.query(
+              `UPDATE tanks SET status = 'ready_for_dome_install', updated_at = $2::timestamptz
+               WHERE id = $1 AND deleted_at IS NULL AND LOWER(TRIM(COALESCE(status, ''))) = 'dome_installed'
+               RETURNING status`,
+              [tid, ts]
+            );
+            if (upd.length) {
+              tankStatus = upd[0].status;
+              tankStatusUpdated = true;
+            }
+          }
+        }
+      }
+
+      await logEvent(
+        client,
+        dome.id,
+        'install_undone',
+        {
+          tank_id: tid,
+          tank_number: inst.tank_number,
+          piece_number: Number(inst.piece_number),
+          installation_id: Number(inst.id),
+          reason,
+          previous_status: inst.status,
+          quarantine: quarantineReady ? 'quarantined' : softDeleted ? 'soft_deleted' : null,
+          tank_status_after: tankStatus,
+          tank_status_updated: tankStatusUpdated,
+        },
+        by,
+        ts
+      );
+
+      return okResult({
+        action: 'dome_install_undone',
+        installation_id: Number(inst.id),
+        tank_id: tid,
+        tank_number: inst.tank_number,
+        piece_number: Number(inst.piece_number),
+        tank_status: tankStatus,
+        tank_status_updated: tankStatusUpdated,
+        dome: mapDome({
+          ...dome,
+          inventory_status: quarantineReady ? 'quarantined' : nextInventory,
+          installed_at: null,
+          installed_tank_id: null,
+          installed_tank_number: null,
+          installed_piece_number: null,
+          deleted_at: softDeleted ? ts : dome.deleted_at,
+          deleted_by: softDeleted ? by : dome.deleted_by,
+          deleted_reason: softDeleted ? quarantineReason : dome.deleted_reason,
+        }),
+        quarantine_mode: quarantineReady ? 'quarantined' : 'soft_deleted',
+        message: quarantineReady
+          ? `Dome ${inst.dome_number} removed from Tank ${inst.tank_number} and quarantined (not available for install).`
+          : `Dome ${inst.dome_number} removed from Tank ${inst.tank_number} and quarantined via soft-delete (apply migrate-dome-quarantine.sql for inventory quarantine status).`,
+      });
+    });
+  }
+
   /** Fabrication Resume after End Shift: reopen Dome Install sessions on this machine. */
   async function resumeEndShiftInstalls(machine, assignment) {
     if (!(await isReady()) || !assignment) return { resumed: [], session_ids: [] };
@@ -2567,11 +2851,178 @@ function createPhase3Dome(pool, helpers = {}) {
     startInstall,
     finishInstall,
     cancelInstall,
+    undoDomeInstall,
+    isDomeQuarantineReady,
     resumeEndShiftInstalls,
     machineDomeUsage,
     makeCompletionGate,
     collectDomeLaborIntervals,
+    fetchTankDomeShopReport,
   };
+
+  /**
+   * Dome Shop manufacturing rows linked to a tank via installation history
+   * (installed / in_progress / cancelled) or current installed_tank_id.
+   * Production running = dome labor session wall time (not employee-hour sum).
+   * Unique by dome_id so reinstall / remove does not double-count manufacturing.
+   */
+  async function fetchTankDomeShopReport(tankId, closeMs = Date.now()) {
+    const empty = {
+      ready: false,
+      domes: [],
+      production_ms: 0,
+      production_display: formatXhYm(0),
+      labor_ms: 0,
+      labor_display: formatXhYm(0),
+      counts_removed_in_totals: true,
+    };
+    const tid = Number(tankId);
+    if (!(await isReady()) || !Number.isInteger(tid) || tid <= 0) return empty;
+
+    const { rows: linkRows } = await pool.query(
+      `SELECT i.id AS installation_id, i.dome_id, i.status AS install_status, i.piece_number,
+              i.started_at AS install_started_at, i.finished_at AS install_finished_at,
+              i.cancelled_at, i.cancel_reason
+       FROM dome_installations i
+       WHERE i.tank_id = $1
+       ORDER BY i.started_at ASC NULLS LAST, i.id ASC`,
+      [tid]
+    );
+
+    const { rows: currentRows } = await pool.query(
+      `SELECT id AS dome_id FROM domes
+       WHERE installed_tank_id = $1 AND deleted_at IS NULL`,
+      [tid]
+    );
+
+    const linkByDome = new Map();
+    const statusPriority = { installed: 3, in_progress: 2, cancelled: 1 };
+    for (const r of linkRows) {
+      const did = Number(r.dome_id);
+      if (!Number.isInteger(did) || did <= 0) continue;
+      const prev = linkByDome.get(did);
+      const pri = statusPriority[String(r.install_status)] || 0;
+      const prevPri = prev ? statusPriority[String(prev.install_status)] || 0 : -1;
+      const wasRemoved = String(r.install_status) === 'cancelled' || (prev && prev.was_removed);
+      if (!prev || pri >= prevPri) {
+        linkByDome.set(did, {
+          installation_id: Number(r.installation_id),
+          install_status: r.install_status,
+          piece_number: r.piece_number != null ? Number(r.piece_number) : null,
+          install_started_at: r.install_started_at || null,
+          install_finished_at: r.install_finished_at || null,
+          cancelled_at: r.cancelled_at || null,
+          cancel_reason: r.cancel_reason || null,
+          was_removed: Boolean(wasRemoved) && String(r.install_status) !== 'installed',
+          _all_statuses: prev
+            ? [...new Set([...(prev._all_statuses || []), r.install_status])]
+            : [r.install_status],
+        });
+      } else if (prev) {
+        prev._all_statuses = [...new Set([...(prev._all_statuses || []), r.install_status])];
+        if (String(r.install_status) === 'cancelled') prev.was_removed = prev.install_status !== 'installed';
+      }
+    }
+    for (const r of currentRows) {
+      const did = Number(r.dome_id);
+      if (!Number.isInteger(did) || did <= 0) continue;
+      if (!linkByDome.has(did)) {
+        linkByDome.set(did, {
+          installation_id: null,
+          install_status: 'installed',
+          piece_number: null,
+          install_started_at: null,
+          install_finished_at: null,
+          cancelled_at: null,
+          cancel_reason: null,
+          was_removed: false,
+          _all_statuses: ['installed'],
+        });
+      }
+    }
+
+    const domeIds = [...linkByDome.keys()];
+    if (!domeIds.length) {
+      return { ...empty, ready: true };
+    }
+
+    const { rows: domeRows } = await pool.query(
+      `SELECT d.*, t.name AS team_name
+       FROM domes d
+       LEFT JOIN teams t ON t.id = d.team_id
+       WHERE d.id = ANY($1::bigint[])`,
+      [domeIds]
+    );
+    const fabs = await loadFabricators(domeIds);
+    const labor = await loadLaborSummary(domeIds, pool, closeMs);
+    const byId = new Map(domeRows.map((r) => [Number(r.id), r]));
+
+    let productionMs = 0;
+    let laborMs = 0;
+    const domes = [];
+    for (const did of domeIds.sort((a, b) => a - b)) {
+      const row = byId.get(did);
+      if (!row) continue;
+      const lab = labor.get(did) || {
+        production_ms: 0,
+        production_display: formatXhYm(0),
+        labor_ms: 0,
+        labor_display: formatXhYm(0),
+        employees: [],
+      };
+      const link = linkByDome.get(did) || {};
+      const statuses = link._all_statuses || [link.install_status];
+      const currentlyInstalled =
+        String(link.install_status) === 'installed' ||
+        (row.installed_tank_id != null && Number(row.installed_tank_id) === tid);
+      const previouslyRemoved =
+        !currentlyInstalled &&
+        (statuses.includes('cancelled') || String(link.install_status) === 'cancelled');
+      productionMs += Number(lab.production_ms) || 0;
+      laborMs += Number(lab.labor_ms) || 0;
+      const mapped = mapDome(row);
+      domes.push({
+        ...mapped,
+        fabricators: fabs.get(did) || [],
+        production_ms: lab.production_ms,
+        production_display: lab.production_display,
+        labor_ms: lab.labor_ms,
+        labor_display: lab.labor_display,
+        labor_by_employee: lab.employees || [],
+        installation_status: currentlyInstalled
+          ? 'installed'
+          : String(link.install_status) === 'in_progress'
+            ? 'in_progress'
+            : previouslyRemoved
+              ? 'removed'
+              : link.install_status || null,
+        installation_status_label: currentlyInstalled
+          ? 'Installed'
+          : String(link.install_status) === 'in_progress'
+            ? 'Installing'
+            : previouslyRemoved
+              ? 'Removed / Previously installed'
+              : link.install_status || '—',
+        piece_number: link.piece_number != null ? link.piece_number : mapped.installed_piece_number,
+        install_started_at: link.install_started_at,
+        install_finished_at: link.install_finished_at,
+        cancelled_at: link.cancelled_at,
+        cancel_reason: link.cancel_reason,
+        counts_in_tank_totals: true,
+        link_kind: 'dome_installation',
+      });
+    }
+
+    return {
+      ready: true,
+      domes,
+      production_ms: productionMs,
+      production_display: formatXhYm(productionMs),
+      labor_ms: laborMs,
+      labor_display: formatXhYm(laborMs),
+      counts_removed_in_totals: true,
+    };
+  }
 
   async function collectDomeLaborIntervals(employeeId, bounds, closeMs = Date.now()) {
     const id = Number(employeeId);

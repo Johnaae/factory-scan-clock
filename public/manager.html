@@ -483,11 +483,42 @@
             <div class="field" style="grid-column:1/-1"><label for="editTankDescription">Description</label><textarea id="editTankDescription" rows="2"></textarea></div>
             <div class="field" style="grid-column:1/-1"><label for="editTankNotes">Notes</label><textarea id="editTankNotes" rows="3"></textarea></div>
           </div>
+          <div id="editTankDomeSection" class="edit-tank-dome-section" hidden>
+            <h4 class="edit-tank-dome-title">Installed Dome</h4>
+            <p class="muted edit-tank-dome-kicker">
+              Manager only. Removing a dome detaches it from this tank and quarantines it — it will not return to available inventory. Production history is kept.
+            </p>
+            <div id="editTankDomeList" class="edit-tank-dome-list"></div>
+          </div>
           <div class="toastline manager-alert" id="editTankHint"></div>
         </div>
         <div class="modal-footer tank-edit-modal-footer">
           <button id="btnSaveTankEdit" class="btn btn-primary" type="button" data-i18n="common.save">Save</button>
           <button id="btnCancelTankEdit" class="btn" type="button" data-i18n="common.cancel">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="removeDomeBackdrop" class="modal-backdrop" role="dialog" aria-modal="true" aria-hidden="true">
+      <div class="modal" role="document">
+        <div class="modal-head">
+          <h3 class="modal-title">Remove Installed Dome</h3>
+          <button id="btnCloseRemoveDome" class="btn btn-sm" type="button">Close</button>
+        </div>
+        <div class="modal-body">
+          <p id="removeDomeSummary" class="muted"></p>
+          <p class="muted" style="margin-top:8px">
+            This detaches the dome from the tank without deleting production history. The dome will be quarantined and will not be available for install.
+          </p>
+          <div class="field" style="margin-top:12px">
+            <label for="removeDomeReason">Reason (required)</label>
+            <textarea id="removeDomeReason" rows="3" maxlength="500" placeholder="Why is this dome being removed?"></textarea>
+          </div>
+          <div class="toastline manager-alert" id="removeDomeHint"></div>
+        </div>
+        <div class="modal-footer">
+          <button id="btnConfirmRemoveDome" class="btn btn-primary" type="button">Remove Dome</button>
+          <button id="btnCancelRemoveDome" class="btn" type="button">Cancel</button>
         </div>
       </div>
     </div>

@@ -189,6 +189,36 @@ function overviewFields(data) {
     assembly_labor_hours: numericHours({
       ms: totals.assembly_labor_ms != null ? totals.assembly_labor_ms : at.total_stage_labor_ms,
     }),
+    dome_shop_running: formatDurationHm({
+      ms: totals.dome_shop_running_ms,
+      display: totals.dome_shop_running_display,
+    }),
+    dome_shop_running_hours: numericHours({ ms: totals.dome_shop_running_ms }),
+    dome_production: formatDurationHm({
+      ms: totals.dome_production_ms,
+      display: totals.dome_production_display,
+    }),
+    dome_production_hours: numericHours({ ms: totals.dome_production_ms }),
+    bulkhead_production: formatDurationHm({
+      ms: totals.bulkhead_production_ms,
+      display: totals.bulkhead_production_display,
+    }),
+    bulkhead_production_hours: numericHours({ ms: totals.bulkhead_production_ms }),
+    dome_shop_labor: formatDurationHm({
+      ms: totals.dome_shop_labor_ms,
+      display: totals.dome_shop_labor_display,
+    }),
+    dome_shop_labor_hours: numericHours({ ms: totals.dome_shop_labor_ms }),
+    dome_labor: formatDurationHm({
+      ms: totals.dome_labor_ms,
+      display: totals.dome_labor_display,
+    }),
+    dome_labor_hours: numericHours({ ms: totals.dome_labor_ms }),
+    bulkhead_labor: formatDurationHm({
+      ms: totals.bulkhead_labor_ms,
+      display: totals.bulkhead_labor_display,
+    }),
+    bulkhead_labor_hours: numericHours({ ms: totals.bulkhead_labor_ms }),
     testing_elapsed: formatDurationHm({
       ms: totals.testing_elapsed_ms != null ? totals.testing_elapsed_ms : at.testing_elapsed_ms,
       display: totals.testing_elapsed_display || at.testing_elapsed_display,
@@ -392,6 +422,14 @@ function buildTankReportCsv(data) {
     'FAB Labor Hours',
     'Assembly Labor',
     'Assembly Labor Hours',
+    'Dome Shop Running',
+    'Dome Shop Running Hours',
+    'Dome Production',
+    'Dome Production Hours',
+    'Bulkhead Production',
+    'Bulkhead Production Hours',
+    'Dome Shop Labor',
+    'Dome Shop Labor Hours',
     'Testing/QA-QC Time',
     'Testing/QA-QC Hours',
     'Project Name',
@@ -431,6 +469,14 @@ function buildTankReportCsv(data) {
         overview.fab_labor_hours != null ? overview.fab_labor_hours : '',
         overview.assembly_labor,
         overview.assembly_labor_hours != null ? overview.assembly_labor_hours : '',
+        overview.dome_shop_running,
+        overview.dome_shop_running_hours != null ? overview.dome_shop_running_hours : '',
+        overview.dome_production,
+        overview.dome_production_hours != null ? overview.dome_production_hours : '',
+        overview.bulkhead_production,
+        overview.bulkhead_production_hours != null ? overview.bulkhead_production_hours : '',
+        overview.dome_shop_labor,
+        overview.dome_shop_labor_hours != null ? overview.dome_shop_labor_hours : '',
         overview.testing_elapsed,
         overview.testing_elapsed_hours != null ? overview.testing_elapsed_hours : '',
         overview.customer,
@@ -441,7 +487,44 @@ function buildTankReportCsv(data) {
     );
   };
 
-  if (!sessions.length && !stageSessions.length && !testAttempts.length) {
+  const domeShop = (data && data.dome_shop) || {};
+  const domeShopRows = [];
+  for (const d of domeShop.domes || []) {
+    domeShopRows.push({
+      tank_number: overview.tank_number,
+      department: 'DOME SHOP',
+      phase: `Dome ${d.dome_number || ''}`.trim(),
+      team: (d.fabricators || []).map((f) => f.name || f.employee_name).filter(Boolean).join(', '),
+      machine: '',
+      started_at: d.started_at || '',
+      ended_at: d.completed_at || '',
+      end_display: d.completed_at ? fmtWhen(d.completed_at) : '—',
+      duration: d.production_display || '',
+      duration_hours: numericHours({ ms: d.production_ms }),
+      status: d.installation_status_label || d.production_status || '',
+      note: [d.dome_type, d.diameter_label, `labor ${d.labor_display || '0h 0m'}`].filter(Boolean).join(' · '),
+    });
+  }
+  for (const b of domeShop.bulkheads || []) {
+    domeShopRows.push({
+      tank_number: overview.tank_number,
+      department: 'DOME SHOP',
+      phase: `Bulkhead ${b.bulkhead_number || ''}`.trim(),
+      team: (b.workers || []).map((w) => w.name || w.employee_name).filter(Boolean).join(', '),
+      machine: '',
+      started_at: b.started_at || '',
+      ended_at: b.completed_at || '',
+      end_display: b.completed_at ? fmtWhen(b.completed_at) : '—',
+      duration: b.production_display || '',
+      duration_hours: numericHours({ ms: b.production_ms }),
+      status: b.installation_status_label || b.production_status || '',
+      note: [b.bulkhead_type, b.diameter_label, `labor ${b.labor_display || '0h 0m'}`]
+        .filter(Boolean)
+        .join(' · '),
+    });
+  }
+
+  if (!sessions.length && !stageSessions.length && !testAttempts.length && !domeShopRows.length) {
     pushRow({
       tank_number: overview.tank_number,
       department: '',
@@ -466,6 +549,7 @@ function buildTankReportCsv(data) {
     }
     for (const s of stageSessions) pushRow(s);
     for (const a of testAttempts) pushRow(a);
+    for (const r of domeShopRows) pushRow(r);
   }
   // UTF-8 BOM helps Excel open CSV correctly
   return `\uFEFF${lines.join('\r\n')}\r\n`;
@@ -515,6 +599,8 @@ async function buildTankReportXlsxBuffer(data) {
     ['Total Running Hours (decimal)', overview.total_production_running_hours],
     ['Total Labor Time', overview.total_labor],
     ['Total Labor Hours (decimal)', overview.total_labor_hours],
+    ['Dome Shop Running Time', overview.dome_shop_running],
+    ['Dome Shop Labor Time', overview.dome_shop_labor],
     ['Testing / QA-QC Time', overview.testing_elapsed],
     ['Testing / QA-QC Hours (decimal)', overview.testing_elapsed_hours],
     ['Duration (lifecycle)', overview.duration],
@@ -706,6 +792,43 @@ async function buildTankReportXlsxBuffer(data) {
         } · ${s.team_name || ''}`,
       });
     }
+  }
+
+  const domeShopX = (data && data.dome_shop) || {};
+  const sheetDome = workbook.addWorksheet('DOME SHOP', {
+    views: [{ state: 'frozen', ySplit: 1 }],
+  });
+  sheetDome.columns = [
+    { header: 'Field', key: 'field', width: 28 },
+    { header: 'Value', key: 'value', width: 48 },
+  ];
+  sheetDome.addRow({ field: 'Dome Shop Running Time', value: dash(overview.dome_shop_running) });
+  sheetDome.addRow({ field: 'Dome Shop Labor Time', value: dash(overview.dome_shop_labor) });
+  sheetDome.addRow({ field: 'Dome Production Running', value: dash(overview.dome_production) });
+  sheetDome.addRow({ field: 'Dome Labor', value: dash(overview.dome_labor) });
+  sheetDome.addRow({ field: 'Bulkhead Production Running', value: dash(overview.bulkhead_production) });
+  sheetDome.addRow({ field: 'Bulkhead Labor', value: dash(overview.bulkhead_labor) });
+  styleHeader(sheetDome);
+  sheetDome.addRow({});
+  sheetDome.addRow({ field: 'Unit', value: 'Detail rows below' });
+  for (const d of domeShopX.domes || []) {
+    sheetDome.addRow({
+      field: `Dome ${d.dome_number || ''}`,
+      value: `${d.dome_type || ''} ${d.diameter_label || ''} · ${d.production_status || ''} · run ${
+        d.production_display || '0h 0m'
+      } · labor ${d.labor_display || '0h 0m'} · ${d.installation_status_label || ''}`.trim(),
+    });
+  }
+  for (const b of domeShopX.bulkheads || []) {
+    sheetDome.addRow({
+      field: `Bulkhead ${b.bulkhead_number || ''}`,
+      value: `${b.bulkhead_type || ''} ${b.diameter_label || ''} · ${b.production_status || ''} · run ${
+        b.production_display || '0h 0m'
+      } · labor ${b.labor_display || '0h 0m'} · ${b.installation_status_label || ''}`.trim(),
+    });
+  }
+  if (!(domeShopX.domes || []).length && !(domeShopX.bulkheads || []).length) {
+    sheetDome.addRow({ field: '(none)', value: 'No linked Dome Shop units' });
   }
 
   const sheet6 = workbook.addWorksheet('Testing', {

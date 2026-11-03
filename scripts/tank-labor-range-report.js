@@ -2,8 +2,12 @@
 
 /**
  * Date-range tank labor / running-time report.
- * Reuses FAB membership-labor semantics + Assembly stage labor / duration,
+ * Reuses FAB membership-labor semantics + Assembly stage labor / duration
+ * + Dome/Bulkhead manufacturing sessions (linked via install/assignment history),
  * clipped to a local-timezone [start, end] window.
+ *
+ * Lifetime Tank Report totals and date-range totals are separate:
+ * date-range always clips production session timestamps to the selected window.
  */
 
 const { isTankTotalRunningPhaseCode } = require('./phase1-production-logic');
@@ -137,6 +141,22 @@ function createTankLaborRangeReport(pool, helpers = {}) {
              tk.assembly_started_at IS NOT NULL
              AND tk.assembly_started_at <= $2::timestamptz
              AND COALESCE(tk.assembly_completed_at, tk.assembly_removed_at, NOW()) >= $1::timestamptz
+           )
+           OR EXISTS (
+             SELECT 1
+             FROM dome_installations di
+             JOIN dome_labor_sessions dls ON dls.dome_id = di.dome_id
+             WHERE di.tank_id = tk.id
+               AND dls.started_at <= $2::timestamptz
+               AND COALESCE(dls.ended_at, NOW()) >= $1::timestamptz
+           )
+           OR EXISTS (
+             SELECT 1
+             FROM bulkhead_assignments ba
+             JOIN bulkhead_labor_sessions bls ON bls.bulkhead_id = ba.bulkhead_id
+             WHERE ba.tank_id = tk.id
+               AND bls.started_at <= $2::timestamptz
+               AND COALESCE(bls.ended_at, NOW()) >= $1::timestamptz
            )
          )
        ORDER BY UPPER(tk.tank_number), tk.id`,
@@ -291,6 +311,131 @@ function createTankLaborRangeReport(pool, helpers = {}) {
     return { runningMs, laborMs };
   }
 
+  /**
+   * Dome + Bulkhead manufacturing (session wall-clock + participant labor),
+   * linked through install/assignment history (any status), clipped to range.
+   * Unique unit ids prevent double-count when a unit was removed/replaced.
+   */
+  async function computeDomeShopRangeForTank(tankId, bounds, closeMs) {
+    const tid = Number(tankId);
+    let runningMs = 0;
+    let laborMs = 0;
+
+    try {
+      const { rows: domeIds } = await pool.query(
+        `SELECT DISTINCT dome_id AS id FROM dome_installations WHERE tank_id = $1
+         UNION
+         SELECT id FROM domes WHERE installed_tank_id = $1 AND deleted_at IS NULL`,
+        [tid]
+      );
+      const ids = domeIds.map((r) => Number(r.id)).filter((n) => Number.isInteger(n) && n > 0);
+      if (ids.length) {
+        const { rows: sessions } = await pool.query(
+          `SELECT id, dome_id, status, started_at, ended_at
+           FROM dome_labor_sessions
+           WHERE dome_id = ANY($1::bigint[])
+             AND started_at <= $3::timestamptz
+             AND COALESCE(ended_at, NOW()) >= $2::timestamptz`,
+          [ids, bounds.startIso, bounds.endIso]
+        );
+        for (const s of sessions) {
+          const start = toMs(s.started_at);
+          const end =
+            s.status === 'active'
+              ? closeMs
+              : toMs(s.ended_at) || closeMs;
+          if (start == null || end == null || end <= start) continue;
+          runningMs += overlapMs(start, end, bounds.startMs, bounds.endMs);
+        }
+        const { rows: parts } = await pool.query(
+          `SELECT p.employee_id, p.joined_at, p.left_at, s.status, s.ended_at
+           FROM dome_labor_participants p
+           JOIN dome_labor_sessions s ON s.id = p.session_id
+           WHERE s.dome_id = ANY($1::bigint[])
+             AND p.joined_at <= $3::timestamptz
+             AND COALESCE(p.left_at, s.ended_at, NOW()) >= $2::timestamptz`,
+          [ids, bounds.startIso, bounds.endIso]
+        );
+        const byEmp = new Map();
+        for (const p of parts) {
+          const join = toMs(p.joined_at);
+          if (join == null) continue;
+          const leave =
+            toMs(p.left_at) ||
+            (p.status === 'active' ? closeMs : toMs(p.ended_at) || closeMs);
+          if (leave == null || leave <= join) continue;
+          const key = p.employee_id != null ? Number(p.employee_id) : `anon:${p.joined_at}`;
+          if (!byEmp.has(key)) byEmp.set(key, []);
+          byEmp.get(key).push({
+            start: Math.max(join, bounds.startMs),
+            end: Math.min(leave, bounds.endMs, closeMs),
+          });
+        }
+        laborMs += [...byEmp.values()].reduce((s, ivs) => s + mergeIntervalsMs(ivs), 0);
+      }
+    } catch (_err) {
+      /* dome tables may be absent on older DBs */
+    }
+
+    try {
+      const { rows: bhIds } = await pool.query(
+        `SELECT DISTINCT bulkhead_id AS id FROM bulkhead_assignments WHERE tank_id = $1
+         UNION
+         SELECT id FROM bulkheads WHERE installed_tank_id = $1 AND deleted_at IS NULL`,
+        [tid]
+      );
+      const ids = bhIds.map((r) => Number(r.id)).filter((n) => Number.isInteger(n) && n > 0);
+      if (ids.length) {
+        const { rows: sessions } = await pool.query(
+          `SELECT id, bulkhead_id, status, started_at, ended_at
+           FROM bulkhead_labor_sessions
+           WHERE bulkhead_id = ANY($1::bigint[])
+             AND started_at <= $3::timestamptz
+             AND COALESCE(ended_at, NOW()) >= $2::timestamptz`,
+          [ids, bounds.startIso, bounds.endIso]
+        );
+        for (const s of sessions) {
+          const start = toMs(s.started_at);
+          const end =
+            s.status === 'active'
+              ? closeMs
+              : toMs(s.ended_at) || closeMs;
+          if (start == null || end == null || end <= start) continue;
+          runningMs += overlapMs(start, end, bounds.startMs, bounds.endMs);
+        }
+        const { rows: parts } = await pool.query(
+          `SELECT p.employee_id, p.joined_at, p.left_at, s.status, s.ended_at
+           FROM bulkhead_labor_participants p
+           JOIN bulkhead_labor_sessions s ON s.id = p.session_id
+           WHERE s.bulkhead_id = ANY($1::bigint[])
+             AND p.joined_at <= $3::timestamptz
+             AND COALESCE(p.left_at, s.ended_at, NOW()) >= $2::timestamptz`,
+          [ids, bounds.startIso, bounds.endIso]
+        );
+        const byEmp = new Map();
+        for (const p of parts) {
+          const join = toMs(p.joined_at);
+          if (join == null) continue;
+          const leave =
+            toMs(p.left_at) ||
+            (p.status === 'active' ? closeMs : toMs(p.ended_at) || closeMs);
+          if (leave == null || leave <= join) continue;
+          const key = p.employee_id != null ? Number(p.employee_id) : `anon:${p.joined_at}`;
+          if (!byEmp.has(key)) byEmp.set(key, []);
+          byEmp.get(key).push({
+            start: Math.max(join, bounds.startMs),
+            end: Math.min(leave, bounds.endMs, closeMs),
+          });
+        }
+        laborMs += [...byEmp.values()].reduce((s, ivs) => s + mergeIntervalsMs(ivs), 0);
+      }
+    } catch (_err) {
+      /* bulkhead tables may be absent */
+    }
+
+    return { runningMs, laborMs };
+  }
+
   async function buildTankLaborRangeReport({ startDate, endDate } = {}) {
     const bounds = rangeBounds(startDate, endDate);
     if (!bounds) {
@@ -313,8 +458,9 @@ function createTankLaborRangeReport(pool, helpers = {}) {
     for (const tankRow of tankRows) {
       const fab = await computeFabRangeForTank(tankRow.id, bounds, closeMs);
       const asm = await computeAssemblyRangeForTank(tankRow, bounds, closeMs);
-      const runningMs = fab.runningMs + asm.runningMs;
-      const laborMs = fab.laborMs + asm.laborMs;
+      const domeShop = await computeDomeShopRangeForTank(tankRow.id, bounds, closeMs);
+      const runningMs = fab.runningMs + asm.runningMs + domeShop.runningMs;
+      const laborMs = fab.laborMs + asm.laborMs + domeShop.laborMs;
       // Include tanks with any overlapping activity even if clipped ms is 0
       // (e.g. session started in range but fully downtime — still listed if found by query).
       if (runningMs <= 0 && laborMs <= 0) {
@@ -335,6 +481,8 @@ function createTankLaborRangeReport(pool, helpers = {}) {
         fab_labor_ms: fab.laborMs,
         assembly_running_ms: asm.runningMs,
         assembly_labor_ms: asm.laborMs,
+        dome_shop_running_ms: domeShop.runningMs,
+        dome_shop_labor_ms: domeShop.laborMs,
       });
     }
 

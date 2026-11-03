@@ -20,6 +20,7 @@ const {
   buildTankReportCsv,
   buildTankReportXlsxBuffer,
 } = require('./scripts/tank-report-exports');
+const { buildTankOverviewProductionTotals } = require('./scripts/tank-overview-totals');
 const {
   createPoolOptions,
   logDatabaseBootInfo,
@@ -7537,6 +7538,35 @@ app.delete(
   '/api/manager/domes/:id',
   domeManagerRoute('delete', (req, auth) => phase3.deleteDome(req.params.id, req.body || {}, auth.username))
 );
+app.post(
+  '/api/manager/domes/:id/undo-install',
+  domeManagerRoute('undo-install', (req, auth) =>
+    phase3.undoDomeInstall(
+      {
+        dome_id: req.params.id,
+        installation_id: (req.body || {}).installation_id,
+        piece_number: (req.body || {}).piece_number,
+        reason: (req.body || {}).reason,
+      },
+      auth.username || 'manager'
+    )
+  )
+);
+app.post(
+  '/api/manager/tanks/:id/undo-dome',
+  domeManagerRoute('undo-install', (req, auth) =>
+    phase3.undoDomeInstall(
+      {
+        tank_id: req.params.id,
+        installation_id: (req.body || {}).installation_id,
+        piece_number: (req.body || {}).piece_number,
+        dome_id: (req.body || {}).dome_id,
+        reason: (req.body || {}).reason,
+      },
+      auth.username || 'manager'
+    )
+  )
+);
 
 function bulkheadManagerRoute(label, handler) {
   return async (req, res) => {
@@ -11040,117 +11070,16 @@ app.get('/api/manager/tanks/print-selected', async (req, res) => {
   }
 });
 
-/**
- * Tank Report Overview production/labor totals.
- * Reuses existing FAB membership running/labor + Assembly duration/stage labor.
- * Testing/QA-QC elapsed is reported separately and never added into these totals.
- */
-function buildTankOverviewProductionTotals(teamProduction, assemblyTesting) {
-  const tp = teamProduction || {};
-  const at = assemblyTesting || {};
-  const fmt = (ms) =>
-    phase2 && typeof phase2.formatDurationXhYm === 'function'
-      ? phase2.formatDurationXhYm(ms)
-      : (() => {
-          const totalMin = Math.floor(Math.max(0, Number(ms) || 0) / 60000);
-          if (totalMin < 1) return '0h 0m';
-          const h = Math.floor(totalMin / 60);
-          const m = totalMin % 60;
-          return `${h}h ${m}m`;
-        })();
-
-  const hoursToMs = (hours) => {
-    const h = Number(hours);
-    return Number.isFinite(h) ? Math.round(h * 3600000) : 0;
-  };
-
-  let fabRunningMs = Number(tp.total_running_ms);
-  if (!Number.isFinite(fabRunningMs) || fabRunningMs < 0) {
-    fabRunningMs = hoursToMs(tp.total_running_hours != null ? tp.total_running_hours : tp.total_machine_hours);
-  }
-  let fabLaborMs = Number(tp.total_labor_ms);
-  if (!Number.isFinite(fabLaborMs) || fabLaborMs < 0) {
-    fabLaborMs = hoursToMs(tp.total_labor_hours != null ? tp.total_labor_hours : tp.total_hours);
-  }
-
-  const assemblyDurationMs = Math.max(0, Number(at.assembly_duration_ms) || 0);
-  // Existing stage labor total already excludes TESTING (ASSEMBLY + CORRECTION only).
-  const assemblyLaborMs = Math.max(0, Number(at.total_stage_labor_ms) || 0);
-  const testingElapsedMs = Math.max(0, Number(at.testing_elapsed_ms) || 0);
-
-  const totalProductionMs = fabRunningMs + assemblyDurationMs;
-  const totalLaborMs = fabLaborMs + assemblyLaborMs;
-
-  const stageLabor = at.stage_labor || {};
-  const byStage = Array.isArray(stageLabor.by_stage) ? stageLabor.by_stage : [];
-  const assemblyEmpMap = new Map();
-  for (const stageRow of byStage) {
-    const stage = String(stageRow.stage || '').toUpperCase();
-    if (stage !== 'ASSEMBLY' && stage !== 'CORRECTION') continue;
-    for (const emp of stageRow.employees || []) {
-      const key =
-        emp.employee_id != null ? `id:${Number(emp.employee_id)}` : `name:${String(emp.employee_name || '')}`;
-      const prev = assemblyEmpMap.get(key) || {
-        employee_id: emp.employee_id != null ? Number(emp.employee_id) : null,
-        employee_code: emp.employee_code || null,
-        employee_name: emp.employee_name || '—',
-        stage,
-        total_ms: 0,
-      };
-      prev.total_ms += Number(emp.total_ms) || 0;
-      if (stage === 'CORRECTION') prev.stage = 'CORRECTION';
-      assemblyEmpMap.set(key, prev);
-    }
-  }
-  const assemblyEmployees = [...assemblyEmpMap.values()]
-    .map((e) => ({
-      ...e,
-      total_display: fmt(e.total_ms),
-    }))
-    .sort((a, b) => (Number(b.total_ms) || 0) - (Number(a.total_ms) || 0));
-
-  const fabPieces = (tp.hours_per_piece || []).map((p) => {
-    const runningMs =
-      p.running_ms != null
-        ? Number(p.running_ms) || 0
-        : hoursToMs(p.running_hours != null ? p.running_hours : p.hours);
-    return {
-      piece_number: Number(p.piece_number) || 1,
-      running_ms: runningMs,
-      running_display: p.running_display || fmt(runningMs),
-      labor_ms: p.labor_ms != null ? Number(p.labor_ms) || 0 : hoursToMs(p.labor_hours),
-      labor_display:
-        p.labor_display ||
-        fmt(p.labor_ms != null ? Number(p.labor_ms) || 0 : hoursToMs(p.labor_hours)),
-    };
-  });
-
-  return {
-    fab_running_ms: fabRunningMs,
-    fab_running_display: tp.total_running_display || fmt(fabRunningMs),
-    assembly_duration_ms: assemblyDurationMs,
-    assembly_duration_display: at.assembly_duration_display || fmt(assemblyDurationMs),
-    total_production_running_ms: totalProductionMs,
-    total_production_running_display: fmt(totalProductionMs),
-    fab_labor_ms: fabLaborMs,
-    fab_labor_display: tp.total_labor_display || fmt(fabLaborMs),
-    assembly_labor_ms: assemblyLaborMs,
-    assembly_labor_display: at.total_stage_labor_display || fmt(assemblyLaborMs),
-    total_labor_ms: totalLaborMs,
-    total_labor_display: fmt(totalLaborMs),
-    testing_elapsed_ms: testingElapsedMs,
-    testing_elapsed_display: at.testing_elapsed_display || fmt(testingElapsedMs),
-    fab_pieces: fabPieces,
-    fab_labor_members: (tp.member_breakdown || []).map((m) => ({
-      employee_id: m.employee_id != null ? Number(m.employee_id) : null,
-      employee_code: m.employee_code || null,
-      employee_name: m.employee_name || '—',
-      team_name: m.team_name || null,
-      total_ms: Number(m.total_ms) || hoursToMs(m.total_hours),
-      total_display: m.total_hours_display || m.total_display || fmt(Number(m.total_ms) || hoursToMs(m.total_hours)),
-    })),
-    assembly_labor_employees: assemblyEmployees,
-  };
+function formatTankOverviewDuration(ms) {
+  return phase2 && typeof phase2.formatDurationXhYm === 'function'
+    ? phase2.formatDurationXhYm(ms)
+    : (() => {
+        const totalMin = Math.floor(Math.max(0, Number(ms) || 0) / 60000);
+        if (totalMin < 1) return '0h 0m';
+        const h = Math.floor(totalMin / 60);
+        const m = totalMin % 60;
+        return `${h}h ${m}m`;
+      })();
 }
 
 async function getTankReportPayload(id) {
@@ -11435,10 +11364,67 @@ async function getTankReportPayload(id) {
   }
   const installedBulkheads = bulkheadState ? bulkheadState.installs || [] : [];
 
+  let domeShopDomes = {
+    ready: false,
+    domes: [],
+    production_ms: 0,
+    production_display: '0h 0m',
+    labor_ms: 0,
+    labor_display: '0h 0m',
+  };
+  let domeShopBulkheads = {
+    ready: false,
+    bulkheads: [],
+    production_ms: 0,
+    production_display: '0h 0m',
+    labor_ms: 0,
+    labor_display: '0h 0m',
+  };
+  try {
+    if (phase3 && typeof phase3.fetchTankDomeShopReport === 'function') {
+      domeShopDomes = await phase3.fetchTankDomeShopReport(id);
+    }
+  } catch (err) {
+    console.error('[tank report] dome_shop_domes:', err.message);
+  }
+  try {
+    if (phase3Bulkhead && typeof phase3Bulkhead.fetchTankBulkheadShopReport === 'function') {
+      domeShopBulkheads = await phase3Bulkhead.fetchTankBulkheadShopReport(id);
+    }
+  } catch (err) {
+    console.error('[tank report] dome_shop_bulkheads:', err.message);
+  }
+  const domeProductionMs = Math.max(0, Number(domeShopDomes.production_ms) || 0);
+  const domeLaborMs = Math.max(0, Number(domeShopDomes.labor_ms) || 0);
+  const bulkheadProductionMs = Math.max(0, Number(domeShopBulkheads.production_ms) || 0);
+  const bulkheadLaborMs = Math.max(0, Number(domeShopBulkheads.labor_ms) || 0);
+  const domeShopRunningMs = domeProductionMs + bulkheadProductionMs;
+  const domeShopLaborMs = domeLaborMs + bulkheadLaborMs;
+  const dome_shop = {
+    ready: Boolean(domeShopDomes.ready || domeShopBulkheads.ready),
+    domes: domeShopDomes.domes || [],
+    bulkheads: domeShopBulkheads.bulkheads || [],
+    dome_production_ms: domeProductionMs,
+    dome_production_display: formatTankOverviewDuration(domeProductionMs),
+    dome_labor_ms: domeLaborMs,
+    dome_labor_display: formatTankOverviewDuration(domeLaborMs),
+    bulkhead_production_ms: bulkheadProductionMs,
+    bulkhead_production_display: formatTankOverviewDuration(bulkheadProductionMs),
+    bulkhead_labor_ms: bulkheadLaborMs,
+    bulkhead_labor_display: formatTankOverviewDuration(bulkheadLaborMs),
+    production_ms: domeShopRunningMs,
+    production_display: formatTankOverviewDuration(domeShopRunningMs),
+    labor_ms: domeShopLaborMs,
+    labor_display: formatTankOverviewDuration(domeShopLaborMs),
+    // Business default: include historically linked (removed) manufacturing once per unit.
+    counts_removed_in_totals: true,
+  };
+
   return {
     ok: true,
     dome_state: domeState,
     bulkhead_state: bulkheadState,
+    dome_shop,
     tank: {
       domes_installed_display: installedDomes.length
         ? installedDomes
@@ -11492,7 +11478,12 @@ async function getTankReportPayload(id) {
     downtime_total_display: phase1.formatElapsedDisplay(downtimeTotalMs),
     qa_qc_history: qaQcHistory,
     assembly_testing,
-    overview_totals: buildTankOverviewProductionTotals(teamProduction, assembly_testing),
+    overview_totals: buildTankOverviewProductionTotals(
+      teamProduction,
+      assembly_testing,
+      dome_shop,
+      formatTankOverviewDuration
+    ),
     labor_hours: {
       total_labor_hours: totalLaborHours,
       total_machine_hours: totalMachineHours,
