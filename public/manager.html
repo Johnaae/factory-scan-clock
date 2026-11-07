@@ -197,7 +197,7 @@
           <div class="card-header-main">
             <h2 class="card-title">Tank Labor Report</h2>
             <p class="card-kicker">
-              Running time and employee labor hours by tank for a date range (FAB + Assembly). Not the same as Daily Summary.
+              Running time and labor hours by tank for a date range, split by FAB, Assembly, and Dome Shop. Not the same as Daily Summary.
             </p>
           </div>
           <div class="toolbar">
@@ -221,25 +221,25 @@
             </div>
           </div>
           <p class="muted" id="tankLaborMeta" style="margin-top: 10px"></p>
+          <p class="muted" id="tankLaborNote" style="margin-top: 4px; font-size: 12px">
+            FAB hours include Dome Install. Dome Shop hours are Dome Create plus Bulkhead manufacturing labor. Assembly includes correction labor. Testing is excluded. Total Labor Hours is the sum of the department columns.
+          </p>
         </div>
         <div class="card-body card-body--flush">
           <div class="table-wrap table-scroll manager-table-wrap">
-            <table class="manager-table" id="tankLaborTable">
-              <thead>
+            <table class="manager-table tank-labor-table" id="tankLaborTable">
+              <thead id="tankLaborHead">
                 <tr>
                   <th>Tank Number</th>
-                  <th>Total Running Time</th>
-                  <th>Total Labor Hours</th>
+                  <th class="tank-labor-time">Total Running Time</th>
+                  <th class="tank-labor-time">FAB Hours</th>
+                  <th class="tank-labor-time">Assembly Hours</th>
+                  <th class="tank-labor-time">Dome Shop Hours</th>
+                  <th class="tank-labor-time">Total Labor Hours</th>
                 </tr>
               </thead>
-              <tbody id="tankLaborBody"><tr><td colspan="3" class="muted">Select a date range and refresh.</td></tr></tbody>
-              <tfoot id="tankLaborFoot" hidden>
-                <tr>
-                  <th scope="row">Totals</th>
-                  <th id="tankLaborTotalRunning">—</th>
-                  <th id="tankLaborTotalLabor">—</th>
-                </tr>
-              </tfoot>
+              <tbody id="tankLaborBody"><tr><td colspan="6" class="muted">Select a date range and refresh.</td></tr></tbody>
+              <tfoot id="tankLaborFoot" hidden></tfoot>
             </table>
           </div>
         </div>
@@ -486,7 +486,7 @@
           <div id="editTankDomeSection" class="edit-tank-dome-section" hidden>
             <h4 class="edit-tank-dome-title">Installed Dome</h4>
             <p class="muted edit-tank-dome-kicker">
-              Manager only. Removing a dome detaches it from this tank and quarantines it — it will not return to available inventory. Production history is kept.
+              Manager only. Removing a dome detaches it from this tank and returns it to Dome Inventory as Available for reuse. Production history is kept.
             </p>
             <div id="editTankDomeList" class="edit-tank-dome-list"></div>
           </div>
@@ -508,7 +508,7 @@
         <div class="modal-body">
           <p id="removeDomeSummary" class="muted"></p>
           <p class="muted" style="margin-top:8px">
-            This detaches the dome from the tank without deleting production history. The dome will be quarantined and will not be available for install.
+            This detaches the dome from the tank without deleting production history. The dome returns to Dome Inventory as Available and can be installed on another tank.
           </p>
           <div class="field" style="margin-top:12px">
             <label for="removeDomeReason">Reason (required)</label>

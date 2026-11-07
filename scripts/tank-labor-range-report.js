@@ -80,6 +80,15 @@ function createTankLaborRangeReport(pool, helpers = {}) {
     return `${Math.floor(totalMin / 60)}h ${totalMin % 60}m`;
   }
 
+  function formatMinutes(totalMin) {
+    const mins = Math.max(0, Math.round(Number(totalMin) || 0));
+    return `${Math.floor(mins / 60)}h ${mins % 60}m`;
+  }
+
+  function roundedMinutes(ms) {
+    return Math.round(Math.max(0, Number(ms) || 0) / 60000);
+  }
+
   function roundHours2(n) {
     return Math.round((Number(n) || 0) * 100) / 100;
   }
@@ -318,8 +327,10 @@ function createTankLaborRangeReport(pool, helpers = {}) {
    */
   async function computeDomeShopRangeForTank(tankId, bounds, closeMs) {
     const tid = Number(tankId);
-    let runningMs = 0;
-    let laborMs = 0;
+    let domeRunningMs = 0;
+    let domeLaborMs = 0;
+    let bulkheadRunningMs = 0;
+    let bulkheadLaborMs = 0;
 
     try {
       const { rows: domeIds } = await pool.query(
@@ -345,7 +356,7 @@ function createTankLaborRangeReport(pool, helpers = {}) {
               ? closeMs
               : toMs(s.ended_at) || closeMs;
           if (start == null || end == null || end <= start) continue;
-          runningMs += overlapMs(start, end, bounds.startMs, bounds.endMs);
+          domeRunningMs += overlapMs(start, end, bounds.startMs, bounds.endMs);
         }
         const { rows: parts } = await pool.query(
           `SELECT p.employee_id, p.joined_at, p.left_at, s.status, s.ended_at
@@ -371,7 +382,7 @@ function createTankLaborRangeReport(pool, helpers = {}) {
             end: Math.min(leave, bounds.endMs, closeMs),
           });
         }
-        laborMs += [...byEmp.values()].reduce((s, ivs) => s + mergeIntervalsMs(ivs), 0);
+        domeLaborMs += [...byEmp.values()].reduce((s, ivs) => s + mergeIntervalsMs(ivs), 0);
       }
     } catch (_err) {
       /* dome tables may be absent on older DBs */
@@ -401,7 +412,7 @@ function createTankLaborRangeReport(pool, helpers = {}) {
               ? closeMs
               : toMs(s.ended_at) || closeMs;
           if (start == null || end == null || end <= start) continue;
-          runningMs += overlapMs(start, end, bounds.startMs, bounds.endMs);
+          bulkheadRunningMs += overlapMs(start, end, bounds.startMs, bounds.endMs);
         }
         const { rows: parts } = await pool.query(
           `SELECT p.employee_id, p.joined_at, p.left_at, s.status, s.ended_at
@@ -427,13 +438,18 @@ function createTankLaborRangeReport(pool, helpers = {}) {
             end: Math.min(leave, bounds.endMs, closeMs),
           });
         }
-        laborMs += [...byEmp.values()].reduce((s, ivs) => s + mergeIntervalsMs(ivs), 0);
+        bulkheadLaborMs += [...byEmp.values()].reduce((s, ivs) => s + mergeIntervalsMs(ivs), 0);
       }
     } catch (_err) {
       /* bulkhead tables may be absent */
     }
 
-    return { runningMs, laborMs };
+    return {
+      runningMs: domeRunningMs + bulkheadRunningMs,
+      laborMs: domeLaborMs + bulkheadLaborMs,
+      domeLaborMs,
+      bulkheadLaborMs,
+    };
   }
 
   async function buildTankLaborRangeReport({ startDate, endDate } = {}) {
@@ -454,6 +470,14 @@ function createTankLaborRangeReport(pool, helpers = {}) {
     const tanks = [];
     let totalRunningMs = 0;
     let totalLaborMs = 0;
+    let totalFabLaborMs = 0;
+    let totalAssemblyLaborMs = 0;
+    let totalDomeShopLaborMs = 0;
+    let totalDomeCreateLaborMs = 0;
+    let totalBulkheadLaborMs = 0;
+    let totalFabMin = 0;
+    let totalAssemblyMin = 0;
+    let totalDomeShopMin = 0;
 
     for (const tankRow of tankRows) {
       const fab = await computeFabRangeForTank(tankRow.id, bounds, closeMs);
@@ -461,6 +485,12 @@ function createTankLaborRangeReport(pool, helpers = {}) {
       const domeShop = await computeDomeShopRangeForTank(tankRow.id, bounds, closeMs);
       const runningMs = fab.runningMs + asm.runningMs + domeShop.runningMs;
       const laborMs = fab.laborMs + asm.laborMs + domeShop.laborMs;
+      const domeCreateMs = Math.max(0, Number(domeShop.domeLaborMs) || 0);
+      const bulkheadLaborMs = Math.max(0, Number(domeShop.bulkheadLaborMs) || 0);
+      const fabMin = roundedMinutes(fab.laborMs);
+      const assemblyMin = roundedMinutes(asm.laborMs);
+      const domeShopMin = roundedMinutes(domeShop.laborMs);
+      const departmentMin = fabMin + assemblyMin + domeShopMin;
       // Include tanks with any overlapping activity even if clipped ms is 0
       // (e.g. session started in range but fully downtime — still listed if found by query).
       if (runningMs <= 0 && laborMs <= 0) {
@@ -468,6 +498,14 @@ function createTankLaborRangeReport(pool, helpers = {}) {
       }
       totalRunningMs += runningMs;
       totalLaborMs += laborMs;
+      totalFabLaborMs += fab.laborMs;
+      totalAssemblyLaborMs += asm.laborMs;
+      totalDomeShopLaborMs += domeShop.laborMs;
+      totalDomeCreateLaborMs += domeCreateMs;
+      totalBulkheadLaborMs += bulkheadLaborMs;
+      totalFabMin += fabMin;
+      totalAssemblyMin += assemblyMin;
+      totalDomeShopMin += domeShopMin;
       tanks.push({
         tank_id: Number(tankRow.id),
         tank_number: tankRow.tank_number,
@@ -478,11 +516,25 @@ function createTankLaborRangeReport(pool, helpers = {}) {
         total_labor_hours: roundHours2(laborMs / 3600000),
         total_labor_display: formatXhYmFromMs(laborMs),
         fab_running_ms: fab.runningMs,
+        fab_running_display: formatXhYmFromMs(fab.runningMs),
         fab_labor_ms: fab.laborMs,
+        fab_labor_hours: roundHours2(fab.laborMs / 3600000),
+        fab_labor_display: formatXhYmFromMs(fab.laborMs),
         assembly_running_ms: asm.runningMs,
+        assembly_running_display: formatXhYmFromMs(asm.runningMs),
         assembly_labor_ms: asm.laborMs,
+        assembly_labor_hours: roundHours2(asm.laborMs / 3600000),
+        assembly_labor_display: formatXhYmFromMs(asm.laborMs),
         dome_shop_running_ms: domeShop.runningMs,
+        dome_shop_running_display: formatXhYmFromMs(domeShop.runningMs),
         dome_shop_labor_ms: domeShop.laborMs,
+        dome_shop_labor_hours: roundHours2(domeShop.laborMs / 3600000),
+        dome_shop_labor_display: formatXhYmFromMs(domeShop.laborMs),
+        dome_create_labor_ms: domeCreateMs,
+        dome_create_labor_display: formatXhYmFromMs(domeCreateMs),
+        bulkhead_labor_ms: bulkheadLaborMs,
+        bulkhead_labor_display: formatXhYmFromMs(bulkheadLaborMs),
+        department_total_display: formatMinutes(departmentMin),
       });
     }
 
@@ -503,25 +555,65 @@ function createTankLaborRangeReport(pool, helpers = {}) {
           total_labor_ms: totalLaborMs,
           total_labor_hours: roundHours2(totalLaborMs / 3600000),
           total_labor_display: formatXhYmFromMs(totalLaborMs),
+          fab_labor_ms: totalFabLaborMs,
+          fab_labor_hours: roundHours2(totalFabLaborMs / 3600000),
+          fab_labor_display: formatMinutes(totalFabMin),
+          assembly_labor_ms: totalAssemblyLaborMs,
+          assembly_labor_hours: roundHours2(totalAssemblyLaborMs / 3600000),
+          assembly_labor_display: formatMinutes(totalAssemblyMin),
+          dome_shop_labor_ms: totalDomeShopLaborMs,
+          dome_shop_labor_hours: roundHours2(totalDomeShopLaborMs / 3600000),
+          dome_shop_labor_display: formatMinutes(totalDomeShopMin),
+          department_total_display: formatMinutes(totalFabMin + totalAssemblyMin + totalDomeShopMin),
+          dome_create_labor_ms: totalDomeCreateLaborMs,
+          dome_create_labor_display: formatXhYmFromMs(totalDomeCreateLaborMs),
+          bulkhead_labor_ms: totalBulkheadLaborMs,
+          bulkhead_labor_display: formatXhYmFromMs(totalBulkheadLaborMs),
         },
         generated_at: nowIso(),
       },
     };
   }
 
+  function csvCell(value) {
+    return `"${String(value == null ? '' : value).replace(/"/g, '""')}"`;
+  }
+
   function buildTankLaborRangeCsv(report) {
-    const header = ['Tank Number', 'Total Running Time', 'Total Labor Hours'];
-    const lines = [header.join(',')];
-    for (const r of report.tanks || []) {
-      const cells = [r.tank_number, r.total_running_display, r.total_labor_display].map(
-        (v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`
+    const totals = (report && report.totals) || {};
+    const header = [
+      'Tank Number',
+      'Total Running Time',
+      'FAB Hours',
+      'Assembly Hours',
+      'Dome Shop Hours',
+      'Total Labor Hours',
+    ];
+    const lines = [header.map(csvCell).join(',')];
+    for (const r of (report && report.tanks) || []) {
+      lines.push(
+        [
+          r.tank_number,
+          r.total_running_display || '0h 0m',
+          r.fab_labor_display || '0h 0m',
+          r.assembly_labor_display || '0h 0m',
+          r.dome_shop_labor_display || '0h 0m',
+          r.department_total_display || r.total_labor_display || '0h 0m',
+        ]
+          .map(csvCell)
+          .join(',')
       );
-      lines.push(cells.join(','));
     }
-    const totals = report.totals || {};
     lines.push(
-      ['TOTALS', totals.total_running_display || '0h 0m', totals.total_labor_display || '0h 0m']
-        .map((v) => `"${String(v).replace(/"/g, '""')}"`)
+      [
+        'GRAND TOTAL',
+        totals.total_running_display || '0h 0m',
+        totals.fab_labor_display || '0h 0m',
+        totals.assembly_labor_display || '0h 0m',
+        totals.dome_shop_labor_display || '0h 0m',
+        totals.department_total_display || totals.total_labor_display || '0h 0m',
+      ]
+        .map(csvCell)
         .join(',')
     );
     return `${lines.join('\r\n')}\r\n`;

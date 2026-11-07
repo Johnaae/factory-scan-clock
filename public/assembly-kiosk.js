@@ -57,10 +57,29 @@ const els = {
   bhInstallError: document.getElementById('bhInstallError'),
   btnBhInstallCancel: document.getElementById('btnBhInstallCancel'),
   btnBhInstallConfirm: document.getElementById('btnBhInstallConfirm'),
+  assignTankSelect: document.getElementById('assignTankSelect'),
+  assignEmployeeSelect: document.getElementById('assignEmployeeSelect'),
+  assignEmployeesEmpty: document.getElementById('assignEmployeesEmpty'),
+  assignEmployeeChips: document.getElementById('assignEmployeeChips'),
+  btnAddEmployee: document.getElementById('btnAddEmployee'),
+  btnConfirmTankEmployees: document.getElementById('btnConfirmTankEmployees'),
+  manageEmployeesModal: document.getElementById('manageEmployeesModal'),
+  manageEmployeesHint: document.getElementById('manageEmployeesHint'),
+  manageEmployeesTank: document.getElementById('manageEmployeesTank'),
+  manageEmployeesCurrent: document.getElementById('manageEmployeesCurrent'),
+  manageEmployeesCurrentEmpty: document.getElementById('manageEmployeesCurrentEmpty'),
+  manageEmployeesSelect: document.getElementById('manageEmployeesSelect'),
+  manageEmployeesError: document.getElementById('manageEmployeesError'),
+  btnManageAddEmployee: document.getElementById('btnManageAddEmployee'),
+  btnManageEmployeesDone: document.getElementById('btnManageEmployeesDone'),
 };
 
 let config = null;
 let activeTeams = [];
+let assemblyTankCards = [];
+let assemblyShopEmployees = [];
+let assemblyEmployeeMode = false;
+let selectedEmployeeIds = new Set();
 let eligibleTanks = [];
 let recentlyFinished = [];
 let removedTanks = [];
@@ -69,6 +88,7 @@ let returnRemovedBusy = false;
 let focusedTeamId = null;
 let pendingConfirmer = null;
 let employeeOutTeamId = null;
+let employeeOutTankId = null;
 let employeeOutPick = null;
 let employeeOutSubmitting = false;
 let confirmHandler = null;
@@ -82,14 +102,17 @@ let bhInstallTankNumber = null;
 let bhInstallPick = null;
 let bhInstallList = [];
 let bhInstallSearchTimer = null;
+let manageEmployeesTankId = null;
 
 function applyConfigData(data) {
   if (!data || !data.ok) return;
   config = data;
+  assemblyEmployeeMode = data.assembly_employee_mode === true;
+  assemblyShopEmployees = Array.isArray(data.assembly_shop_employees) ? data.assembly_shop_employees : [];
+  assemblyTankCards = Array.isArray(data.assembly_tank_cards) ? data.assembly_tank_cards : [];
   if (Array.isArray(data.active_teams) && data.active_teams.length) {
     activeTeams = data.active_teams;
   } else if (data.assignment && data.assignment.team_id) {
-    // Defensive: never blank the kiosk when a team is assigned.
     activeTeams = [
       {
         team_id: Number(data.assignment.team_id),
@@ -106,7 +129,6 @@ function applyConfigData(data) {
   }
   eligibleTanks = Array.isArray(data.eligible_tanks) ? data.eligible_tanks : [];
   recentlyFinished = Array.isArray(data.recently_finished_assembly) ? data.recently_finished_assembly : [];
-  // Scan responses re-render from partial data without removed_tanks — keep the last known list.
   if (Array.isArray(data.removed_tanks)) removedTanks = data.removed_tanks;
   if (
     activeTeams.length &&
@@ -136,8 +158,12 @@ function isTextEntryModalOpen() {
   const confirmOpen = els.confirmModal && !els.confirmModal.hidden && els.confirmModal.classList.contains('show');
   const outOpen =
     els.employeeOutModal && !els.employeeOutModal.hidden && els.employeeOutModal.classList.contains('show');
+  const manageOpen =
+    els.manageEmployeesModal &&
+    !els.manageEmployeesModal.hidden &&
+    els.manageEmployeesModal.classList.contains('show');
   const bhOpen = els.bhInstallModal && !els.bhInstallModal.hidden && els.bhInstallModal.classList.contains('show');
-  return Boolean(confirmOpen || outOpen || bhOpen);
+  return Boolean(confirmOpen || outOpen || manageOpen || bhOpen);
 }
 
 function blurScanInputs() {
@@ -362,48 +388,70 @@ function bulkheadSpecLine(b) {
   });
 }
 
+function tankHasPriorAssemblyLabor(tank) {
+  const raw = String(
+    (tank && (tank.labor_display || tank.team_labor_display || tank.tank_labor_display)) || ''
+  )
+    .trim()
+    .toLowerCase();
+  if (!raw) return false;
+  if (raw === '0h 0m' || raw === '0h 0min' || raw === '0m' || raw === '—') return false;
+  const ms = Number(tank && (tank.labor_ms != null ? tank.labor_ms : tank.total_labor_ms));
+  if (Number.isFinite(ms) && ms > 0) return true;
+  return /[1-9]/.test(raw);
+}
+
 function assemblyActionButtons(tank, teamId) {
   const status = String(tank.status || '').toLowerCase();
   const session = tank.active_session || null;
   const stage = session ? String(session.stage || '').toUpperCase() : '';
   const tid = Number(tank.id);
+  const teamAttr = teamId != null && Number(teamId) > 0 ? ` data-team-id="${Number(teamId)}"` : '';
   const btns = [];
   const label = (key) => escapeHtml(tr(key));
   const hasBh = Boolean(tankInstalledBulkhead(tank));
-  if (status === 'assembly_in_progress' && !session) {
+  const onLunch = Boolean(tank.on_lunch);
+  // On Lunch: do not offer START NEW SHIFT — RESUME lives in the Lunch slot (team actions).
+  // Keep Finish / Bulkhead / Remove available from the tank row only when not on lunch pause.
+  if (onLunch) {
+    // Resume is rendered once in the Lunch button slot (ak-team-actions).
+  } else if (status === 'assembly_in_progress' && !session) {
+    const startKey = tankHasPriorAssemblyLabor(tank) ? 'ak.btn.startNewShift' : 'ak.btn.start';
     btns.push(
-      `<button type="button" class="btn-primary btn-touch btn-touch--start-work" data-ak-action="start" data-tank-id="${tid}" data-team-id="${teamId}" data-stage="ASSEMBLY">${label('ak.btn.start')}</button>`
-    );
-    if (!hasBh) {
-      btns.push(
-        `<button type="button" class="btn-primary btn-touch btn-touch--bulkhead" data-ak-action="install_bulkhead" data-tank-id="${tid}" data-team-id="${teamId}" data-tank-number="${escapeHtml(
-          tank.tank_number || ''
-        )}">${label('ak.btn.installBulkhead')}</button>`
-      );
-    }
-    btns.push(
-      `<button type="button" class="btn-primary btn-touch btn-touch--complete" data-ak-action="finish" data-tank-id="${tid}" data-team-id="${teamId}">${label('ak.btn.finish')}</button>`
-    );
-    btns.push(
-      `<button type="button" class="btn-secondary btn-touch" data-ak-action="remove_from_assembly" data-tank-id="${tid}" data-team-id="${teamId}">${label('ak.btn.remove')}</button>`
+      `<button type="button" class="btn-primary btn-touch btn-touch--start-work" data-ak-action="start" data-tank-id="${tid}"${teamAttr} data-stage="ASSEMBLY" data-use-tank-workers="1">${label(startKey)}</button>`
     );
   }
-  if (session && stage === 'ASSEMBLY') {
-    btns.push(
-      `<button type="button" class="btn-secondary btn-touch" data-ak-action="stop" data-tank-id="${tid}" data-team-id="${teamId}">${label('ak.btn.stop')}</button>`
-    );
+  if (!onLunch && status === 'assembly_in_progress' && !session) {
     if (!hasBh) {
       btns.push(
-        `<button type="button" class="btn-primary btn-touch btn-touch--bulkhead" data-ak-action="install_bulkhead" data-tank-id="${tid}" data-team-id="${teamId}" data-tank-number="${escapeHtml(
+        `<button type="button" class="btn-primary btn-touch btn-touch--bulkhead" data-ak-action="install_bulkhead" data-tank-id="${tid}"${teamAttr} data-tank-number="${escapeHtml(
           tank.tank_number || ''
         )}">${label('ak.btn.installBulkhead')}</button>`
       );
     }
     btns.push(
-      `<button type="button" class="btn-primary btn-touch btn-touch--complete" data-ak-action="finish" data-tank-id="${tid}" data-team-id="${teamId}">${label('ak.btn.finish')}</button>`
+      `<button type="button" class="btn-primary btn-touch btn-touch--complete" data-ak-action="finish" data-tank-id="${tid}"${teamAttr}>${label('ak.btn.finish')}</button>`
     );
     btns.push(
-      `<button type="button" class="btn-secondary btn-touch" data-ak-action="remove_from_assembly" data-tank-id="${tid}" data-team-id="${teamId}">${label('ak.btn.remove')}</button>`
+      `<button type="button" class="btn-secondary btn-touch" data-ak-action="remove_from_assembly" data-tank-id="${tid}"${teamAttr}>${label('ak.btn.remove')}</button>`
+    );
+  }
+  if (!onLunch && session && stage === 'ASSEMBLY') {
+    btns.push(
+      `<button type="button" class="btn-secondary btn-touch" data-ak-action="stop" data-tank-id="${tid}"${teamAttr}>${label('ak.btn.stop')}</button>`
+    );
+    if (!hasBh) {
+      btns.push(
+        `<button type="button" class="btn-primary btn-touch btn-touch--bulkhead" data-ak-action="install_bulkhead" data-tank-id="${tid}"${teamAttr} data-tank-number="${escapeHtml(
+          tank.tank_number || ''
+        )}">${label('ak.btn.installBulkhead')}</button>`
+      );
+    }
+    btns.push(
+      `<button type="button" class="btn-primary btn-touch btn-touch--complete" data-ak-action="finish" data-tank-id="${tid}"${teamAttr}>${label('ak.btn.finish')}</button>`
+    );
+    btns.push(
+      `<button type="button" class="btn-secondary btn-touch" data-ak-action="remove_from_assembly" data-tank-id="${tid}"${teamAttr}>${label('ak.btn.remove')}</button>`
     );
   }
   return btns.join('');
@@ -631,12 +679,167 @@ function renderMachineLabel() {
   els.machineLabel.textContent = (config && config.machine && config.machine.name) || tr('ak.subtitle');
 }
 
+function renderAssignPanel() {
+  if (!els.assignTankSelect) return;
+  const assignedIds = new Set(
+    (assemblyTankCards || []).map((c) => Number(c.id)).filter((n) => Number.isInteger(n) && n > 0)
+  );
+  const options = (eligibleTanks || [])
+    .filter((t) => {
+      const tid = Number(t.id);
+      const st = String(t.status || '').toLowerCase();
+      if (t.completed_at) return false;
+      // Already on an Assembly card → Manage Employees / existing card only (no duplicate).
+      if (assignedIds.has(tid)) return false;
+      if (t.assembly_machine_id != null) return false;
+      if (st === 'assembly_in_progress') return false;
+      // FAILED/HOLD still listed (disabled) so operators see why it is blocked.
+      if (isTestingLockedTank(t)) return true;
+      // FAB-ready, returned-to-Assembly, Testing-first (not yet assigned).
+      if (st === 'ready_for_assembly') return true;
+      if (st === 'testing_in_progress') return true;
+      return false;
+    })
+    .map((t) =>
+      isTestingLockedTank(t)
+        ? `<option value="${Number(t.id)}" disabled>${escapeHtml(eligibleOptionLabel(t))}</option>`
+        : `<option value="${Number(t.id)}">${escapeHtml(eligibleOptionLabel(t))}</option>`
+    )
+    .join('');
+  const prev = els.assignTankSelect.value;
+  els.assignTankSelect.innerHTML =
+    `<option value="">${escapeHtml(tr('ak.selectFabTank'))}</option>` + options;
+  if ([...els.assignTankSelect.options].some((o) => o.value === prev)) els.assignTankSelect.value = prev;
+
+  if (els.assignEmployeeSelect) {
+    const chosen = selectedEmployeeIds;
+    const available = (assemblyShopEmployees || []).filter((e) => !chosen.has(Number(e.id)));
+    els.assignEmployeeSelect.innerHTML =
+      `<option value="">${escapeHtml(tr('ak.selectEmployees'))}</option>` +
+      available
+        .map(
+          (e) =>
+            `<option value="${Number(e.id)}">${escapeHtml(e.name || '')}${
+              e.code ? ` (${escapeHtml(e.code)})` : ''
+            }</option>`
+        )
+        .join('');
+    const noEligible = !(assemblyShopEmployees || []).length;
+    els.assignEmployeeSelect.disabled = noEligible;
+    if (els.btnAddEmployee) els.btnAddEmployee.disabled = noEligible;
+    if (els.assignEmployeesEmpty) {
+      els.assignEmployeesEmpty.hidden = !noEligible;
+      if (noEligible) {
+        const shopsReady = config && config.shop_assignment_ready;
+        els.assignEmployeesEmpty.textContent =
+          shopsReady === false ? tr('ak.msg.shopsNotReady') : tr('ak.msg.noEligibleEmployees');
+      }
+    }
+  }
+  if (els.assignEmployeeChips) {
+    const chips = [...selectedEmployeeIds]
+      .map((id) => {
+        const emp = (assemblyShopEmployees || []).find((e) => Number(e.id) === id);
+        const name = emp ? emp.name : `Employee ${id}`;
+        return `<button type="button" class="ak-badge ak-badge--active" data-remove-emp="${id}">${escapeHtml(
+          name
+        )} ×</button>`;
+      })
+      .join('');
+    els.assignEmployeeChips.innerHTML = chips || '';
+  }
+}
+
+function renderTankEmployeeCard(tank) {
+  const tid = Number(tank.id);
+  const onLunch = Boolean(tank.on_lunch);
+  const session = tank.active_session || null;
+  const working = Boolean(session) && String(session.stage || '').toUpperCase() === 'ASSEMBLY';
+  const workers = tank.workers || [];
+  const names = workers
+    .map((e) => e.name || e.employee_name || '')
+    .filter(Boolean)
+    .join(', ');
+  const teamId = tank.assembly_team_id != null ? Number(tank.assembly_team_id) : null;
+  let badgeClass = 'ak-badge--working';
+  let badgeKey = 'ak.badge.notStarted';
+  let cardState = 'is-not-started';
+  if (onLunch) {
+    badgeClass = 'ak-badge--lunch';
+    badgeKey = 'ak.badge.lunch';
+    cardState = 'is-lunch';
+  } else if (working) {
+    badgeClass = 'ak-badge--working';
+    badgeKey = 'ak.badge.working';
+    cardState = 'is-working';
+  } else if (tankHasPriorAssemblyLabor(tank)) {
+    badgeClass = 'ak-badge--working';
+    badgeKey = 'ak.badge.shiftEnded';
+    cardState = 'is-shift-ended';
+  }
+  // Lunch ↔ Resume share the same first slot on the card action row.
+  const teamActions = [];
+  if (onLunch) {
+    teamActions.push(
+      `<button type="button" class="btn-primary btn-touch" data-ak-action="resume" data-tank-id="${tid}" data-use-tank-workers="1">${escapeHtml(tr('ak.btn.resume'))}</button>`
+    );
+  } else if (working) {
+    teamActions.push(
+      `<button type="button" class="btn-secondary btn-touch" data-ak-action="lunch" data-tank-id="${tid}">${escapeHtml(tr('ak.btn.lunch'))}</button>`
+    );
+    teamActions.push(
+      `<button type="button" class="btn-secondary btn-touch" data-ak-action="end_shift" data-tank-id="${tid}">${escapeHtml(tr('ak.btn.endShift'))}</button>`
+    );
+  }
+  teamActions.push(
+    `<button type="button" class="btn-secondary btn-touch" data-ak-action="manage_employees" data-tank-id="${tid}">${escapeHtml(tr('ak.btn.manageEmployees'))}</button>`
+  );
+  if (workers.length) {
+    teamActions.push(
+      `<button type="button" class="btn-secondary btn-touch btn-touch--employee-out" data-ak-action="employee_out" data-tank-id="${tid}">${escapeHtml(tr('ak.btn.employeeOut'))}</button>`
+    );
+  }
+  const needEmployees =
+    !onLunch && !working && (!workers.length) && String(tank.status || '').toLowerCase() === 'assembly_in_progress';
+  return `<section class="ak-team-card ${cardState}" data-tank-card-id="${tid}">
+    <div class="ak-team-head">
+      <h2 class="ak-team-title">${escapeHtml(tankLabel(tank.tank_number))}</h2>
+      <div class="ak-team-badges">
+        <span class="ak-badge ${badgeClass}">${escapeHtml(tr(badgeKey))}</span>
+      </div>
+    </div>
+    <p class="ak-roster"><span class="ak-roster-label">${escapeHtml(tr('ak.onShift'))}</span> ${escapeHtml(
+      names || tr('ak.noOpenShift')
+    )}</p>
+    ${
+      needEmployees
+        ? `<p class="ak-tank-stage">${escapeHtml(tr('ak.msg.selectEmployeesBeforeStart'))}</p>`
+        : ''
+    }
+    ${renderTankCard({ ...tank, on_lunch: onLunch, workers }, teamId)}
+    <div class="wk-touch ak-team-actions">${teamActions.join('')}</div>
+  </section>`;
+}
+
 function renderAll() {
   renderMachineLabel();
   renderRecentlyFinished();
   renderLockedTesting();
   renderReturnRemoved();
+  renderAssignPanel();
   if (!els.teamCards) return;
+  if (assemblyEmployeeMode) {
+    if (!assemblyTankCards.length) {
+      els.teamCards.innerHTML = '';
+      if (els.teamsEmpty) els.teamsEmpty.hidden = false;
+      return;
+    }
+    if (els.teamsEmpty) els.teamsEmpty.hidden = true;
+    els.teamCards.innerHTML = assemblyTankCards.map(renderTankEmployeeCard).join('');
+    wireTouchPrevent(els.teamCards);
+    return;
+  }
+  // Legacy team-card mode (only if tank-employee tables are not ready).
   if (!activeTeams.length) {
     els.teamCards.innerHTML = '';
     if (els.teamsEmpty) els.teamsEmpty.hidden = false;
@@ -647,7 +850,6 @@ function renderAll() {
   wireTouchPrevent(els.teamCards);
   els.teamCards.querySelectorAll('section.ak-team-card[data-team-id]').forEach((card) => {
     card.addEventListener('click', (ev) => {
-      // Buttons / tank picker act on their own card without changing the selection.
       if (ev.target.closest('button, select, option, input, label')) return;
       selectTeam(Number(card.getAttribute('data-team-id')));
     });
@@ -696,7 +898,10 @@ async function loadConfig() {
 }
 
 async function runTeamAction(payload, okMessage) {
-  if (actionBusy) return;
+  if (actionBusy) {
+    showWarning(say('ak.msg.actionBusy'));
+    return;
+  }
   actionBusy = true;
   showWarning('');
   try {
@@ -738,22 +943,7 @@ async function confirmTankForTeam(teamId) {
   }
 }
 
-async function openEmployeeOut(teamId) {
-  employeeOutTeamId = teamId;
-  employeeOutPick = null;
-  if (els.employeeOutConfirm) els.employeeOutConfirm.hidden = true;
-  if (els.btnConfirmEmployeeOut) els.btnConfirmEmployeeOut.hidden = true;
-  if (els.employeeOutHint) els.employeeOutHint.textContent = tr('ak.employeeOutHint');
-  openModal(els.employeeOutModal);
-  const { res, data } = await api(`${API}/shift-employees?team_id=${encodeURIComponent(teamId)}`, {
-    cache: 'no-store',
-  });
-  if (!res.ok || !data.ok) {
-    showWarning((data && data.message) || say('ak.msg.loadEmployeesFailed'));
-    closeEmployeeOut();
-    return;
-  }
-  const employees = Array.isArray(data.employees) ? data.employees : [];
+function fillEmployeeOutList(employees) {
   if (!employees.length) {
     if (els.employeeOutList) els.employeeOutList.innerHTML = '';
     if (els.employeeOutEmpty) els.employeeOutEmpty.hidden = false;
@@ -774,19 +964,188 @@ async function openEmployeeOut(teamId) {
       const id = Number(btn.getAttribute('data-employee-id'));
       const emp = employees.find((x) => Number(x.id) === id);
       if (!emp) return;
-      employeeOutPick = emp;
+      employeeOutPick = { id: Number(emp.id), name: emp.name || emp.employee_name, code: emp.code };
       if (els.employeeOutConfirm) els.employeeOutConfirm.hidden = false;
       if (els.employeeOutConfirmText) {
-        els.employeeOutConfirmText.textContent = tr('ak.msg.clockOutQuestion', { name: emp.name });
+        els.employeeOutConfirmText.textContent = employeeOutConfirmCopy(employeeOutPick.name);
       }
       if (els.btnConfirmEmployeeOut) els.btnConfirmEmployeeOut.hidden = false;
     });
   });
 }
 
+async function openEmployeeOut(teamId) {
+  employeeOutTeamId = teamId;
+  employeeOutTankId = null;
+  employeeOutPick = null;
+  if (els.employeeOutConfirm) els.employeeOutConfirm.hidden = true;
+  if (els.btnConfirmEmployeeOut) els.btnConfirmEmployeeOut.hidden = true;
+  if (els.employeeOutHint) els.employeeOutHint.textContent = tr('ak.employeeOutHint');
+  openModal(els.employeeOutModal);
+  const { res, data } = await api(`${API}/shift-employees?team_id=${encodeURIComponent(teamId)}`, {
+    cache: 'no-store',
+  });
+  if (!res.ok || !data.ok) {
+    showWarning((data && data.message) || say('ak.msg.loadEmployeesFailed'));
+    closeEmployeeOut();
+    return;
+  }
+  fillEmployeeOutList(Array.isArray(data.employees) ? data.employees : []);
+}
+
+async function openEmployeeOutForTank(tankId) {
+  employeeOutTeamId = null;
+  employeeOutTankId = tankId;
+  employeeOutPick = null;
+  if (els.employeeOutConfirm) els.employeeOutConfirm.hidden = true;
+  if (els.btnConfirmEmployeeOut) els.btnConfirmEmployeeOut.hidden = true;
+  if (els.employeeOutHint) els.employeeOutHint.textContent = tr('ak.employeeOutHintTank');
+  openModal(els.employeeOutModal);
+  const card = (assemblyTankCards || []).find((t) => Number(t.id) === Number(tankId));
+  fillEmployeeOutList(card && Array.isArray(card.workers) ? card.workers : []);
+}
+
+/** Confirm copy for tank-scoped Employee Out (stop this tank only). */
+function employeeOutConfirmCopy(name) {
+  if (employeeOutTankId) return tr('ak.msg.employeeOutTankQuestion', { name });
+  return tr('ak.msg.clockOutQuestion', { name });
+}
+
+function showManageEmployeesError(msg) {
+  if (!els.manageEmployeesError) return;
+  if (!msg) {
+    els.manageEmployeesError.hidden = true;
+    els.manageEmployeesError.textContent = '';
+    return;
+  }
+  els.manageEmployeesError.hidden = false;
+  els.manageEmployeesError.textContent = displayMessage(msg);
+}
+
+function renderManageEmployeesModal() {
+  if (!manageEmployeesTankId) return;
+  const card = (assemblyTankCards || []).find((t) => Number(t.id) === Number(manageEmployeesTankId));
+  const workers = (card && Array.isArray(card.workers) ? card.workers : []) || [];
+  const currentIds = new Set(workers.map((e) => Number(e.id)));
+
+  if (els.manageEmployeesTank) {
+    els.manageEmployeesTank.textContent = card
+      ? tankLabel(card.tank_number || card.id)
+      : tankLabel(manageEmployeesTankId);
+  }
+
+  if (els.manageEmployeesCurrent) {
+    if (!workers.length) {
+      els.manageEmployeesCurrent.innerHTML = '';
+      if (els.manageEmployeesCurrentEmpty) els.manageEmployeesCurrentEmpty.hidden = false;
+    } else {
+      if (els.manageEmployeesCurrentEmpty) els.manageEmployeesCurrentEmpty.hidden = true;
+      els.manageEmployeesCurrent.innerHTML = workers
+        .map(
+          (e) => `<div class="employee-out-row" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+            <span>
+              <span class="employee-out-name">${escapeHtml(e.name || '—')}</span>
+              <span class="employee-out-meta">${escapeHtml(e.code || '')}</span>
+            </span>
+            <button type="button" class="btn-secondary btn-touch" data-manage-remove="${Number(e.id)}">${escapeHtml(
+              tr('ak.btn.removeEmployee')
+            )}</button>
+          </div>`
+        )
+        .join('');
+      wireTouchPrevent(els.manageEmployeesCurrent);
+    }
+  }
+
+  if (els.manageEmployeesSelect) {
+    const available = (assemblyShopEmployees || []).filter((e) => !currentIds.has(Number(e.id)));
+    els.manageEmployeesSelect.innerHTML =
+      `<option value="">${escapeHtml(tr('ak.selectEmployees'))}</option>` +
+      available
+        .map(
+          (e) =>
+            `<option value="${Number(e.id)}">${escapeHtml(e.name || '')}${
+              e.code ? ` (${escapeHtml(e.code)})` : ''
+            }</option>`
+        )
+        .join('');
+    els.manageEmployeesSelect.disabled = !available.length;
+    if (els.btnManageAddEmployee) els.btnManageAddEmployee.disabled = !available.length;
+  }
+}
+
+async function openManageEmployees(tankId) {
+  manageEmployeesTankId = tankId;
+  showManageEmployeesError('');
+  renderManageEmployeesModal();
+  openModal(els.manageEmployeesModal);
+}
+
+function closeManageEmployees() {
+  manageEmployeesTankId = null;
+  showManageEmployeesError('');
+  closeModal(els.manageEmployeesModal);
+}
+
+async function manageAddEmployee() {
+  if (!manageEmployeesTankId || actionBusy) return;
+  const empId = els.manageEmployeesSelect ? Number(els.manageEmployeesSelect.value) : 0;
+  if (!Number.isInteger(empId) || empId <= 0) {
+    showManageEmployeesError(say('ak.msg.selectEmployeesFirst'));
+    return;
+  }
+  actionBusy = true;
+  showManageEmployeesError('');
+  try {
+    const { res, data } = await postAction({
+      action: 'manage_tank_employees',
+      tank_id: manageEmployeesTankId,
+      add_employee_ids: [empId],
+    });
+    if (!res.ok || !data.ok) {
+      showManageEmployeesError((data && data.message) || say('ak.msg.actionFailed'));
+      return;
+    }
+    showWarning(data.message || say('ak.msg.employeesUpdated'));
+    await loadConfig();
+    renderManageEmployeesModal();
+  } catch (_err) {
+    showManageEmployeesError(say('ak.msg.offline'));
+  } finally {
+    actionBusy = false;
+  }
+}
+
+async function manageRemoveEmployee(empId) {
+  if (!manageEmployeesTankId || actionBusy) return;
+  const id = Number(empId);
+  if (!Number.isInteger(id) || id <= 0) return;
+  actionBusy = true;
+  showManageEmployeesError('');
+  try {
+    const { res, data } = await postAction({
+      action: 'manage_tank_employees',
+      tank_id: manageEmployeesTankId,
+      remove_employee_ids: [id],
+    });
+    if (!res.ok || !data.ok) {
+      showManageEmployeesError((data && data.message) || say('ak.msg.actionFailed'));
+      return;
+    }
+    showWarning(data.message || say('ak.msg.employeesUpdated'));
+    await loadConfig();
+    renderManageEmployeesModal();
+  } catch (_err) {
+    showManageEmployeesError(say('ak.msg.offline'));
+  } finally {
+    actionBusy = false;
+  }
+}
+
 function closeEmployeeOut() {
   employeeOutPick = null;
   employeeOutTeamId = null;
+  employeeOutTankId = null;
   employeeOutSubmitting = false;
   if (els.employeeOutList) els.employeeOutList.innerHTML = '';
   if (els.employeeOutEmpty) els.employeeOutEmpty.hidden = true;
@@ -799,15 +1158,28 @@ async function confirmEmployeeOut() {
   if (!employeeOutPick || employeeOutSubmitting) return;
   employeeOutSubmitting = true;
   try {
-    const { res, data } = await api(`${API}/employee-out`, {
-      method: 'POST',
-      body: JSON.stringify({ employee_id: employeeOutPick.id, team_id: employeeOutTeamId }),
-    });
-    if (!res.ok || !data.ok) {
-      showWarning((data && data.message) || say('ak.msg.clockOutFailed'));
-      return;
+    if (employeeOutTankId) {
+      const { res, data } = await postAction({
+        action: 'employee_out',
+        employee_id: employeeOutPick.id,
+        tank_id: employeeOutTankId,
+      });
+      if (!res.ok || !data.ok) {
+        showWarning((data && data.message) || say('ak.msg.clockOutFailed'));
+        return;
+      }
+      showWarning(data.message || say('ak.msg.clockedOut', { name: employeeOutPick.name }));
+    } else {
+      const { res, data } = await api(`${API}/employee-out`, {
+        method: 'POST',
+        body: JSON.stringify({ employee_id: employeeOutPick.id, team_id: employeeOutTeamId }),
+      });
+      if (!res.ok || !data.ok) {
+        showWarning((data && data.message) || say('ak.msg.clockOutFailed'));
+        return;
+      }
+      showWarning(data.message || say('ak.msg.clockedOut', { name: employeeOutPick.name }));
     }
-    showWarning(data.message || say('ak.msg.clockedOut', { name: employeeOutPick.name }));
     closeEmployeeOut();
     await loadConfig();
   } finally {
@@ -815,9 +1187,45 @@ async function confirmEmployeeOut() {
   }
 }
 
+async function confirmTankEmployees() {
+  if (actionBusy) return;
+  const tankId = els.assignTankSelect ? Number(els.assignTankSelect.value) : 0;
+  const employeeIds = [...selectedEmployeeIds];
+  if (!tankId) {
+    showWarning(say('ak.msg.selectTankFirst'));
+    return;
+  }
+  if (!employeeIds.length) {
+    showWarning(say('ak.msg.selectEmployeesFirst'));
+    return;
+  }
+  actionBusy = true;
+  showWarning('');
+  try {
+    const { res, data } = await postAction({
+      action: 'confirm_tank_employees',
+      tank_id: tankId,
+      employee_ids: employeeIds,
+    });
+    if (!res.ok || !data.ok) {
+      showWarning((data && data.message) || say('ak.msg.confirmFailed'));
+      return;
+    }
+    selectedEmployeeIds = new Set();
+    showWarning(data.message || say('ak.msg.tankConfirmed'));
+    await loadConfig();
+  } finally {
+    actionBusy = false;
+  }
+}
+
 async function handleTeamCardsClick(ev) {
   const btn = ev.target.closest('[data-ak-action]');
-  if (!btn || actionBusy) return;
+  if (!btn) return;
+  if (actionBusy) {
+    showWarning(say('ak.msg.actionBusy'));
+    return;
+  }
   const action = btn.getAttribute('data-ak-action');
   const teamId = Number(btn.getAttribute('data-team-id'));
   const tankId = Number(btn.getAttribute('data-tank-id'));
@@ -827,14 +1235,33 @@ async function handleTeamCardsClick(ev) {
     return;
   }
   if (action === 'start') {
-    await runTeamAction(
-      { action: 'start', tank_id: tankId, team_id: teamId, stage: 'ASSEMBLY' },
-      say('ak.msg.laborStarted')
-    );
+    // Each Assembly tank starts independently — require employees on THIS card first.
+    if (assemblyEmployeeMode || btn.getAttribute('data-use-tank-workers') === '1') {
+      const card = (assemblyTankCards || []).find((t) => Number(t.id) === tankId);
+      const workers = card && Array.isArray(card.workers) ? card.workers : [];
+      if (!workers.length) {
+        showWarning(say('ak.msg.selectEmployeesBeforeStart'));
+        return;
+      }
+    }
+    const payload = { action: 'start', tank_id: tankId, stage: 'ASSEMBLY' };
+    // Tank-employee Assembly: always start from assembly_tank_workers (not empty pool team roster).
+    if (assemblyEmployeeMode || btn.getAttribute('data-use-tank-workers') === '1') {
+      payload.use_tank_workers = true;
+      payload.card_mode = 'tank_employees';
+    } else if (Number.isInteger(teamId) && teamId > 0) {
+      payload.team_id = teamId;
+    } else {
+      payload.use_tank_workers = true;
+      payload.card_mode = 'tank_employees';
+    }
+    await runTeamAction(payload, say('ak.msg.laborStarted'));
     return;
   }
   if (action === 'stop') {
-    await runTeamAction({ action: 'stop', tank_id: tankId, team_id: teamId }, say('ak.msg.laborStopped'));
+    const payload = { action: 'stop', tank_id: tankId };
+    if (Number.isInteger(teamId) && teamId > 0) payload.team_id = teamId;
+    await runTeamAction(payload, say('ak.msg.laborStopped'));
     return;
   }
   if (action === 'finish') {
@@ -844,7 +1271,9 @@ async function handleTeamCardsClick(ev) {
           : tr('ak.thisTank'))
       : tr('ak.thisTank');
     const teamRow = (activeTeams || []).find((t) => Number(t.team_id) === teamId);
-    const tankRow = teamRow ? (teamRow.tanks || []).find((t) => Number(t.id) === tankId) : null;
+    const tankRow =
+      (assemblyTankCards || []).find((t) => Number(t.id) === tankId) ||
+      (teamRow ? (teamRow.tanks || []).find((t) => Number(t.id) === tankId) : null);
     const others = tankRow && Array.isArray(tankRow.assembly_other_teams) ? tankRow.assembly_other_teams : [];
     const ok = await askConfirm(
       tr('ak.msg.finishTitle'),
@@ -856,7 +1285,13 @@ async function handleTeamCardsClick(ev) {
       tr('ak.msg.finishOk')
     );
     if (!ok) return;
-    await runTeamAction({ action: 'finish', tank_id: tankId, team_id: teamId }, null);
+    const payload = { action: 'finish', tank_id: tankId };
+    if (Number.isInteger(teamId) && teamId > 0) payload.team_id = teamId;
+    await runTeamAction(payload, null);
+    return;
+  }
+  if (action === 'manage_employees') {
+    await openManageEmployees(tankId);
     return;
   }
   if (action === 'remove_from_assembly') {
@@ -880,6 +1315,10 @@ async function handleTeamCardsClick(ev) {
     return;
   }
   if (action === 'lunch') {
+    if (Number.isInteger(tankId) && tankId > 0) {
+      await runTeamAction({ action: 'lunch', tank_id: tankId }, say('ak.msg.tankLunchStarted'));
+      return;
+    }
     if (!Number.isInteger(teamId) || teamId <= 0) {
       showWarning(say('ak.msg.lunchOnCard'));
       return;
@@ -888,6 +1327,18 @@ async function handleTeamCardsClick(ev) {
     return;
   }
   if (action === 'resume') {
+    if (Number.isInteger(tankId) && tankId > 0) {
+      await runTeamAction(
+        {
+          action: 'resume',
+          tank_id: tankId,
+          use_tank_workers: true,
+          card_mode: 'tank_employees',
+        },
+        say('ak.msg.tankResumed')
+      );
+      return;
+    }
     if (!Number.isInteger(teamId) || teamId <= 0) {
       showWarning(say('ak.msg.resumeOnCard'));
       return;
@@ -896,6 +1347,10 @@ async function handleTeamCardsClick(ev) {
     return;
   }
   if (action === 'employee_out') {
+    if (Number.isInteger(tankId) && tankId > 0) {
+      await openEmployeeOutForTank(tankId);
+      return;
+    }
     if (!Number.isInteger(teamId) || teamId <= 0) {
       showWarning(say('ak.msg.outOnCard'));
       return;
@@ -904,6 +1359,12 @@ async function handleTeamCardsClick(ev) {
     return;
   }
   if (action === 'end_shift') {
+    if (Number.isInteger(tankId) && tankId > 0) {
+      const ok = await askConfirm(tr('ak.msg.endShiftTitle'), tr('ak.msg.endShiftBody'));
+      if (!ok) return;
+      await runTeamAction({ action: 'end_shift', tank_id: tankId }, say('ak.msg.endShiftDone'));
+      return;
+    }
     if (!Number.isInteger(teamId) || teamId <= 0) {
       showWarning(say('ak.msg.endShiftOnCard'));
       return;
@@ -1166,6 +1627,17 @@ function bindModals() {
   }
   if (els.btnCancelEmployeeOut) els.btnCancelEmployeeOut.addEventListener('click', closeEmployeeOut);
   if (els.btnConfirmEmployeeOut) els.btnConfirmEmployeeOut.addEventListener('click', () => void confirmEmployeeOut());
+  if (els.btnManageEmployeesDone) els.btnManageEmployeesDone.addEventListener('click', closeManageEmployees);
+  if (els.btnManageAddEmployee) {
+    els.btnManageAddEmployee.addEventListener('click', () => void manageAddEmployee());
+  }
+  if (els.manageEmployeesCurrent) {
+    els.manageEmployeesCurrent.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('[data-manage-remove]');
+      if (!btn) return;
+      void manageRemoveEmployee(btn.getAttribute('data-manage-remove'));
+    });
+  }
   if (els.teamCards) els.teamCards.addEventListener('click', (ev) => void handleTeamCardsClick(ev));
   if (els.recentlyFinishedList) {
     els.recentlyFinishedList.addEventListener('click', (ev) => void handleRecentlyFinishedClick(ev));
@@ -1176,6 +1648,33 @@ function bindModals() {
   if (els.btnReturnRemoved) {
     els.btnReturnRemoved.addEventListener('click', () => void returnRemovedTank());
     wireTouchPrevent(els.returnRemoved);
+  }
+  if (els.btnAddEmployee) {
+    els.btnAddEmployee.addEventListener('click', () => {
+      const id = els.assignEmployeeSelect ? Number(els.assignEmployeeSelect.value) : 0;
+      if (!Number.isInteger(id) || id <= 0) {
+        showWarning(say('ak.msg.selectEmployeesFirst'));
+        return;
+      }
+      if (selectedEmployeeIds.has(id)) {
+        showWarning(say('ak.msg.employeeAlreadyAdded'));
+        return;
+      }
+      selectedEmployeeIds.add(id);
+      showWarning('');
+      renderAssignPanel();
+    });
+  }
+  if (els.assignEmployeeChips) {
+    els.assignEmployeeChips.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('[data-remove-emp]');
+      if (!btn) return;
+      selectedEmployeeIds.delete(Number(btn.getAttribute('data-remove-emp')));
+      renderAssignPanel();
+    });
+  }
+  if (els.btnConfirmTankEmployees) {
+    els.btnConfirmTankEmployees.addEventListener('click', () => void confirmTankEmployees());
   }
   if (els.btnBhInstallCancel) els.btnBhInstallCancel.addEventListener('click', closeBhInstallModal);
   if (els.btnBhInstallConfirm) els.btnBhInstallConfirm.addEventListener('click', () => void confirmBhInstall());

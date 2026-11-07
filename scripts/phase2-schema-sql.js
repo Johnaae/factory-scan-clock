@@ -169,6 +169,33 @@ CREATE TABLE IF NOT EXISTS tank_admin_phase2_audit (
   next_status TEXT,
   details JSONB
 );
+
+CREATE TABLE IF NOT EXISTS assembly_tank_workers (
+  id BIGSERIAL PRIMARY KEY,
+  tank_id BIGINT NOT NULL REFERENCES tanks(id) ON DELETE CASCADE,
+  machine_id BIGINT NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
+  employee_id BIGINT NOT NULL REFERENCES employees(id) ON DELETE RESTRICT,
+  status TEXT NOT NULL DEFAULT 'assigned'
+    CHECK (status IN ('assigned', 'left')),
+  assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  left_at TIMESTAMPTZ,
+  assigned_by TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS assembly_kiosk_tanks (
+  id BIGSERIAL PRIMARY KEY,
+  machine_id BIGINT NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
+  tank_id BIGINT NOT NULL REFERENCES tanks(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'lunch')),
+  lunch_paused_at TIMESTAMPTZ,
+  confirmed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  left_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 `;
 
 const PHASE2_INDEXES_SQL = `
@@ -229,6 +256,21 @@ CREATE INDEX IF NOT EXISTS idx_assembly_tank_teams_tank
   ON assembly_tank_teams(tank_id, status);
 CREATE INDEX IF NOT EXISTS idx_tank_admin_phase2_audit_tank
   ON tank_admin_phase2_audit(tank_number, performed_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_assembly_tank_workers_open_tank_emp
+  ON assembly_tank_workers (tank_id, employee_id)
+  WHERE left_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_assembly_tank_workers_open_emp
+  ON assembly_tank_workers (employee_id)
+  WHERE left_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_assembly_tank_workers_tank
+  ON assembly_tank_workers (tank_id, status);
+CREATE INDEX IF NOT EXISTS idx_assembly_tank_workers_machine
+  ON assembly_tank_workers (machine_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_assembly_kiosk_tanks_open
+  ON assembly_kiosk_tanks (machine_id, tank_id)
+  WHERE left_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_assembly_kiosk_tanks_machine
+  ON assembly_kiosk_tanks (machine_id, status);
 `;
 
 /** Machine workflow only — never touch tank status / archived history. */
@@ -263,6 +305,8 @@ const PHASE2_REQUIRED_TABLES = [
   'test_attempt_notes',
   'assembly_kiosk_teams',
   'assembly_tank_teams',
+  'assembly_tank_workers',
+  'assembly_kiosk_tanks',
 ];
 
 module.exports = {

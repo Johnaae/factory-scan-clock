@@ -2572,8 +2572,7 @@ const tankLaborEnd = document.getElementById('tankLaborEnd');
 const tankLaborBody = document.getElementById('tankLaborBody');
 const tankLaborFoot = document.getElementById('tankLaborFoot');
 const tankLaborMeta = document.getElementById('tankLaborMeta');
-const tankLaborTotalRunning = document.getElementById('tankLaborTotalRunning');
-const tankLaborTotalLabor = document.getElementById('tankLaborTotalLabor');
+const tankLaborDetailCache = new Map();
 const btnTankLaborRefresh = document.getElementById('btnTankLaborRefresh');
 const btnTankLaborCsv = document.getElementById('btnTankLaborCsv');
 const btnTankLaborPdf = document.getElementById('btnTankLaborPdf');
@@ -2599,33 +2598,164 @@ function setTankLaborRange(start, end) {
   if (tankLaborEnd) tankLaborEnd.value = end;
 }
 
+function tankLaborTime(value) {
+  return escapeHtml(value || '0h 0m');
+}
+
+function renderTankLaborPhaseDetails(data) {
+  const pieces = (data && data.piece_reports) || [];
+  const blocks = [];
+  for (const pr of pieces) {
+    const phases = (pr.phase_time_summary || []).filter((row) => (Number(row.total_duration_ms) || 0) > 0);
+    if (!phases.length) continue;
+    const items = phases
+      .map((row) => {
+        const time = fmtReportDuration({
+          ms: row.total_duration_ms,
+          hours: row.total_duration_hours,
+          display: row.total_duration_display,
+        });
+        return `<li><span>${escapeHtml(row.phase_name || row.phase_code || '—')}</span><span>${escapeHtml(
+          time
+        )}</span></li>`;
+      })
+      .join('');
+    blocks.push(
+      `<div><strong>Piece ${Number(pr.piece_number)}</strong><ul class="tank-labor-phase-list">${items}</ul></div>`
+    );
+  }
+  const overview = (data && data.overview_totals) || {};
+  const testing =
+    overview.testing_elapsed_ms > 0
+      ? `<p class="muted" style="margin:0">Testing / QA-QC time ${escapeHtml(
+          overview.testing_elapsed_display || '0h 0m'
+        )} is tracked separately and is not included in labor totals.</p>`
+      : '';
+  if (!blocks.length && !testing) {
+    return '<p class="muted" style="margin:0">No phase time recorded on this tank.</p>';
+  }
+  return `${blocks.join('')}${testing}`;
+}
+
+function renderTankLaborDetailPanel(row) {
+  const id = Number(row.tank_id);
+  return `<div class="tank-labor-detail-panel">
+    <div class="tank-labor-dept-grid">
+      <div class="tank-labor-dept-card">
+        <h4>FAB SHOP</h4>
+        <p>Running Time ${tankLaborTime(row.fab_running_display)}</p>
+        <p>Labor Hours ${tankLaborTime(row.fab_labor_display)}</p>
+      </div>
+      <div class="tank-labor-dept-card">
+        <h4>ASSEMBLY</h4>
+        <p>Duration ${tankLaborTime(row.assembly_running_display)}</p>
+        <p>Labor Hours ${tankLaborTime(row.assembly_labor_display)}</p>
+      </div>
+      <div class="tank-labor-dept-card">
+        <h4>DOME SHOP</h4>
+        <p>Running Time ${tankLaborTime(row.dome_shop_running_display)}</p>
+        <p>Labor Hours ${tankLaborTime(row.dome_shop_labor_display)}</p>
+      </div>
+    </div>
+    <div>
+      <h4 class="tank-report-subsection-title" style="margin:0 0 6px">Phase details</h4>
+      <div id="tankLaborPhase-${id}" class="muted">Loading details…</div>
+    </div>
+    <div>
+      <button type="button" class="btn btn-sm" data-open-tank-report="${id}">View Full Tank Report</button>
+    </div>
+  </div>`;
+}
+
 function renderTankLaborReport(data) {
   if (!tankLaborBody) return;
   const tanks = (data && data.tanks) || [];
   const totals = (data && data.totals) || {};
   if (tankLaborMeta) {
     const range =
-      data.start_date === data.end_date ? data.start_date : `${data.start_date} → ${data.end_date}`;
-    tankLaborMeta.textContent = `Range: ${range} — ${tanks.length} tank${tanks.length === 1 ? '' : 's'}.`;
+      data && data.start_date
+        ? data.start_date === data.end_date
+          ? data.start_date
+          : `${data.start_date} → ${data.end_date}`
+        : '';
+    tankLaborMeta.textContent = range
+      ? `Range: ${range} — ${tanks.length} tank${tanks.length === 1 ? '' : 's'}.`
+      : '';
   }
   if (!tanks.length) {
     tankLaborBody.innerHTML =
-      '<tr><td colspan="3" class="muted">No tanks with production activity in this date range.</td></tr>';
-    if (tankLaborFoot) tankLaborFoot.hidden = true;
+      '<tr><td colspan="6" class="muted">No tanks with production activity in this date range.</td></tr>';
+  } else {
+    tankLaborBody.innerHTML = tanks
+      .map((r) => {
+        const id = Number(r.tank_id);
+        return `<tr>
+        <td>
+          <button type="button" class="tank-labor-toggle" data-labor-toggle="${id}" aria-expanded="false" aria-label="Expand ${escapeHtml(
+            r.tank_number
+          )}">
+            <span class="chevron" aria-hidden="true"></span>
+            <span>${escapeHtml(r.tank_number)}</span>
+          </button>
+        </td>
+        <td class="tank-labor-time">${tankLaborTime(r.total_running_display)}</td>
+        <td class="tank-labor-time">${tankLaborTime(r.fab_labor_display)}</td>
+        <td class="tank-labor-time">${tankLaborTime(r.assembly_labor_display)}</td>
+        <td class="tank-labor-time">${tankLaborTime(r.dome_shop_labor_display)}</td>
+        <td class="tank-labor-time">${tankLaborTime(r.department_total_display || r.total_labor_display)}</td>
+      </tr>
+      <tr class="tank-labor-detail" data-labor-detail="${id}" hidden>
+        <td colspan="6">${renderTankLaborDetailPanel(r)}</td>
+      </tr>`;
+      })
+      .join('');
+  }
+  if (!tankLaborFoot) return;
+  tankLaborFoot.hidden = false;
+  tankLaborFoot.innerHTML = `<tr class="tank-labor-grand">
+    <th scope="row">GRAND TOTAL</th>
+    <th class="tank-labor-time">${tankLaborTime(totals.total_running_display)}</th>
+    <th class="tank-labor-time">${tankLaborTime(totals.fab_labor_display)}</th>
+    <th class="tank-labor-time">${tankLaborTime(totals.assembly_labor_display)}</th>
+    <th class="tank-labor-time">${tankLaborTime(totals.dome_shop_labor_display)}</th>
+    <th class="tank-labor-time">${tankLaborTime(totals.department_total_display || totals.total_labor_display)}</th>
+  </tr>`;
+}
+
+async function loadTankLaborPhaseDetails(id) {
+  const host = document.getElementById(`tankLaborPhase-${id}`);
+  if (!host || host.dataset.loaded === '1') return;
+  if (tankLaborDetailCache.has(id)) {
+    host.innerHTML = tankLaborDetailCache.get(id);
+    host.dataset.loaded = '1';
+    host.classList.remove('muted');
     return;
   }
-  tankLaborBody.innerHTML = tanks
-    .map(
-      (r) => `<tr>
-        <td><strong>${escapeHtml(r.tank_number)}</strong></td>
-        <td>${escapeHtml(r.total_running_display || '0h 0m')}</td>
-        <td>${escapeHtml(r.total_labor_display || '0h 0m')}</td>
-      </tr>`
-    )
-    .join('');
-  if (tankLaborFoot) tankLaborFoot.hidden = false;
-  if (tankLaborTotalRunning) tankLaborTotalRunning.textContent = totals.total_running_display || '0h 0m';
-  if (tankLaborTotalLabor) tankLaborTotalLabor.textContent = totals.total_labor_display || '0h 0m';
+  host.textContent = 'Loading details…';
+  host.classList.add('muted');
+  const { res, data } = await apiJson(`/api/tanks/${id}/report`);
+  if (!document.getElementById(`tankLaborPhase-${id}`)) return;
+  const live = document.getElementById(`tankLaborPhase-${id}`);
+  if (!res.ok) {
+    live.textContent = (data && data.message) || 'Could not load tank details.';
+    return;
+  }
+  const html = renderTankLaborPhaseDetails(data);
+  tankLaborDetailCache.set(id, html);
+  live.innerHTML = html;
+  live.dataset.loaded = '1';
+  live.classList.remove('muted');
+}
+
+function toggleTankLaborDetail(id) {
+  const detail = tankLaborBody && tankLaborBody.querySelector(`tr[data-labor-detail="${id}"]`);
+  const toggle = tankLaborBody && tankLaborBody.querySelector(`button[data-labor-toggle="${id}"]`);
+  if (!detail || !toggle) return;
+  const open = detail.hidden;
+  detail.hidden = !open;
+  toggle.classList.toggle('is-open', open);
+  toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) void loadTankLaborPhaseDetails(id);
 }
 
 async function loadTankLaborReport() {
@@ -2639,7 +2769,7 @@ async function loadTankLaborReport() {
     `/api/manager/tank-labor-report?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`
   );
   if (!res.ok) {
-    tankLaborBody.innerHTML = `<tr><td colspan="3" class="muted">${escapeHtml(
+    tankLaborBody.innerHTML = `<tr><td colspan="6" class="muted">${escapeHtml(
       (data && data.message) || 'Could not load tank labor report.'
     )}</td></tr>`;
     if (tankLaborFoot) tankLaborFoot.hidden = true;
@@ -2793,6 +2923,17 @@ if (btnTankLaborLastMonth) {
 }
 if (tankLaborStart) tankLaborStart.addEventListener('change', () => void loadTankLaborReport());
 if (tankLaborEnd) tankLaborEnd.addEventListener('change', () => void loadTankLaborReport());
+if (tankLaborBody) {
+  tankLaborBody.addEventListener('click', (event) => {
+    const toggle = event.target.closest('[data-labor-toggle]');
+    if (toggle) {
+      toggleTankLaborDetail(toggle.getAttribute('data-labor-toggle'));
+      return;
+    }
+    const openReport = event.target.closest('[data-open-tank-report]');
+    if (openReport) void openTankReport(openReport.getAttribute('data-open-tank-report'));
+  });
+}
 const dailySummaryTable = document.getElementById('dailySummaryTable');
 if (dailySummaryTable) {
   dailySummaryTable.querySelectorAll('th[data-sort]').forEach((th) => {

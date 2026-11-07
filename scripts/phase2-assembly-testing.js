@@ -182,8 +182,17 @@ function tankTestingWorkOpen(row) {
 function tankAssemblyWorkOpen(row) {
   if (!row || tankAssemblyDone(row)) return false;
   const st = normalizeAssemblyTankStatus(row.status);
-  // Concurrent path always sets status to assembly_in_progress while Assembly owns the tank.
+  // Concurrent path usually keeps assembly_in_progress while Assembly owns the tank.
   if (st === ASSEMBLY_STATUSES.ASSEMBLY_IN_PROGRESS) return true;
+  // Testing START may set status=testing_in_progress while Assembly is still working —
+  // keep the Assembly card / ownership as long as this kiosk/machine still owns Assembly.
+  if (
+    st === ASSEMBLY_STATUSES.TESTING_IN_PROGRESS &&
+    row.assembly_started_at != null &&
+    row.assembly_machine_id != null
+  ) {
+    return true;
+  }
   // Testing FAIL/HOLD after a concurrent start — Assembly may still finish this cycle.
   if (st === ASSEMBLY_STATUSES.TESTING_FAILED && row.assembly_machine_id != null) return true;
   return false;
@@ -1804,18 +1813,29 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
     let sql;
     let params;
     if (forDropdown) {
+      // Dropdown = tanks that can RECEIVE a new Assembly assignment only.
+      // Do NOT list tanks already on an Assembly card / kiosk (even pre-START).
+      // Testing-without-Assembly remains selectable (parallel departments).
       sql = `SELECT ${TANK_SELECT_CORE}
              FROM tanks
              WHERE deleted_at IS NULL
                AND completed_at IS NULL
+               AND fab_completed_at IS NOT NULL
+               AND assembly_machine_id IS NULL
+               AND ${SQL_ASSEMBLY_NOT_DONE}
+               AND NOT EXISTS (
+                 SELECT 1 FROM assembly_kiosk_tanks akt
+                 WHERE akt.tank_id = tanks.id AND akt.left_at IS NULL
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM assembly_tank_teams att
+                 WHERE att.tank_id = tanks.id AND att.status = 'active'
+               )
                AND (
-                 (LOWER(TRIM(status)) = 'ready_for_assembly' AND assembly_machine_id IS NULL)
-                 OR LOWER(TRIM(status)) = 'assembly_in_progress'
+                 LOWER(TRIM(status)) = 'ready_for_assembly'
                  OR (
                    LOWER(TRIM(status)) IN ('testing_in_progress', 'testing_failed')
                    AND COALESCE(requires_test, FALSE) = TRUE
-                   AND fab_completed_at IS NOT NULL
-                   AND ${SQL_ASSEMBLY_NOT_DONE}
                  )
                )
              ORDER BY tank_number ASC`;
@@ -2602,6 +2622,58 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
               ? Number(tank.assembly_team_id)
               : null;
 
+      // Tank-based Assembly employees (no Team barcode): resolve BEFORE team-roster checks.
+      // Frontend may still send assembly_team_id (pool team) without use_tank_workers —
+      // prefer open assembly_tank_workers when present so START actually starts labor.
+      const explicitEmployeeIds = [];
+      const rawEmpIds = opts.employee_ids || opts.employeeIds || null;
+      if (Array.isArray(rawEmpIds)) {
+        for (const v of rawEmpIds) {
+          const n = Number(v);
+          if (Number.isInteger(n) && n > 0 && !explicitEmployeeIds.includes(n)) explicitEmployeeIds.push(n);
+        }
+      }
+      let tankWorkerEmployees = null;
+      if (stage === STAGE_CODES.ASSEMBLY && !explicitEmployeeIds.length) {
+        const preferTankWorkers =
+          opts.use_tank_workers === true ||
+          opts.tank_workers === true ||
+          opts.card_mode === 'tank_employees';
+        try {
+          const { rows: wrows } = await client.query(
+            `SELECT e.id, e.code, e.name
+             FROM assembly_tank_workers w
+             JOIN employees e ON e.id = w.employee_id
+             WHERE w.tank_id = $1 AND w.left_at IS NULL
+             ORDER BY LOWER(e.name), e.id`,
+            [tankId]
+          );
+          if (wrows.length) {
+            // Always use assigned tank workers when rows exist (individual-employee Assembly).
+            // Multiple tanks may run concurrently — each tank has its own worker set.
+            tankWorkerEmployees = wrows.map((r) => ({
+              id: Number(r.id),
+              code: r.code || null,
+              name: r.name,
+            }));
+          } else if (preferTankWorkers) {
+            // Explicit tank-employee START with no assignments — do not fall through to
+            // the empty ASSEMBLY-EMPLOYEE-POOL roster (looks like a silent/global lock).
+            return errResult(
+              409,
+              'no_roster',
+              'No employees assigned to this tank. Select employees and press Confirm Tank & Employees before START.',
+              { tank_id: tankId }
+            );
+          }
+        } catch (_err) {
+          tankWorkerEmployees = null;
+        }
+      }
+      const usingTankWorkers =
+        stage === STAGE_CODES.ASSEMBLY &&
+        (explicitEmployeeIds.length > 0 || (tankWorkerEmployees && tankWorkerEmployees.length > 0));
+
       if (stage === STAGE_CODES.ASSEMBLY) {
         if (!tank.assembly_started_at) {
           return errResult(
@@ -2610,26 +2682,59 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
             'Confirm the tank first. CONFIRM TANK starts Assembly Duration; START WORK starts labor.'
           );
         }
-        if (!Number.isInteger(teamId) || teamId <= 0) {
-          return errResult(409, 'no_team', 'Scan a Team barcode before starting work.');
-        }
-        // Several teams may work the same tank — each needs its own assignment
-        // and may hold at most one active Assembly session on it.
-        const teamLinks = await listActiveAssemblyTeamLinks(tankId, client);
-        if (!teamLinks.some((l) => l.team_id === teamId)) {
-          return errResult(
-            409,
-            'not_confirmed',
-            `Tank ${tank.tank_number} is not confirmed for this team. Select it and press CONFIRM TANK first.`
+        if (usingTankWorkers) {
+          // Pool / confirm team for session linkage — do not require Team barcode scan.
+          if (!Number.isInteger(teamId) || teamId <= 0) {
+            const { rows: poolRows } = await client.query(
+              `SELECT id FROM teams WHERE barcode = 'ASSEMBLY-EMPLOYEE-POOL' LIMIT 1`
+            );
+            if (poolRows[0]) teamId = Number(poolRows[0].id);
+          }
+          if (!Number.isInteger(teamId) || teamId <= 0) {
+            return errResult(
+              409,
+              'no_team',
+              'Confirm Tank & Employees first so Assembly can record labor against the tank.'
+            );
+          }
+          // Ensure pool/confirm team has an active assignment row for this tank.
+          await client.query(
+            `INSERT INTO assembly_tank_teams
+               (tank_id, team_id, machine_id, status, confirmed_at, created_at, updated_at)
+             VALUES ($1, $2, $3, 'active', $4::timestamptz, $4::timestamptz, $4::timestamptz)
+             ON CONFLICT DO NOTHING`,
+            [tankId, teamId, mid, opts.at || nowIso()]
           );
-        }
-        const teamActive = await getActiveAssemblySessionForTeam(tankId, teamId, null, client);
-        if (teamActive) {
-          return errResult(409, 'session_active', 'This team already has active Assembly labor on this tank.', {
-            session_id: Number(teamActive.id),
-            machine_id: Number(teamActive.machine_id),
-            stage: teamActive.stage,
-          });
+          const anyActiveAsm = await getActiveAssemblySessionForTeam(tankId, teamId, null, client);
+          if (anyActiveAsm) {
+            return errResult(409, 'session_active', 'This tank already has active Assembly labor.', {
+              session_id: Number(anyActiveAsm.id),
+              machine_id: Number(anyActiveAsm.machine_id),
+              stage: anyActiveAsm.stage,
+            });
+          }
+        } else {
+          if (!Number.isInteger(teamId) || teamId <= 0) {
+            return errResult(409, 'no_team', 'Scan a Team barcode before starting work.');
+          }
+          // Several teams may work the same tank — each needs its own assignment
+          // and may hold at most one active Assembly session on it.
+          const teamLinks = await listActiveAssemblyTeamLinks(tankId, client);
+          if (!teamLinks.some((l) => l.team_id === teamId)) {
+            return errResult(
+              409,
+              'not_confirmed',
+              `Tank ${tank.tank_number} is not confirmed for this team. Select it and press CONFIRM TANK first.`
+            );
+          }
+          const teamActive = await getActiveAssemblySessionForTeam(tankId, teamId, null, client);
+          if (teamActive) {
+            return errResult(409, 'session_active', 'This team already has active Assembly labor on this tank.', {
+              session_id: Number(teamActive.id),
+              machine_id: Number(teamActive.machine_id),
+              stage: teamActive.stage,
+            });
+          }
         }
       } else {
         const existing = await getActiveSessionForTank(tankId, mid, client);
@@ -2651,7 +2756,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         }
       }
       let rosterInfo = await resolveRosterForMachine({ id: mid });
-      if (Number.isInteger(teamId) && teamId > 0) {
+      if (Number.isInteger(teamId) && teamId > 0 && !usingTankWorkers) {
         const employeesForTeam = await listOpenShiftEmployeesLocal(teamId);
         rosterInfo = {
           ...rosterInfo,
@@ -2659,10 +2764,15 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
           employees: employeesForTeam,
         };
       }
-      if (!rosterInfo.teamId) {
-        return errResult(409, 'no_team', 'Assign a team to this machine before starting work.');
+
+      if (usingTankWorkers) {
+        rosterInfo = { ...rosterInfo, teamId };
+      } else {
+        if (!rosterInfo.teamId) {
+          return errResult(409, 'no_team', 'Assign a team to this machine before starting work.');
+        }
+        teamId = Number(rosterInfo.teamId);
       }
-      teamId = Number(rosterInfo.teamId);
       if (
         stage !== STAGE_CODES.ASSEMBLY &&
         tank.assembly_team_id != null &&
@@ -2675,14 +2785,29 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
           { assembly_team_id: Number(tank.assembly_team_id) }
         );
       }
-      const employees = Array.isArray(opts.employees) && opts.employees.length
+      let employees = Array.isArray(opts.employees) && opts.employees.length
         ? opts.employees
         : rosterInfo.employees;
+      if (tankWorkerEmployees && tankWorkerEmployees.length) {
+        employees = tankWorkerEmployees;
+      } else if (explicitEmployeeIds.length) {
+        const { rows: erows } = await client.query(
+          `SELECT id, code, name FROM employees WHERE id = ANY($1::bigint[])`,
+          [explicitEmployeeIds]
+        );
+        const byId = new Map(erows.map((r) => [Number(r.id), r]));
+        employees = explicitEmployeeIds
+          .map((id) => byId.get(id))
+          .filter(Boolean)
+          .map((r) => ({ id: Number(r.id), code: r.code || null, name: r.name }));
+      }
       if (!employees.length) {
         return errResult(
           409,
           'no_roster',
-          'No employees on shift for the assigned team. Team assign alone does not start labor.'
+          stage === STAGE_CODES.ASSEMBLY
+            ? 'No employees assigned to this tank. Confirm Tank & Employees first.'
+            : 'No employees on shift for the assigned team. Team assign alone does not start labor.'
         );
       }
 
@@ -2733,6 +2858,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         [nextStatus, stage, ts, tankId, teamId]
       );
 
+      const sessionTeamId = Number.isInteger(teamId) && teamId > 0 ? teamId : Number(rosterInfo.teamId) || null;
       const insertRes = await client.query(
         `INSERT INTO stage_labor_sessions
            (tank_id, machine_id, team_id, stage, status, started_at,
@@ -2742,7 +2868,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
         [
           tankId,
           mid,
-          rosterInfo.teamId,
+          sessionTeamId,
           stage,
           ts,
           starterId,
@@ -2765,7 +2891,7 @@ function createPhase2AssemblyTesting(pool, helpers = {}) {
               eid,
               emp.code || emp.employee_code || null,
               emp.name || emp.employee_name || null,
-              rosterInfo.teamId,
+              sessionTeamId,
               ts,
             ]
           );

@@ -62,10 +62,14 @@ function fmtWhen(iso) {
   });
 }
 
-function createDoc(title) {
-  const M = { top: 48, left: 42, right: 42, bottom: 48 };
+function createDoc(title, opts = {}) {
+  const landscape = opts.layout === 'landscape';
+  const M = landscape
+    ? { top: 36, left: 36, right: 36, bottom: 42 }
+    : { top: 48, left: 42, right: 42, bottom: 48 };
   const doc = new PDFDocument({
     size: 'LETTER',
+    layout: landscape ? 'landscape' : 'portrait',
     margins: M,
     bufferPages: true,
     autoFirstPage: true,
@@ -206,7 +210,10 @@ function drawTable(doc, M, y, columns, rows, opts = {}) {
       y = M.top;
       y = drawHeader(y);
     }
-    if (idx % 2 === 1) {
+    const emphasize = opts.emphasizeLast && idx === rows.length - 1;
+    if (emphasize) {
+      doc.rect(M.left, y, contentW, rh).fill('#e8eef5');
+    } else if (idx % 2 === 1) {
       doc.rect(M.left, y, contentW, rh).fill(COL.stripe);
     }
     doc.rect(M.left, y, contentW, rh).strokeColor(COL.rule).lineWidth(0.4).stroke();
@@ -214,9 +221,9 @@ function drawTable(doc, M, y, columns, rows, opts = {}) {
     for (const col of columns) {
       const text = String(row[col.key] == null || row[col.key] === '' ? '—' : row[col.key]);
       doc
-        .font('Helvetica')
+        .font(emphasize ? 'Helvetica-Bold' : 'Helvetica')
         .fontSize(fontSize)
-        .fillColor(COL.body)
+        .fillColor(emphasize ? COL.title : COL.body)
         .text(text, x + 4, y + rowPad, {
           width: col.width - 8,
           align: col.align || 'left',
@@ -847,36 +854,53 @@ function buildTankLaborRangePdfBuffer(report) {
   const start = (report && report.start_date) || '—';
   const end = (report && report.end_date) || '—';
   const rangeLabel = start === end ? start : `${start} → ${end}`;
-  const { doc, M, contentW } = createDoc(`Tank Labor Report — ${rangeLabel}`);
-  const w = contentW();
   const generatedAt = new Date().toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
   const tanks = (report && report.tanks) || [];
   const totals = (report && report.totals) || {};
-
+  const { doc, M, contentW } = createDoc(`Tank Labor Report — ${rangeLabel}`, { layout: 'landscape' });
+  const w = contentW();
   let y = drawTitleBlock(doc, M, w, {
     title: 'Tank Labor Report',
-    subtitle: 'Total running time and labor hours by tank',
+    subtitle: 'Department Labor Breakdown',
     metaLine: `Date range: ${rangeLabel}  ·  Tanks: ${tanks.length}  ·  Generated: ${generatedAt}`,
   });
-
   const cols = [
-    { key: 'tank', label: 'Tank Number', width: 160 },
-    { key: 'running', label: 'Total Running Time', width: 184, align: 'right' },
-    { key: 'labor', label: 'Total Labor Hours', width: 184, align: 'right' },
+    { key: 'tank', label: 'Tank Number', width: 150 },
+    { key: 'running', label: 'Total Running Time', width: 120, align: 'right' },
+    { key: 'fab', label: 'FAB Hours', width: 100, align: 'right' },
+    { key: 'assembly', label: 'Assembly Hours', width: 115, align: 'right' },
+    { key: 'dome', label: 'Dome Shop Hours', width: 120, align: 'right' },
+    { key: 'labor', label: 'Total Labor Hours', width: 115, align: 'right' },
   ];
-
   const rows = tanks.map((t) => ({
     tank: t.tank_number,
     running: t.total_running_display || '0h 0m',
-    labor: t.total_labor_display || '0h 0m',
+    fab: t.fab_labor_display || '0h 0m',
+    assembly: t.assembly_labor_display || '0h 0m',
+    dome: t.dome_shop_labor_display || '0h 0m',
+    labor: t.department_total_display || t.total_labor_display || '0h 0m',
   }));
   rows.push({
-    tank: 'TOTALS',
+    tank: 'GRAND TOTAL',
     running: totals.total_running_display || '0h 0m',
-    labor: totals.total_labor_display || '0h 0m',
+    fab: totals.fab_labor_display || '0h 0m',
+    assembly: totals.assembly_labor_display || '0h 0m',
+    dome: totals.dome_shop_labor_display || '0h 0m',
+    labor: totals.department_total_display || totals.total_labor_display || '0h 0m',
   });
-
-  y = drawTable(doc, M, y, cols, rows, { emptyText: 'No tanks with production activity in this date range.' });
+  y = drawTable(doc, M, y, cols, rows, {
+    emptyText: 'No tanks with production activity in this date range.',
+    emphasizeLast: rows.length > 0,
+    fontSize: 8,
+    maxRowH: 56,
+  });
+  y = ensureSpace(doc, M, y, 36);
+  doc.font('Helvetica').fontSize(8).fillColor(COL.muted).text(
+    'FAB hours include Dome Install. Dome Shop hours are Dome Create plus Bulkhead manufacturing labor. Assembly hours include correction labor. Testing is excluded. Total Labor Hours is the sum of the department columns. Running time is separate from labor hours.',
+    M.left,
+    y,
+    { width: w }
+  );
   return finalizePdf(doc);
 }
 

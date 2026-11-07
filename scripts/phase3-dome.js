@@ -2446,8 +2446,9 @@ function createPhase3Dome(pool, helpers = {}) {
 
   /**
    * Manager-only: detach an installed (finished) dome from a tank.
-   * Soft-cancels the installation row (history preserved). Quarantines the dome so it
-   * cannot return to available inventory / be re-installed. Does not delete labor.
+   * Soft-cancels the installation row (history preserved) and returns the dome to
+   * Dome Inventory as Available for reuse on another tank. Does not delete labor.
+   * Dual active installs remain blocked by idx_dome_installations_one_live + inventory_status.
    */
   async function undoDomeInstall(body = {}, performedBy = 'manager') {
     if (!(await isReady())) return notReady();
@@ -2567,11 +2568,7 @@ function createPhase3Dome(pool, helpers = {}) {
       }
 
       const ts = nowIso();
-      const quarantineReady = await isDomeQuarantineReady(client);
-      const quarantineReason = `Manager removed installed dome from Tank ${inst.tank_number}: ${reason}`.slice(
-        0,
-        500
-      );
+      const removeNote = `Manager removed installed dome from Tank ${inst.tank_number}: ${reason}`.slice(0, 500);
 
       await client.query(
         `UPDATE dome_installations
@@ -2580,46 +2577,20 @@ function createPhase3Dome(pool, helpers = {}) {
         [inst.id, ts, reason]
       );
 
-      let nextInventory = 'quarantined';
-      let softDeleted = false;
-      if (quarantineReady) {
-        await client.query(
-          `UPDATE domes
-           SET inventory_status = 'quarantined',
-               installed_at = NULL,
-               installed_tank_id = NULL,
-               installed_tank_number = NULL,
-               installed_piece_number = NULL,
-               updated_at = $2::timestamptz
-           WHERE id = $1`,
-          [dome.id, ts]
-        );
-      } else if (await softDeleteColumnsReady()) {
-        // Fallback before migrate-dome-quarantine.sql is applied: soft-delete so the dome
-        // cannot reappear in available inventory / FAB picker.
-        softDeleted = true;
-        nextInventory = dome.inventory_status;
-        await client.query(
-          `UPDATE domes
-           SET inventory_status = 'installed',
-               installed_at = NULL,
-               installed_tank_id = NULL,
-               installed_tank_number = NULL,
-               installed_piece_number = NULL,
-               deleted_at = $2::timestamptz,
-               deleted_by = $3,
-               deleted_reason = $4,
-               updated_at = $2::timestamptz
-           WHERE id = $1`,
-          [dome.id, ts, by, quarantineReason]
-        );
-      } else {
-        return errResult(
-          503,
-          'quarantine_not_ready',
-          'Dome quarantine is not available yet. Apply scripts/migrate-dome-quarantine.sql, then retry.'
-        );
-      }
+      // Return to Available inventory for reuse (Cody workflow). Keep production_status =
+      // completed. Clear live install pointers. Do NOT quarantine or soft-delete on remove —
+      // managers delete from Inventory separately when a dome is no longer needed.
+      await client.query(
+        `UPDATE domes
+         SET inventory_status = 'available',
+             installed_at = NULL,
+             installed_tank_id = NULL,
+             installed_tank_number = NULL,
+             installed_piece_number = NULL,
+             updated_at = $2::timestamptz
+         WHERE id = $1`,
+        [dome.id, ts]
+      );
 
       // Legacy Ready-for-Dome tanks: if no installed domes remain, reopen Ready for Dome Install.
       let tankStatus = null;
@@ -2667,8 +2638,9 @@ function createPhase3Dome(pool, helpers = {}) {
           piece_number: Number(inst.piece_number),
           installation_id: Number(inst.id),
           reason,
+          remove_note: removeNote,
           previous_status: inst.status,
-          quarantine: quarantineReady ? 'quarantined' : softDeleted ? 'soft_deleted' : null,
+          returned_to_inventory: 'available',
           tank_status_after: tankStatus,
           tank_status_updated: tankStatusUpdated,
         },
@@ -2686,19 +2658,15 @@ function createPhase3Dome(pool, helpers = {}) {
         tank_status_updated: tankStatusUpdated,
         dome: mapDome({
           ...dome,
-          inventory_status: quarantineReady ? 'quarantined' : nextInventory,
+          inventory_status: 'available',
           installed_at: null,
           installed_tank_id: null,
           installed_tank_number: null,
           installed_piece_number: null,
-          deleted_at: softDeleted ? ts : dome.deleted_at,
-          deleted_by: softDeleted ? by : dome.deleted_by,
-          deleted_reason: softDeleted ? quarantineReason : dome.deleted_reason,
         }),
-        quarantine_mode: quarantineReady ? 'quarantined' : 'soft_deleted',
-        message: quarantineReady
-          ? `Dome ${inst.dome_number} removed from Tank ${inst.tank_number} and quarantined (not available for install).`
-          : `Dome ${inst.dome_number} removed from Tank ${inst.tank_number} and quarantined via soft-delete (apply migrate-dome-quarantine.sql for inventory quarantine status).`,
+        returned_to_inventory: true,
+        inventory_status: 'available',
+        message: `Dome ${inst.dome_number} removed from Tank ${inst.tank_number} and returned to Dome Inventory as Available.`,
       });
     });
   }

@@ -5057,6 +5057,14 @@ const phase2 = createPhase2AssemblyTesting(pool, {
   },
 });
 
+/** Assembly kiosk tank-based employees (no Team barcode). */
+const { createAssemblyEmployeeWorkflow } = require('./scripts/phase2-assembly-employees');
+const assemblyEmployees = createAssemblyEmployeeWorkflow(pool, {
+  nowIso,
+  phase2,
+  isEmployeeShopsReady: () => isEmployeeShopsReady(),
+});
+
 /** Temporary Dome Shop Start handoff (close prior labor/memberships; never touches home team_members). */
 const { createPhase3EmployeeClaim } = require('./scripts/phase3-employee-claim');
 const phase3Claim = createPhase3EmployeeClaim(pool, { nowIso, phase2 });
@@ -6991,9 +6999,49 @@ app.get('/api/kiosk/assembly/config', async (req, res) => {
     } catch (err) {
       console.warn('[assembly config] bulkhead summaries (noncritical):', err.message);
     }
+
+    // Tank-based employee workflow (one card per tank; no Team barcode required).
+    let assembly_tank_cards = [];
+    let assembly_shop_employees = [];
+    let assembly_employee_mode = false;
+    let shop_assignment_ready = false;
+    try {
+      shop_assignment_ready = await isEmployeeShopsReady();
+    } catch (_err) {
+      shop_assignment_ready = false;
+    }
+    // Always load the employee picker list (Dome-style). Do not gate on tank-worker tables —
+    // an empty dropdown with a redesigned UI usually means this list never loaded.
+    try {
+      assembly_shop_employees = await assemblyEmployees.listAssemblyShopEmployees();
+    } catch (err) {
+      console.warn('[assembly config] shop employees (noncritical):', err.message);
+      assembly_shop_employees = [];
+    }
+    try {
+      assembly_employee_mode = await assemblyEmployees.isReady();
+      if (assembly_employee_mode) {
+        assembly_tank_cards = await assemblyEmployees.listAssemblyTankCards(machine.id);
+        const cardIds = assembly_tank_cards.map((t) => Number(t.id)).filter((n) => n > 0);
+        if (cardIds.length) {
+          const bhMap = await phase3Bulkhead.tankBulkheadSummaries(cardIds);
+          for (const t of assembly_tank_cards) {
+            const s = bhMap.get(Number(t.id));
+            if (s) t.bulkhead_summary = s;
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[assembly config] tank employees (noncritical):', err.message);
+    }
+
     // Keep eligible_tanks / confirmed_tanks from getMachineConfig (dropdown = FAB-ready only).
     return res.json({
       ...body,
+      assembly_employee_mode,
+      assembly_shop_employees,
+      assembly_tank_cards,
+      shop_assignment_ready,
       workflow: 'assembly_testing',
       pause_actions: ['BREAK', 'LUNCH'],
       end_shift: 'END_SHIFT',
@@ -7212,11 +7260,39 @@ app.post('/api/kiosk/assembly/action', async (req, res) => {
         error: 'use_confirm_endpoint',
         message: 'Use the CONFIRM TANK button (dedicated confirm API). Do not send confirm_tank through /action.',
       });
+    } else if (action === 'confirm_tank_employees') {
+      result = await assemblyEmployees.confirmTankWithEmployees(machine, {
+        tank_id: body.tank_id,
+        employee_ids: body.employee_ids || body.employees,
+        performed_by: 'assembly_kiosk',
+      });
+    } else if (action === 'manage_tank_employees' || action === 'set_tank_employees') {
+      result = await assemblyEmployees.manageTankEmployees(machine, {
+        tank_id: body.tank_id,
+        add_employee_ids: body.add_employee_ids || body.add,
+        remove_employee_ids: body.remove_employee_ids || body.remove,
+        performed_by: 'assembly_kiosk',
+      });
+    } else if (action === 'move_employee_tank') {
+      result = await assemblyEmployees.moveEmployeeBetweenTanks(machine, {
+        employee_id: body.employee_id,
+        from_tank_id: body.from_tank_id,
+        to_tank_id: body.to_tank_id,
+        performed_by: 'assembly_kiosk',
+      });
     } else if (action === 'start_work' || action === 'start') {
+      const useTankWorkers =
+        body.use_tank_workers === true ||
+        body.tank_workers === true ||
+        body.card_mode === 'tank_employees' ||
+        (body.team_id == null && body.teamId == null && body.tank_id != null);
       result = await phase2.startWork(machine, {
         tank_id: body.tank_id,
         stage: body.stage || 'ASSEMBLY',
         team_id: body.team_id != null ? body.team_id : body.teamId,
+        employee_ids: body.employee_ids,
+        use_tank_workers: useTankWorkers,
+        card_mode: body.card_mode || null,
         employee: confirmerFromBody(body),
       });
     } else if (action === 'stop_work' || action === 'stop') {
@@ -7264,45 +7340,130 @@ app.post('/api/kiosk/assembly/action', async (req, res) => {
     } else if (action === 'pause' || action === 'break' || action === 'lunch') {
       const reason =
         action === 'break' ? 'BREAK' : action === 'lunch' ? 'LUNCH' : String(body.reason || 'PAUSE').trim() || 'PAUSE';
-      result = await phase2.pauseStationLabor(machine, reason, {
-        team_id: body.team_id != null ? body.team_id : body.teamId,
-      });
-    } else if (action === 'resume') {
-      result = await phase2.resumeStationLabor(machine, {
-        team_id: body.team_id != null ? body.team_id : body.teamId,
-      });
-    } else if (action === 'employee_out') {
-      result = await phase2.employeeOutFromStage(machine, {
-        employee_id: body.employee_id,
-      });
-    } else if (action === 'end_shift') {
-      const teamId = body.team_id != null ? body.team_id : body.teamId;
-      const paused = await phase2.pauseStationLabor(machine, 'END_SHIFT', { team_id: teamId });
-      if (!paused.ok) return res.status(paused.status).json(paused.body);
-      // Close only this team's kiosk presence when team_id provided.
-      if (Number.isInteger(Number(teamId)) && Number(teamId) > 0) {
-        await phase2.endAssemblyTeamMoves(Number(teamId));
-        await pool.query(
-          `UPDATE assembly_kiosk_teams
-           SET left_at = NOW(), status = 'left', updated_at = NOW()
-           WHERE machine_id = $1 AND team_id = $2 AND left_at IS NULL`,
-          [machine.id, Number(teamId)]
-        );
-      } else if (typeof phase1.clearMachineAssignment === 'function') {
-        await phase1.clearMachineAssignment(machine.id);
+      const tankId = body.tank_id != null ? Number(body.tank_id) : null;
+      if (Number.isInteger(tankId) && tankId > 0 && action === 'lunch') {
+        // Tank-scoped lunch: stop THIS tank's Assembly labor only, keep employee assignments.
+        // Tag notes=LUNCH so labor reports exclude the pause and refresh can recover RESUME.
+        const stopped = await phase2.stopWork(machine, { tank_id: tankId, notes: 'LUNCH' });
+        const lunchFlag = await assemblyEmployees.setKioskTankLunch(machine.id, tankId, true);
+        if (
+          (stopped.ok ||
+            (stopped.body && ['no_session', 'not_found'].includes(String(stopped.body.error)))) &&
+          lunchFlag.ok
+        ) {
+          result = {
+            ok: true,
+            status: 200,
+            body: {
+              ok: true,
+              action: 'pause_station',
+              reason: 'LUNCH',
+              tank_id: tankId,
+              stopped_sessions: (stopped.body && stopped.body.session) || null,
+              message: 'Tank on Lunch — this tank card only. Press Resume when ready.',
+            },
+          };
+        } else if (!lunchFlag.ok) {
+          result = lunchFlag;
+        } else {
+          result = stopped;
+        }
+      } else {
+        result = await phase2.pauseStationLabor(machine, reason, {
+          team_id: body.team_id != null ? body.team_id : body.teamId,
+        });
       }
-      result = {
-        ok: true,
-        status: 200,
-        body: {
+    } else if (action === 'resume') {
+      const tankId = body.tank_id != null ? Number(body.tank_id) : null;
+      if (Number.isInteger(tankId) && tankId > 0) {
+        // Resume labor FIRST; only clear lunch status after success so RESUME stays visible
+        // if start fails (busy employees / no roster). Does not touch other tanks.
+        result = await phase2.startWork(machine, {
+          tank_id: tankId,
+          stage: 'ASSEMBLY',
+          use_tank_workers: true,
+          card_mode: 'tank_employees',
+          employee: confirmerFromBody(body),
+        });
+        if (!result.ok && result.body && result.body.error === 'session_active') {
+          await assemblyEmployees.setKioskTankLunch(machine.id, tankId, false);
+          result = {
+            ok: true,
+            status: 200,
+            body: {
+              ok: true,
+              action: 'resume_station',
+              tank_id: tankId,
+              message: 'Tank resumed from Lunch.',
+            },
+          };
+        } else if (result.ok) {
+          await assemblyEmployees.setKioskTankLunch(machine.id, tankId, false);
+          result = {
+            ok: true,
+            status: 200,
+            body: {
+              ...result.body,
+              action: 'resume_station',
+              tank_id: tankId,
+              message: 'Tank resumed — Assembly labor continues for this card.',
+            },
+          };
+        }
+        // On failure (no_roster / employee_busy / etc.): keep lunch status so RESUME remains.
+      } else {
+        result = await phase2.resumeStationLabor(machine, {
+          team_id: body.team_id != null ? body.team_id : body.teamId,
+        });
+      }
+    } else if (action === 'employee_out') {
+      const tankId = body.tank_id != null ? Number(body.tank_id) : null;
+      // Tank-card Employee Out = stop working on THIS tank only (not overall shift).
+      if (Number.isInteger(tankId) && tankId > 0) {
+        result = await assemblyEmployees.employeeOutFromTank(machine, {
+          tank_id: tankId,
+          employee_id: body.employee_id,
+          performed_by: 'assembly_kiosk',
+        });
+      } else {
+        // Legacy team-card path: leave active stage labor on this machine.
+        result = await phase2.employeeOutFromStage(machine, {
+          employee_id: body.employee_id,
+        });
+      }
+    } else if (action === 'end_shift') {
+      const tankId = body.tank_id != null ? Number(body.tank_id) : null;
+      if (Number.isInteger(tankId) && tankId > 0) {
+        result = await assemblyEmployees.endShiftForTank(machine, { tank_id: tankId });
+      } else {
+        const teamId = body.team_id != null ? body.team_id : body.teamId;
+        const paused = await phase2.pauseStationLabor(machine, 'END_SHIFT', { team_id: teamId });
+        if (!paused.ok) return res.status(paused.status).json(paused.body);
+        // Close only this team's kiosk presence when team_id provided.
+        if (Number.isInteger(Number(teamId)) && Number(teamId) > 0) {
+          await phase2.endAssemblyTeamMoves(Number(teamId));
+          await pool.query(
+            `UPDATE assembly_kiosk_teams
+             SET left_at = NOW(), status = 'left', updated_at = NOW()
+             WHERE machine_id = $1 AND team_id = $2 AND left_at IS NULL`,
+            [machine.id, Number(teamId)]
+          );
+        } else if (typeof phase1.clearMachineAssignment === 'function') {
+          await phase1.clearMachineAssignment(machine.id);
+        }
+        result = {
           ok: true,
-          action: 'end_shift',
-          ...paused.body,
-          message: Number.isInteger(Number(teamId)) && Number(teamId) > 0
-            ? 'Team labor stopped and team removed from this Assembly kiosk.'
-            : 'Station labor stopped and team assignment cleared.',
-        },
-      };
+          status: 200,
+          body: {
+            ok: true,
+            action: 'end_shift',
+            ...paused.body,
+            message: Number.isInteger(Number(teamId)) && Number(teamId) > 0
+              ? 'Team labor stopped and team removed from this Assembly kiosk.'
+              : 'Station labor stopped and team assignment cleared.',
+          },
+        };
+      }
     } else {
       return res.status(400).json({ ok: false, error: 'unknown_action', message: `Unknown action: ${action}` });
     }

@@ -179,22 +179,43 @@
       </header>
       <section class="kiosk-card scan-panel">
         <div class="scan-panel-head">
-          <h2 id="workflowTitle" data-i18n="ak.scanTitle">Scan Team or Employee</h2>
-          <p id="workflowSub" data-i18n="ak.scanSub">Scan a TEAM barcode to add an independent team card. Each team selects its own tank. Lunch / Resume / Employee Out are per team.</p>
+          <h2 id="workflowTitle" data-i18n="ak.scanTitle">Assembly — Select Tank &amp; Employees</h2>
+          <p id="workflowSub" data-i18n="ak.scanSub">Select a FAB completed tank and employees, then Confirm. One card per tank. Labor starts only when you press START.</p>
+        </div>
+        <div id="assignPanel" class="ak-select-panel" style="margin-top:12px">
+          <label for="assignTankSelect" data-i18n="ak.selectFabTank">Select FAB Completed Tank</label>
+          <div class="ak-select-row">
+            <select id="assignTankSelect" aria-label="Select FAB Completed Tank">
+              <option value="">Select FAB completed tank…</option>
+            </select>
+          </div>
+          <label for="assignEmployeeSelect" data-i18n="ak.selectEmployees">Select Employees</label>
+          <div class="ak-select-row">
+            <select id="assignEmployeeSelect" aria-label="Select Employees">
+              <option value="">Add employee…</option>
+            </select>
+            <button type="button" class="btn-secondary btn-touch" id="btnAddEmployee" data-i18n="ak.btn.addEmployee">Add</button>
+          </div>
+          <p id="assignEmployeesEmpty" class="ak-hint" hidden data-i18n="ak.msg.noEligibleEmployees">
+            No eligible Assembly employees are available. Ask a manager to assign employees to the Assembly shop.
+          </p>
+          <div id="assignEmployeeChips" class="ak-team-badges" style="justify-content:flex-start;min-height:28px"></div>
+          <div class="ak-select-row">
+            <button type="button" class="btn-primary btn-touch" id="btnConfirmTankEmployees" data-i18n="ak.btn.confirmTankEmployees">CONFIRM TANK &amp; EMPLOYEES</button>
+          </div>
+          <p class="ak-hint" data-i18n="ak.hintConfirmNoLabor">Confirm does not start labor. Press START on the tank card when ready.</p>
         </div>
         <input id="scannerTrap" type="text" class="scanner-trap-input" tabindex="0" inputmode="none" autocomplete="off" readonly aria-label="Scanner" />
-        <form id="scanForm" class="scan-input-row" autocomplete="off">
-          <label for="manualBarcodeInput" data-i18n="ak.scanLabel">Scan Team / Employee only</label>
+        <form id="scanForm" class="scan-input-row" autocomplete="off" hidden>
+          <label for="manualBarcodeInput" data-i18n="ak.scanLabel">Optional employee badge scan</label>
           <div class="scan-input-wrap scan-input-wrap--scanner">
-            <input id="manualBarcodeInput" type="text" placeholder="TEAM or EMPLOYEE barcode only" data-i18n-placeholder="ak.scanPlaceholder" autocomplete="off" />
+            <input id="manualBarcodeInput" type="text" placeholder="Employee badge (optional)" data-i18n-placeholder="ak.scanPlaceholder" autocomplete="off" />
             <button id="scanButton" type="button" class="scan-submit-btn" data-i18n="ak.scanBtn">Scan</button>
           </div>
         </form>
         <p id="scanWarning" class="scan-warning" role="alert" hidden></p>
-        <p class="ak-hint" data-i18n="ak.hintTeamScan">Team scan does not start labor. Confirm tank, then press START.</p>
-        <p class="ak-hint" data-i18n="ak.hintSelectTeam">Tap a team card to select it — employee badge scans join the selected team for this shift.</p>
         <div id="teamCards" class="ak-team-grid" aria-live="polite"></div>
-        <div id="teamsEmpty" class="ak-empty" data-i18n="ak.noTeams">No teams on this kiosk yet. Scan a TEAM barcode to begin.</div>
+        <div id="teamsEmpty" class="ak-empty" data-i18n="ak.noTeams">No Assembly tanks on this kiosk yet. Select a tank and employees above, then Confirm.</div>
         <section id="returnRemoved" class="ak-return" hidden>
           <h2 class="ak-recent-title" data-i18n="ak.returnTitle">Return Tank to Assembly</h2>
           <div class="ak-select-row">
@@ -257,8 +278,30 @@
       </div>
     </div>
 
+    <div id="manageEmployeesModal" class="modal-note employee-out-modal" hidden>
+      <div class="modal-note-card employee-out-card">
+        <h3 data-i18n="ak.manageEmployeesTitle">Manage Employees</h3>
+        <p id="manageEmployeesHint" class="ak-hint" data-i18n="ak.manageEmployeesHint">Add or remove employees on this tank. Removing stops labor on this tank only.</p>
+        <p id="manageEmployeesTank" class="ak-hint"></p>
+        <h4 class="ak-roster-label" data-i18n="ak.manageOnTank">On this tank</h4>
+        <div id="manageEmployeesCurrent" class="employee-out-list"></div>
+        <p id="manageEmployeesCurrentEmpty" class="employee-out-empty" hidden data-i18n="ak.manageNoneOnTank">No employees on this tank.</p>
+        <h4 class="ak-roster-label" data-i18n="ak.manageAddLabel">Add employee</h4>
+        <div class="ak-select-row">
+          <select id="manageEmployeesSelect" aria-label="Add employee">
+            <option value="">Select employee…</option>
+          </select>
+          <button type="button" class="btn-secondary btn-touch" id="btnManageAddEmployee" data-i18n="ak.btn.addEmployee">Add</button>
+        </div>
+        <p id="manageEmployeesError" class="scan-warning" role="alert" hidden></p>
+        <div class="employee-out-actions">
+          <button type="button" class="btn-primary" id="btnManageEmployeesDone" data-i18n="ak.done">Done</button>
+        </div>
+      </div>
+    </div>
+
     <script src="/i18n.js"></script>
-    <script src="/assembly-kiosk-i18n.js?v=5"></script>
-    <script src="/assembly-kiosk.js?v=bulkhead-spec-1"></script>
+    <script src="/assembly-kiosk-i18n.js?v=8"></script>
+    <script src="/assembly-kiosk.js?v=start-tank-workers-1"></script>
   </body>
 </html>

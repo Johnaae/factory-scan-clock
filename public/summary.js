@@ -158,8 +158,6 @@ const laborEnd = document.getElementById('laborEnd');
 const laborBody = document.getElementById('laborBody');
 const laborFoot = document.getElementById('laborFoot');
 const laborMeta = document.getElementById('laborMeta');
-const laborTotalRunning = document.getElementById('laborTotalRunning');
-const laborTotalLabor = document.getElementById('laborTotalLabor');
 const btnLaborRefresh = document.getElementById('btnLaborRefresh');
 const btnLaborCsv = document.getElementById('btnLaborCsv');
 const btnLaborPdf = document.getElementById('btnLaborPdf');
@@ -196,22 +194,32 @@ function renderLaborReport(data) {
   }
   if (!tanks.length) {
     laborBody.innerHTML =
-      '<tr><td colspan="3" class="muted">No tanks with production activity in this date range.</td></tr>';
-    if (laborFoot) laborFoot.hidden = true;
-    return;
-  }
-  laborBody.innerHTML = tanks
-    .map(
-      (r) => `<tr>
+      '<tr><td colspan="6" class="muted">No tanks with production activity in this date range.</td></tr>';
+  } else {
+    laborBody.innerHTML = tanks
+      .map(
+        (r) => `<tr>
         <td><strong>${escapeHtml(r.tank_number)}</strong></td>
         <td>${escapeHtml(r.total_running_display || '0h 0m')}</td>
-        <td>${escapeHtml(r.total_labor_display || '0h 0m')}</td>
+        <td>${escapeHtml(r.fab_labor_display || '0h 0m')}</td>
+        <td>${escapeHtml(r.assembly_labor_display || '0h 0m')}</td>
+        <td>${escapeHtml(r.dome_shop_labor_display || '0h 0m')}</td>
+        <td>${escapeHtml(r.department_total_display || r.total_labor_display || '0h 0m')}</td>
       </tr>`
-    )
-    .join('');
-  if (laborFoot) laborFoot.hidden = false;
-  if (laborTotalRunning) laborTotalRunning.textContent = totals.total_running_display || '0h 0m';
-  if (laborTotalLabor) laborTotalLabor.textContent = totals.total_labor_display || '0h 0m';
+      )
+      .join('');
+  }
+  if (laborFoot) {
+    laborFoot.hidden = false;
+    laborFoot.innerHTML = `<tr>
+      <th scope="row">GRAND TOTAL</th>
+      <th>${escapeHtml(totals.total_running_display || '0h 0m')}</th>
+      <th>${escapeHtml(totals.fab_labor_display || '0h 0m')}</th>
+      <th>${escapeHtml(totals.assembly_labor_display || '0h 0m')}</th>
+      <th>${escapeHtml(totals.dome_shop_labor_display || '0h 0m')}</th>
+      <th>${escapeHtml(totals.department_total_display || totals.total_labor_display || '0h 0m')}</th>
+    </tr>`;
+  }
 }
 
 async function loadLaborReport() {
@@ -227,7 +235,7 @@ async function loadLaborReport() {
     );
     renderLaborReport(data);
   } catch (err) {
-    laborBody.innerHTML = `<tr><td colspan="3" class="muted">${escapeHtml(err.message || 'Load failed.')}</td></tr>`;
+    laborBody.innerHTML = `<tr><td colspan="6" class="muted">${escapeHtml(err.message || 'Load failed.')}</td></tr>`;
     if (laborFoot) laborFoot.hidden = true;
     if (laborMeta) laborMeta.textContent = '';
   }

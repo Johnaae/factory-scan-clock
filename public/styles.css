@@ -3254,6 +3254,94 @@ textarea:focus-visible,
   background: #f8fafc;
 }
 
+.manager-layout .manager-table tfoot tr.tank-labor-grand th {
+  background: #e8eef5;
+  font-weight: 700;
+  color: #0f172a;
+}
+.tank-labor-table .tank-labor-time {
+  text-align: right;
+  white-space: nowrap;
+}
+.tank-labor-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+.tank-labor-toggle .chevron {
+  flex: 0 0 auto;
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid #64748b;
+  transition: transform 0.12s ease;
+}
+.tank-labor-toggle.is-open .chevron {
+  transform: rotate(90deg);
+}
+.manager-layout .tank-labor-table tbody tr.tank-labor-detail td {
+  background: #f8fafc;
+  border-top: 0;
+  padding: 0 12px 12px 28px;
+}
+.tank-labor-detail-panel {
+  display: grid;
+  gap: 10px;
+  padding: 4px 0 2px;
+}
+.tank-labor-dept-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.tank-labor-dept-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+  padding: 8px 10px;
+}
+.tank-labor-dept-card h4 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: #475569;
+}
+.tank-labor-dept-card p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.tank-labor-phase-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+}
+.tank-labor-phase-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+  border-bottom: 1px solid #e2e8f0;
+  padding-bottom: 3px;
+}
+@media (max-width: 800px) {
+  .tank-labor-dept-grid {
+    grid-template-columns: 1fr;
+  }
+}
 .manager-layout .manager-table tbody tr:hover td,
 .manager-layout .manager-table-wrap table tbody tr:hover td {
   background: #f1f5f9;
